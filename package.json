@@ -1,0 +1,14 @@
+{
+  "name": "pansis-toolbox-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "python3 scripts/dev.py",
+    "backend": "uvicorn backend.app.main:app --reload --port 8000",
+    "frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "generate:tools": "python3 scripts/generate_tool_views.py",
+    "check:tools": "python3 scripts/check_tools.py",
+    "test": "pytest"
+  }
+}

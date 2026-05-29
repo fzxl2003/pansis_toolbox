@@ -1,0 +1,34 @@
+{
+  "id": "text_cleaner",
+  "name": "文本清洗",
+  "description": "清理多余空白、空行并支持大小写转换的轻量文本工具。",
+  "version": "1.0.0",
+  "enabled": true,
+  "category": "text",
+  "icon": "text",
+  "entry": {
+    "frontend": "frontend/index.tsx",
+    "backend": "backend/router.py"
+  },
+  "api": {
+    "prefix": "/api/tools/text-cleaner"
+  },
+  "widgets": [
+    {
+      "id": "summary",
+      "name": "文本清洗状态",
+      "type": "summary",
+      "backend": "backend/widget.py",
+      "defaultSize": {
+        "w": 2,
+        "h": 1
+      }
+    }
+  ],
+  "dependencies": {},
+  "permissions": {
+    "filesystem": false,
+    "network": false,
+    "longRunningTask": false
+  }
+}

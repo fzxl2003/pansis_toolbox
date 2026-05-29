@@ -1,5 +1,37 @@
+from pathlib import Path
+
 from fastapi import Request
+
+from backend.app.core.config import get_settings
+from backend.app.core.errors import ToolboxError
+from backend.app.services.auth_service import User, get_user_by_session_token
+
+
+def get_optional_user(request: Request) -> User | None:
+    token = request.cookies.get(get_settings().session_cookie_name)
+    return get_user_by_session_token(token)
+
+
+def require_user(request: Request) -> User:
+    user = get_optional_user(request)
+    if user is None:
+        raise ToolboxError(
+            "LOGIN_REQUIRED",
+            "请先登录后再使用该功能",
+            status_code=401,
+            extra={"loginUrl": "/login"},
+        )
+    return user
+
+
+def require_user_tool_data_dir(request: Request, tool_id: str) -> Path:
+    user = require_user(request)
+    safe_tool_id = tool_id.replace("/", "_").replace("\\", "_")
+    path = get_settings().storage_dir / "user_data" / user.id / "tools" / safe_tool_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def get_current_user_id(request: Request) -> str:
-    return request.headers.get("x-user-id", "local")
+    user = get_optional_user(request)
+    return user.id if user else "anonymous"

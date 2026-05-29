@@ -25,8 +25,17 @@ npm run dev
 ```bash
 conda create -n pansis_toolbox python=3.11
 conda activate pansis_toolbox
-conda install fastapi uvicorn pydantic-settings pytest httpx nodejs
+conda install fastapi uvicorn pydantic-settings pytest httpx python-multipart nodejs
 ```
+
+默认开发账号：
+
+```text
+用户名：admin
+密码：admin123
+```
+
+可通过 `.env` 中的 `DEFAULT_ADMIN_USERNAME`、`DEFAULT_ADMIN_PASSWORD` 和 `DEFAULT_ADMIN_DISPLAY_NAME` 覆盖。
 
 安装前端依赖：
 
@@ -88,6 +97,18 @@ scripts/              工具创建、检查、注册表生成和开发启动脚�
 storage/              上传、输出、临时文件和本地数据目录
 ```
 
+平台数据库默认位于：
+
+```text
+storage/data/platform.db
+```
+
+用户工具数据默认位于：
+
+```text
+storage/user_data/{user_id}/tools/{tool_id}/
+```
+
 示例工具：
 
 ```text
@@ -116,7 +137,7 @@ python scripts/generate_tool_views.py
 
 ## 当前示例
 
-`text_cleaner` 是 MVP 示例工具，提供文本清洗能力：
+`text_cleaner` 是匿名可用的 MVP 示例工具，提供文本清洗能力：
 
 - 清理首尾空白。
 - 合并连续空白。
@@ -130,6 +151,44 @@ python scripts/generate_tool_views.py
 POST /api/tools/text-cleaner/clean
 GET  /api/widgets/text_cleaner.summary/data
 ```
+
+`memo_demo` 是需要登录的用户数据示例工具：
+
+- 上传 `.txt` 文件。
+- 保存到当前登录用户自己的工具数据目录。
+- 查看、预览、删除自己的备忘录。
+- 匿名访问用户数据接口时返回 `LOGIN_REQUIRED`，前端显示登录面板。
+
+接口示例：
+
+```text
+POST   /api/tools/memo-demo/upload
+GET    /api/tools/memo-demo/memos
+GET    /api/tools/memo-demo/memos/{memo_id}
+DELETE /api/tools/memo-demo/memos/{memo_id}
+```
+
+## 登录与用户数据
+
+后端提供轻量登录接口：
+
+```text
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/auth/me
+GET  /api/auth/sso/login
+GET  /api/auth/sso/callback
+```
+
+工具后端如果需要用户专属数据，应调用：
+
+```python
+from backend.app.core.security import require_user_tool_data_dir
+
+data_dir = require_user_tool_data_dir(request, "tool_id")
+```
+
+未登录时该函数会返回统一的 `LOGIN_REQUIRED` 错误；已登录时会创建并返回当前用户的工具专属目录。
 
 ## 验证状态
 

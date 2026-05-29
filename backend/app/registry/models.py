@@ -42,6 +42,7 @@ class ToolPermissions(BaseModel):
     filesystem: bool = False
     network: bool = False
     longRunningTask: bool = False
+    userData: bool = False
 
 
 class ToolManifest(BaseModel):

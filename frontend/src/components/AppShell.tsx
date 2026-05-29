@@ -1,6 +1,8 @@
 import { Box, Home, Settings } from 'lucide-react';
 import { NavLink, Outlet } from 'react-router-dom';
 
+import { AuthStatus } from './AuthStatus';
+
 export function AppShell() {
   return (
     <div className="app-shell">
@@ -19,6 +21,7 @@ export function AppShell() {
             <span>设置</span>
           </NavLink>
         </nav>
+        <AuthStatus />
       </aside>
       <main className="main-content">
         <Outlet />

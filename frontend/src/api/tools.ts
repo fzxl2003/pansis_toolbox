@@ -16,6 +16,12 @@ export type ToolManifest = {
   enabled: boolean;
   category: string;
   icon: string;
+  permissions: {
+    filesystem: boolean;
+    network: boolean;
+    longRunningTask: boolean;
+    userData: boolean;
+  };
   api: { prefix: string };
   widgets: unknown[];
   status: ToolStatus;

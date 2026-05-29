@@ -1,4 +1,4 @@
-import { AlertTriangle, CircleOff, Star, Wrench } from 'lucide-react';
+import { AlertTriangle, CircleOff, Database, Star, Wrench } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 import type { ToolManifest } from '../api/tools';
@@ -27,6 +27,7 @@ export function ToolCard({ tool }: { tool: ToolManifest }) {
       <p>{tool.description}</p>
       <div className="card-footer">
         <span>{tool.category}</span>
+        {tool.permissions.userData && <span className="data-badge"><Database size={14} />个人数据</span>}
         {isAvailable ? <Link to={`/tools/${tool.id}`}>打开</Link> : <span title={tool.errorMessage ?? ''}>不可用</span>}
       </div>
     </article>

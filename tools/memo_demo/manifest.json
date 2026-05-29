@@ -1,0 +1,24 @@
+{
+  "id": "memo_demo",
+  "name": "备忘录 Demo",
+  "description": "需要登录的个人 TXT 备忘录示例工具，支持上传、保存、查看和删除。",
+  "version": "1.0.0",
+  "enabled": true,
+  "category": "text",
+  "icon": "notebook",
+  "entry": {
+    "frontend": "frontend/index.tsx",
+    "backend": "backend/router.py"
+  },
+  "api": {
+    "prefix": "/api/tools/memo-demo"
+  },
+  "widgets": [],
+  "dependencies": {},
+  "permissions": {
+    "filesystem": true,
+    "network": false,
+    "longRunningTask": false,
+    "userData": true
+  }
+}

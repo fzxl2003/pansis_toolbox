@@ -7,25 +7,33 @@ from fastapi.responses import JSONResponse
 
 
 class ToolboxError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400, tool_id: str | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int = 400,
+        tool_id: str | None = None,
+        extra: dict | None = None,
+    ):
         self.code = code
         self.message = message
         self.status_code = status_code
         self.tool_id = tool_id
+        self.extra = extra or {}
         super().__init__(message)
 
 
 async def toolbox_error_handler(request: Request, exc: ToolboxError) -> JSONResponse:
+    error = {
+        "code": exc.code,
+        "message": exc.message,
+        "toolId": exc.tool_id,
+        "requestId": request.headers.get("x-request-id", f"req_{uuid4().hex[:12]}"),
+    }
+    error.update(exc.extra)
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": {
-                "code": exc.code,
-                "message": exc.message,
-                "toolId": exc.tool_id,
-                "requestId": request.headers.get("x-request-id", f"req_{uuid4().hex[:12]}"),
-            }
-        },
+        content={"error": error},
     )
 
 

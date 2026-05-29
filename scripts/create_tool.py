@@ -41,7 +41,7 @@ def main() -> int:
         "api": {"prefix": f"/api/tools/{tool_id.replace('_', '-')}"},
         "widgets": [],
         "dependencies": {},
-        "permissions": {"filesystem": False, "network": False, "longRunningTask": False},
+        "permissions": {"filesystem": False, "network": False, "longRunningTask": False, "userData": False},
     }
     (tool_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (tool_dir / "README.md").write_text(f"# {manifest['name']}\n", encoding="utf-8")

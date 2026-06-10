@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.app.registry.loader import discover_tools
 from backend.app.registry.models import ToolStatus
+from tools.server_monitor.backend import service as monitor_service
 
 
 client = TestClient(app)
@@ -49,9 +50,11 @@ def test_discover_tools_marks_missing_entries() -> None:
     tools = discover_tools(Path("tools"))
     assert any(tool.tool_id == "text_cleaner" and tool.status == ToolStatus.available for tool in tools)
     assert any(tool.tool_id == "memo_demo" and tool.status == ToolStatus.available for tool in tools)
+    assert any(tool.tool_id == "server_monitor" and tool.status == ToolStatus.available for tool in tools)
 
 
 def test_auth_me_anonymous() -> None:
+    client.cookies.clear()
     response = client.get("/api/auth/me")
     assert response.status_code == 200
     assert response.json()["authenticated"] is False
@@ -65,6 +68,7 @@ def test_login_and_logout() -> None:
     me_response = client.get("/api/auth/me", cookies=response.cookies)
     assert me_response.status_code == 200
     assert me_response.json()["user"]["username"] == "admin"
+    assert me_response.json()["user"]["role"] == "admin"
 
     logout_response = client.post("/api/auth/logout", cookies=response.cookies)
     assert logout_response.status_code == 200
@@ -83,7 +87,36 @@ def test_sso_is_reserved() -> None:
     assert response.json()["status"] == "not_configured"
 
 
+def test_admin_can_manage_users() -> None:
+    _cleanup_monitor_test_data()
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    username = "monitor_user_test"
+    created = client.post(
+        "/api/auth/users",
+        json={"username": username, "displayName": "Monitor User", "password": "pw123", "role": "user"},
+        cookies=cookies,
+    )
+    if created.status_code == 409:
+        users = client.get("/api/auth/users", cookies=cookies).json()["users"]
+        user = next(item for item in users if item["username"] == username)
+    else:
+        assert created.status_code == 200
+        user = created.json()["user"]
+    assert user["role"] == "user"
+
+    disabled = client.post(f"/api/auth/users/{user['id']}/disabled", json={"disabled": True}, cookies=cookies)
+    assert disabled.status_code == 200
+    assert disabled.json()["user"]["disabled"] is True
+
+    enabled = client.post(f"/api/auth/users/{user['id']}/disabled", json={"disabled": False}, cookies=cookies)
+    assert enabled.status_code == 200
+    assert enabled.json()["user"]["disabled"] is False
+    _cleanup_monitor_test_data()
+
+
 def test_memo_demo_requires_login() -> None:
+    client.cookies.clear()
     response = client.get("/api/tools/memo-demo/memos")
     assert response.status_code == 401
     payload = response.json()
@@ -116,3 +149,176 @@ def test_memo_demo_upload_list_view_delete() -> None:
     delete = client.delete(f"/api/tools/memo-demo/memos/{memo['id']}", cookies=cookies)
     assert delete.status_code == 200
     assert delete.json()["deleted"] is True
+
+
+def test_server_monitor_parse_output() -> None:
+    parsed = monitor_service.parse_monitor_output(_monitor_output())
+    assert parsed["cpuPercent"] is not None
+    assert parsed["memoryTotalBytes"] == 16_000_000 * 1024
+    assert parsed["memoryUsedBytes"] == 4_000_000 * 1024
+    assert parsed["disks"][0]["mountPath"] == "/"
+    assert parsed["gpus"][1]["index"] == 1
+
+
+def test_server_monitor_parse_gpu_processes() -> None:
+    parsed = monitor_service.parse_monitor_output(_monitor_output_with_processes())
+    gpu = parsed["gpus"][0]
+    assert gpu["processCount"] == 1
+    assert gpu["processes"][0]["pid"] == 1234
+    assert gpu["processes"][0]["usedMemoryMiB"] == 2048
+    assert gpu["processes"][0]["cpuPercent"] == 12.5
+    assert gpu["processes"][0]["gpuPercent"] == 80
+    assert gpu["processes"][0]["username"] == "alice"
+    assert gpu["processes"][0]["command"] == "python train.py --epochs 10"
+
+
+def test_server_monitor_default_visibility_and_snapshot(monkeypatch) -> None:
+    _cleanup_monitor_test_data()
+    monkeypatch.setattr(monitor_service, "_run_ssh", lambda row, command, timeout=20: _monitor_output())
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    created = client.post(
+        "/api/tools/server-monitor/servers",
+        json={
+            "name": "Default Monitor Test",
+            "host": "127.0.0.1",
+            "port": 22,
+            "sshUsername": "root",
+            "sshPassword": "secret",
+            "isDefault": True,
+            "directoryWhitelist": ["/data"],
+            "directoryRefreshSeconds": 60,
+        },
+        cookies=cookies,
+    )
+    assert created.status_code == 200
+    server = created.json()["server"]
+    assert server["isDefault"] is True
+
+    client.cookies.clear()
+    anonymous_list = client.get("/api/tools/server-monitor/servers")
+    assert anonymous_list.status_code == 200
+    assert any(item["id"] == server["id"] for item in anonymous_list.json()["servers"])
+
+    snapshot = client.get(f"/api/tools/server-monitor/servers/{server['id']}/snapshot?force=true")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["sample"]["gpus"][0]["name"] == "NVIDIA A100"
+    _cleanup_monitor_test_data()
+
+
+def test_server_monitor_private_visibility_and_directory_whitelist(monkeypatch) -> None:
+    _cleanup_monitor_test_data()
+    monkeypatch.setattr(
+        monitor_service,
+        "_run_ssh",
+        lambda row, command, timeout=20: "dev 1000 400 600 40% /data\n123\t/data/project\n",
+    )
+    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    username = "monitor_private_user"
+    created_user = client.post(
+        "/api/auth/users",
+        json={"username": username, "displayName": "Private User", "password": "pw123", "role": "user"},
+        cookies=admin.cookies,
+    )
+    if created_user.status_code == 409:
+        client.post(f"/api/auth/users/{next(item for item in client.get('/api/auth/users', cookies=admin.cookies).json()['users'] if item['username'] == username)['id']}/disabled", json={"disabled": False}, cookies=admin.cookies)
+    user_auth = client.post("/api/auth/login", json={"username": username, "password": "pw123"})
+    assert user_auth.status_code == 200
+
+    private_server = client.post(
+        "/api/tools/server-monitor/servers",
+        json={
+            "name": "Private Monitor Test",
+            "host": "10.0.0.8",
+            "port": 22,
+            "sshUsername": "ops",
+            "sshPassword": "secret",
+            "isDefault": False,
+            "directoryWhitelist": ["/data"],
+            "directoryRefreshSeconds": 60,
+        },
+        cookies=user_auth.cookies,
+    )
+    assert private_server.status_code == 200
+    server = private_server.json()["server"]
+
+    client.cookies.clear()
+    anonymous_list = client.get("/api/tools/server-monitor/servers")
+    assert all(item["id"] != server["id"] for item in anonymous_list.json()["servers"])
+
+    allowed = client.post(
+        f"/api/tools/server-monitor/servers/{server['id']}/directories",
+        json={"path": "/data/project"},
+        cookies=user_auth.cookies,
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["usedBytes"] == 123
+
+    listing = client.get(f"/api/tools/server-monitor/servers/{server['id']}/directories", cookies=user_auth.cookies)
+    assert listing.status_code == 200
+    assert listing.json()["directories"][0]["path"] == "/data/project"
+
+    denied = client.post(
+        f"/api/tools/server-monitor/servers/{server['id']}/directories",
+        json={"path": "/etc"},
+        cookies=user_auth.cookies,
+    )
+    assert denied.status_code == 403
+    _cleanup_monitor_test_data()
+
+
+def _monitor_output() -> str:
+    return """__CPU__
+cpu  100 0 100 800 0 0 0 0 0 0
+cpu  120 0 120 860 0 0 0 0 0 0
+__MEMINFO__
+MemTotal:       16000000 kB
+MemAvailable:  12000000 kB
+__DF__
+Filesystem 1B-blocks Used Available Use% Mounted on
+/dev/root 1000000000 400000000 600000000 40% /
+__GPU__
+0, NVIDIA A100, 55, 40960, 20480, 61, 190
+1, NVIDIA A100, 20, 40960, 1024, 45, 120
+"""
+
+
+def _cleanup_monitor_test_data() -> None:
+    monitor_service.init_monitor_database()
+    with monitor_service.get_connection() as connection:
+        server_ids = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM monitor_servers WHERE name IN ('Default Monitor Test', 'Private Monitor Test')"
+            ).fetchall()
+        ]
+        for server_id in server_ids:
+            connection.execute("DELETE FROM monitor_samples WHERE server_id = ?", (server_id,))
+            connection.execute("DELETE FROM monitor_directory_cache WHERE server_id = ?", (server_id,))
+            connection.execute("DELETE FROM monitor_servers WHERE id = ?", (server_id,))
+        connection.execute(
+            "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user'))"
+        )
+        connection.execute("DELETE FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user')")
+        connection.commit()
+
+
+def _monitor_output_with_processes() -> str:
+    return """__CPU__
+cpu  100 0 100 800 0 0 0 0 0 0
+cpu  120 0 120 860 0 0 0 0 0 0
+__MEMINFO__
+MemTotal:       16000000 kB
+MemAvailable:  12000000 kB
+__DF__
+Filesystem 1B-blocks Used Available Use% Mounted on
+/dev/root 1000000000 400000000 600000000 40% /
+__GPU__
+0, GPU-abc, NVIDIA A100, 70, 40960, 10240, 55, 180
+__GPU_PROCESSES__
+GPU-abc, 1234, python, 2048
+__PROC_STATS__
+1234 alice 12.5 4.2 python python train.py --epochs 10
+__GPU_PMON__
+0 1234 C 80 20 - - python
+"""

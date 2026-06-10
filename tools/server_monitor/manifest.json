@@ -1,0 +1,24 @@
+{
+  "id": "server_monitor",
+  "name": "服务器监控看板",
+  "description": "通过 SSH 监控多台服务器的 CPU、CUDA GPU、内存、硬盘和目录空间。",
+  "version": "1.0.0",
+  "enabled": true,
+  "category": "ops",
+  "icon": "server",
+  "entry": {
+    "frontend": "frontend/index.tsx",
+    "backend": "backend/router.py"
+  },
+  "api": {
+    "prefix": "/api/tools/server-monitor"
+  },
+  "widgets": [],
+  "dependencies": {},
+  "permissions": {
+    "filesystem": false,
+    "network": true,
+    "longRunningTask": true,
+    "userData": true
+  }
+}

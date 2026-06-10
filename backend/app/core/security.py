@@ -24,6 +24,13 @@ def require_user(request: Request) -> User:
     return user
 
 
+def require_admin(request: Request) -> User:
+    user = require_user(request)
+    if user.role != "admin":
+        raise ToolboxError("ADMIN_REQUIRED", "需要管理员权限", status_code=403)
+    return user
+
+
 def require_user_tool_data_dir(request: Request, tool_id: str) -> Path:
     user = require_user(request)
     safe_tool_id = tool_id.replace("/", "_").replace("\\", "_")

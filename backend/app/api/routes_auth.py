@@ -4,8 +4,17 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
-from backend.app.core.security import get_optional_user
-from backend.app.services.auth_service import ensure_default_user, login, logout
+from backend.app.core.security import get_optional_user, require_admin
+from backend.app.services.auth_service import (
+    create_user,
+    delete_user,
+    ensure_default_user,
+    list_users,
+    login,
+    logout,
+    reset_user_password,
+    set_user_disabled,
+)
 
 router = APIRouter()
 
@@ -13,6 +22,21 @@ router = APIRouter()
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    displayName: str
+    password: str
+    role: str = "user"
+
+
+class ResetPasswordRequest(BaseModel):
+    password: str
+
+
+class SetDisabledRequest(BaseModel):
+    disabled: bool
 
 
 @router.post("/auth/login")
@@ -42,6 +66,40 @@ def me_route(request: Request) -> dict:
     ensure_default_user()
     user = get_optional_user(request)
     return {"authenticated": user is not None, "user": user.public_dict() if user else None}
+
+
+@router.get("/auth/users")
+def list_users_route(request: Request) -> dict:
+    require_admin(request)
+    return {"users": [user.public_dict() for user in list_users()]}
+
+
+@router.post("/auth/users")
+def create_user_route(request: Request, payload: CreateUserRequest) -> dict:
+    require_admin(request)
+    user = create_user(payload.username, payload.displayName, payload.password, payload.role)
+    return {"user": user.public_dict()}
+
+
+@router.post("/auth/users/{user_id}/password")
+def reset_user_password_route(request: Request, user_id: str, payload: ResetPasswordRequest) -> dict:
+    require_admin(request)
+    user = reset_user_password(user_id, payload.password)
+    return {"user": user.public_dict()}
+
+
+@router.post("/auth/users/{user_id}/disabled")
+def set_user_disabled_route(request: Request, user_id: str, payload: SetDisabledRequest) -> dict:
+    require_admin(request)
+    user = set_user_disabled(user_id, payload.disabled)
+    return {"user": user.public_dict()}
+
+
+@router.delete("/auth/users/{user_id}")
+def delete_user_route(request: Request, user_id: str) -> dict[str, bool]:
+    require_admin(request)
+    delete_user(user_id)
+    return {"deleted": True}
 
 
 @router.get("/auth/sso/login")

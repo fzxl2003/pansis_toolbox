@@ -19,9 +19,17 @@ class User:
     id: str
     username: str
     display_name: str
+    role: str = "user"
+    disabled: bool = False
 
-    def public_dict(self) -> dict[str, str]:
-        return {"id": self.id, "username": self.username, "displayName": self.display_name}
+    def public_dict(self) -> dict[str, str | bool]:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "displayName": self.display_name,
+            "role": self.role,
+            "disabled": self.disabled,
+        }
 
 
 def ensure_default_user() -> None:
@@ -30,12 +38,17 @@ def ensure_default_user() -> None:
     with get_connection() as connection:
         existing = connection.execute("SELECT id FROM users WHERE username = ?", (settings.default_admin_username,)).fetchone()
         if existing:
+            connection.execute(
+                "UPDATE users SET role = 'admin', disabled = 0 WHERE username = ?",
+                (settings.default_admin_username,),
+            )
+            connection.commit()
             return
         salt = secrets.token_hex(16)
         connection.execute(
             """
-            INSERT INTO users (id, username, display_name, password_hash, password_salt, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (id, username, display_name, password_hash, password_salt, role, disabled, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 secrets.token_hex(12),
@@ -43,6 +56,8 @@ def ensure_default_user() -> None:
                 settings.default_admin_display_name,
                 hash_password(settings.default_admin_password, salt),
                 salt,
+                "admin",
+                0,
                 now_iso(),
             ),
         )
@@ -53,7 +68,7 @@ def login(username: str, password: str) -> tuple[User, str]:
     ensure_default_user()
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-        if row is None or not verify_password(password, row["password_salt"], row["password_hash"]):
+        if row is None or row["disabled"] or not verify_password(password, row["password_salt"], row["password_hash"]):
             raise ToolboxError("INVALID_CREDENTIALS", "用户名或密码错误", status_code=401)
 
         token = secrets.token_urlsafe(32)
@@ -91,9 +106,98 @@ def get_user_by_session_token(token: str | None) -> User | None:
             """,
             (hash_token(token), now_iso()),
         ).fetchone()
-        if row is None:
+        if row is None or row["disabled"]:
             return None
         return user_from_row(row)
+
+
+def list_users() -> list[User]:
+    ensure_default_user()
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM users ORDER BY role = 'admin' DESC, created_at ASC"
+        ).fetchall()
+    return [user_from_row(row) for row in rows]
+
+
+def create_user(username: str, display_name: str, password: str, role: str = "user") -> User:
+    ensure_default_user()
+    if role not in {"admin", "user"}:
+        raise ToolboxError("INVALID_ROLE", "用户角色不合法", status_code=400)
+    if not username.strip() or not password:
+        raise ToolboxError("INVALID_USER", "用户名和密码不能为空", status_code=400)
+    salt = secrets.token_hex(16)
+    user_id = secrets.token_hex(12)
+    try:
+        with get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (id, username, display_name, password_hash, password_salt, role, disabled, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    user_id,
+                    username.strip(),
+                    display_name.strip() or username.strip(),
+                    hash_password(password, salt),
+                    salt,
+                    role,
+                    now_iso(),
+                ),
+            )
+            connection.commit()
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            raise ToolboxError("USER_EXISTS", "用户名已存在", status_code=409) from exc
+        raise
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return user_from_row(row)
+
+
+def set_user_disabled(user_id: str, disabled: bool) -> User:
+    ensure_default_user()
+    with get_connection() as connection:
+        target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if target is None:
+            raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
+        if target["role"] == "admin" and disabled:
+            raise ToolboxError("CANNOT_DISABLE_ADMIN", "不能禁用管理员账号", status_code=400)
+        connection.execute("UPDATE users SET disabled = ? WHERE id = ?", (1 if disabled else 0, user_id))
+        connection.commit()
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return user_from_row(row)
+
+
+def reset_user_password(user_id: str, password: str) -> User:
+    ensure_default_user()
+    if not password:
+        raise ToolboxError("INVALID_PASSWORD", "密码不能为空", status_code=400)
+    salt = secrets.token_hex(16)
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
+        connection.execute(
+            "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?",
+            (hash_password(password, salt), salt, user_id),
+        )
+        connection.commit()
+        updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return user_from_row(updated)
+
+
+def delete_user(user_id: str) -> None:
+    ensure_default_user()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
+        if row["role"] == "admin":
+            raise ToolboxError("CANNOT_DELETE_ADMIN", "不能删除管理员账号", status_code=400)
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        connection.commit()
 
 
 def hash_password(password: str, salt: str) -> str:
@@ -111,7 +215,13 @@ def hash_token(token: str) -> str:
 
 
 def user_from_row(row) -> User:
-    return User(id=row["id"], username=row["username"], display_name=row["display_name"])
+    return User(
+        id=row["id"],
+        username=row["username"],
+        display_name=row["display_name"],
+        role=row["role"],
+        disabled=bool(row["disabled"]),
+    )
 
 
 def now_iso() -> str:

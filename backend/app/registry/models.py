@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,19 @@ class ToolPermissions(BaseModel):
     userData: bool = False
 
 
+class ToolIcon(BaseModel):
+    type: Literal["lucide", "image"] = "lucide"
+    name: str | None = None
+    src: str | None = None
+    alt: str | None = None
+
+
+class ToolDisplayMode(str, Enum):
+    standard = "standard"
+    fullscreen = "fullscreen"
+    flexible = "flexible"
+
+
 class ToolManifest(BaseModel):
     id: str
     name: str
@@ -52,13 +65,14 @@ class ToolManifest(BaseModel):
     version: str
     enabled: bool = True
     category: str = "other"
-    icon: str = "wrench"
+    icon: ToolIcon | str = Field(default_factory=lambda: ToolIcon(name="wrench"))
     entry: ToolEntry
     api: ToolApi
     widgets: list[WidgetManifest] = Field(default_factory=list)
     dependencies: dict[str, str] = Field(default_factory=dict)
     permissions: ToolPermissions = Field(default_factory=ToolPermissions)
     dependsOn: list[str] = Field(default_factory=list)
+    displayMode: ToolDisplayMode = ToolDisplayMode.standard
 
 
 class RegisteredTool(BaseModel):

@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from backend.app.registry.models import RegisteredTool, ToolManifest, ToolStatus
@@ -64,6 +65,9 @@ def register_tool_routers(app: FastAPI, tools: list[RegisteredTool]) -> None:
     for tool in tools:
         if tool.status != ToolStatus.available:
             continue
+        assets_dir = tool.root_path / "assets"
+        if assets_dir.exists():
+            app.mount(f"/tool-assets/{tool.tool_id}", StaticFiles(directory=assets_dir), name=f"tool-assets:{tool.tool_id}")
         try:
             router = load_backend_router(tool)
             app.include_router(router, prefix=tool.api_prefix, tags=[f"tool:{tool.tool_id}"])

@@ -218,10 +218,18 @@ const emptyEmailAction: EmailActionFormState = {
 
 监控任务: {task_name}
 服务器: {server_name}
-当前进程数: {current_count}
-阈值条件: {threshold}
 触发原因: {reason}
 触发时间: {time}
+
+阈值条件: {threshold}
+报警前进程数: {prev_count}
+当前进程数: {current_count}
+
+── 报警前的进程列表（基准）──
+{prev_processes}
+
+── 当前采样到的进程列表 ──
+{current_processes}
 
 此邮件由实验监控系统自动发送。`,
 };
@@ -794,23 +802,12 @@ export default function ExperimentMonitorTool() {
           </div>
 
           {/* Alert State */}
-          {history.alertState && (
-            <div className={`em-alert-state ${history.alertState.isAlerting ? 'alerting' : ''}`}>
-              {history.alertState.isAlerting ? (
-                <><AlertTriangle size={16} /><strong>报警中</strong></>
-              ) : (
-                <><CheckCircle2 size={16} /><strong>正常</strong></>
-              )}
-              <span className="muted">
-                连续满足 {history.alertState.consecutiveMeets}/{selectedTask.confirmCount} 次
-                · 上次检查进程数: {history.alertState.lastCheckCount ?? '-'}
-              </span>
-              {history.alertState.isAlerting && (
-                <button className="chip small" type="button" onClick={() => void resetAlert(selectedTaskId)}>
-                  <RotateCcw size={13} />重置报警
-                </button>
-              )}
-            </div>
+{history.alertState?.isAlerting && (
+<div className="em-alert-state alerting">
+<button className="chip small" type="button" onClick={() => void resetAlert(selectedTaskId)}>
+<RotateCcw size={13} />重置报警
+</button>
+</div>
           )}
 
           {/* Process Count Chart */}
@@ -942,18 +939,12 @@ function TaskCard(props: {
       {props.isExpanded && (
         <div className="em-task-detail">
           {/* Alert State */}
-          {alertState && (
-            <div className={`em-alert-state inline ${alertState.isAlerting ? 'alerting' : ''}`}>
-              {alertState.isAlerting
-                ? <><AlertTriangle size={14} /><span>报警中 · 连续满足 {alertState.consecutiveMeets}/{task.confirmCount}</span></>
-                : <><CheckCircle2 size={14} /><span>正常 · 连续满足 {alertState.consecutiveMeets}/{task.confirmCount}</span></>
-              }
-              {alertState.isAlerting && (
-                <button className="chip tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onResetAlert(); }}>
-                  <RotateCcw size={12} />重置
-                </button>
-              )}
-            </div>
+{alertState?.isAlerting && (
+<div className="em-alert-state inline alerting">
+<button className="chip tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onResetAlert(); }}>
+<RotateCcw size={12} />重置
+</button>
+</div>
           )}
 
           {/* Actions */}
@@ -1262,15 +1253,54 @@ function EmailActionForm(props: {
         <label>收件人邮箱（每行一个或逗号分隔）*</label>
         <textarea className="text-input" rows={3} placeholder="user1@example.com&#10;user2@example.com" value={props.form.emailRecipients} onChange={(e) => props.onChange({ ...props.form, emailRecipients: e.target.value })} />
       </div>
+      <div className="em-template-vars-box">
+        <div className="em-template-vars-title">可用模板变量</div>
+        <div className="em-template-vars-grid">
+          <div className="em-template-var-item">
+            <code>{'{task_name}'}</code>
+            <span>监控任务名称</span>
+          </div>
+          <div className="em-template-var-item">
+            <code>{'{server_name}'}</code>
+            <span>服务器名称</span>
+          </div>
+          <div className="em-template-var-item">
+            <code>{'{current_count}'}</code>
+            <span>报警时的进程数</span>
+          </div>
+          <div className="em-template-var-item">
+            <code>{'{prev_count}'}</code>
+            <span>报警前的进程数（基准）</span>
+          </div>
+          <div className="em-template-var-item">
+            <code>{'{threshold}'}</code>
+            <span>阈值条件描述</span>
+          </div>
+          <div className="em-template-var-item">
+            <code>{'{reason}'}</code>
+            <span>触发原因说明</span>
+          </div>
+          <div className="em-template-var-item">
+            <code>{'{time}'}</code>
+            <span>触发时间（UTC）</span>
+          </div>
+          <div className="em-template-var-item em-template-var-highlight">
+            <code>{'{current_processes}'}</code>
+            <span>报警时采样到的进程列表</span>
+          </div>
+          <div className="em-template-var-item em-template-var-highlight">
+            <code>{'{prev_processes}'}</code>
+            <span>报警触发前的进程列表（基准）</span>
+          </div>
+        </div>
+      </div>
       <div className="form-group">
         <label>邮件主题模板</label>
         <input className="text-input" value={props.form.emailSubjectTemplate} onChange={(e) => props.onChange({ ...props.form, emailSubjectTemplate: e.target.value })} />
-        <small className="form-hint">可用变量: {'{task_name}'}, {'{server_name}'}, {'{current_count}'}, {'{threshold}'}, {'{time}'}, {'{reason}'}</small>
       </div>
       <div className="form-group">
         <label>邮件正文模板</label>
-        <textarea className="text-input" rows={6} value={props.form.emailBodyTemplate} onChange={(e) => props.onChange({ ...props.form, emailBodyTemplate: e.target.value })} />
-        <small className="form-hint">可用变量同上</small>
+        <textarea className="text-input" rows={8} value={props.form.emailBodyTemplate} onChange={(e) => props.onChange({ ...props.form, emailBodyTemplate: e.target.value })} />
       </div>
       <button className="primary-button" type="submit" disabled={props.isLoading}>
         <Mail size={16} />{props.isEdit ? '保存' : '添加'}

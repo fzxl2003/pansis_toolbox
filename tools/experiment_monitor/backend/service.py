@@ -132,6 +132,10 @@ def init_database() -> None:
                 task_id TEXT PRIMARY KEY,
                 consecutive_meets INTEGER NOT NULL DEFAULT 0,
                 last_check_count INTEGER,
+                -- 上次采样到的进程列表（JSON 数组），用于邮件模板 {prev_processes}
+                last_matched_processes TEXT NOT NULL DEFAULT '[]',
+                -- 触发报警前一刻记录的进程列表，用于邮件模板 {prev_processes}
+                baseline_processes TEXT NOT NULL DEFAULT '[]',
                 is_alerting INTEGER NOT NULL DEFAULT 0,
                 last_alerted_at TEXT,
                 resolved_at TEXT,
@@ -154,6 +158,16 @@ def init_database() -> None:
                 ON em_monitor_tasks(server_id);
             """
         )
+        # 迁移：为旧表补充新字段（ALTER TABLE IF NOT EXISTS column 仅 SQLite 3.37+ 支持，用 try/except 兼容旧版本）
+        for col_sql in [
+            "ALTER TABLE em_alert_states ADD COLUMN last_matched_processes TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE em_alert_states ADD COLUMN baseline_processes TEXT NOT NULL DEFAULT '[]'",
+        ]:
+            try:
+                connection.execute(col_sql)
+                connection.commit()
+            except Exception:
+                pass  # 字段已存在，忽略
 
 
 # ============================================================
@@ -653,9 +667,12 @@ def check_process_count(task_row: sqlite3.Row, server_row: sqlite3.Row) -> tuple
 
 def evaluate_condition(current_count: int, task_row: sqlite3.Row, alert_state: sqlite3.Row | None) -> tuple[bool, str]:
     """
-    Evaluate whether the alert condition is met.
+    Evaluate whether the alert condition is met for this single sample.
     Returns (condition_met, reason).
-    Also handles the multi-confirmation mechanism.
+
+    注意：多次确认逻辑在 run_monitor_check 中处理，这里只判断单次采样是否满足条件。
+    对于 changed 模式，使用 alert_state 中的 last_check_count 与当前值比较，
+    但以不处于连续报警中的上一次稳定值作为参考（防止进程短暂空隙的误判依赖在外层保障）。
     """
     condition = task_row["alert_condition"]
 
@@ -669,6 +686,7 @@ def evaluate_condition(current_count: int, task_row: sqlite3.Row, alert_state: s
         reason = f"进程数 {current_count} > 阈值 {threshold}" if met else f"进程数 {current_count} <= 阈值 {threshold}"
     elif condition == "changed":
         change_amount = task_row["alert_change_amount"]
+        # 使用上一次稳定计数（上次未在异常状态时记录的值）作为基准
         last_count = alert_state["last_check_count"] if alert_state and alert_state["last_check_count"] is not None else current_count
         diff = abs(current_count - last_count)
         met = diff >= change_amount
@@ -682,7 +700,25 @@ def evaluate_condition(current_count: int, task_row: sqlite3.Row, alert_state: s
 
 
 def run_monitor_check(task_id: str) -> dict[str, Any]:
-    """Run a single monitoring check for a task. Called by scheduler."""
+    """Run a single monitoring check for a task. Called by scheduler.
+
+    多次确认逻辑说明
+    ─────────────────
+    设计目的：防止进程在短暂重启间隙（一个进程刚结束、另一个还没起来）被采样到，
+    导致"低于阈值"的误报警。
+
+    规则：
+    1. 每次采样判断当前是否满足报警条件（condition_met）。
+    2. 若满足，consecutive_meets +1；若不满足，立刻清零（说明是瞬时抖动，进程已恢复）。
+    3. 只有 consecutive_meets 达到 confirm_count 时才真正触发报警。
+    4. 触发报警后：
+       - 将当前稳定进程列表记录为 baseline_processes（供邮件展示"报警前的进程列表"）
+       - 重置 consecutive_meets = 0，is_alerting = 0（允许下次独立触发，不做持续报警去重）
+       - 对于 changed 模式：将当前 process_count 作为新的 last_check_count 基准，
+         避免每次都与触发前的旧基准比较而持续触发。
+    5. 正常情况下（未在报警中）每次更新 last_check_count 为当前值，
+       并将 last_matched_processes 更新为当前进程列表（供邮件展示"报警时的进程变化"）。
+    """
     init_database()
 
     # Fetch task and server separately to avoid JOIN column ambiguity
@@ -713,6 +749,39 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
         error = str(exc)
         logger.exception("Monitor check failed for task %s: %s", task_id, exc)
 
+    # 读取当前状态
+    prev_consecutive = state["consecutive_meets"] if state else 0
+    # 报警前的进程列表（上一次采样），供邮件展示"异常发生前的进程列表"
+    prev_processes: list[str] = _json_list(state["last_matched_processes"]) if state else []
+    # 当前记录的基准进程列表（触发后保留）
+    baseline_processes: list[str] = _json_list(state["baseline_processes"]) if state else []
+
+    # ── 多次确认逻辑 ──────────────────────────────────────────
+    # 条件满足：计数累加；条件不满足（进程恢复）：立即清零，防止进程短暂空隙积累计数
+    if condition_met:
+        new_consecutive = prev_consecutive + 1
+    else:
+        new_consecutive = 0  # 只要有一次恢复正常，清零——说明之前是短暂抖动
+
+    confirm_needed = task["confirm_count"]
+    should_trigger = (condition_met and new_consecutive >= confirm_needed)
+
+    # 触发时：保存报警前的进程列表作为 baseline，并重置计数
+    if should_trigger:
+        # baseline_processes = 触发前一刻的进程列表（即 prev_processes，来自上次采样）
+        new_baseline_processes = prev_processes
+        new_consecutive = 0  # 触发后重置，允许下次独立再触发
+        # changed 模式：以当前值更新基准，避免持续触发
+        new_last_check_count = process_count
+    else:
+        new_baseline_processes = baseline_processes
+        # changed 模式：未触发时只在"无异常"状态下更新基准（防止连续异常中基准漂移）
+        if not condition_met:
+            new_last_check_count = process_count  # 正常状态下持续更新基准
+        else:
+            # 处于连续确认积累中，保持原有基准不变，等触发后再重置
+            new_last_check_count = state["last_check_count"] if state and state["last_check_count"] is not None else process_count
+
     # Record sample
     sample_id = secrets.token_hex(12)
     now = now_iso()
@@ -725,42 +794,36 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
             (sample_id, task_id, now, process_count, json.dumps(matched_processes[:50], ensure_ascii=False), 1 if condition_met else 0, error),
         )
 
-        # Update alert state (multi-confirmation logic)
-        if condition_met:
-            new_consecutive = (state["consecutive_meets"] if state else 0) + 1
-        else:
-            new_consecutive = 0
-
-        is_currently_alerting = bool(state["is_alerting"]) if state else False
-        should_trigger = False
-        should_resolve = False
-
-        confirm_needed = task["confirm_count"]
-
-        if condition_met and new_consecutive >= confirm_needed and not is_currently_alerting:
-            should_trigger = True
-        elif not condition_met and is_currently_alerting:
-            # Optional: auto-resolve when condition is no longer met after some checks
-            # For now, we don't auto-resolve; manual resolution or separate resolve logic can be added
-            pass
-
+        # 更新报警状态
         connection.execute(
             """
-            INSERT INTO em_alert_states (task_id, consecutive_meets, last_check_count, is_alerting, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO em_alert_states (
+                task_id, consecutive_meets, last_check_count,
+                last_matched_processes, baseline_processes,
+                is_alerting, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 consecutive_meets = excluded.consecutive_meets,
                 last_check_count = excluded.last_check_count,
-                is_alerting = CASE WHEN ? THEN 1 ELSE em_alert_states.is_alerting END,
+                last_matched_processes = excluded.last_matched_processes,
+                baseline_processes = excluded.baseline_processes,
+                is_alerting = 0,
                 updated_at = excluded.updated_at
             """,
-            (task_id, new_consecutive, process_count, 1 if should_trigger else (0 if should_resolve else (1 if is_currently_alerting else 0)), now, 1 if should_trigger else (0 if should_resolve else (1 if is_currently_alerting else 0))),
+            (
+                task_id,
+                new_consecutive,
+                new_last_check_count,
+                json.dumps(matched_processes[:50], ensure_ascii=False),
+                json.dumps(new_baseline_processes[:50], ensure_ascii=False),
+                now,
+            ),
         )
         connection.commit()
 
     # Trigger actions if needed
     if should_trigger:
-        _trigger_alert_actions(task, server, process_count, condition_reason, matched_processes, has_screen)
+        _trigger_alert_actions(task, server, process_count, condition_reason, matched_processes, new_baseline_processes, has_screen)
 
     # Cleanup old samples
     _prune_samples(task_id)
@@ -783,11 +846,11 @@ def _trigger_alert_actions(
     process_count: int,
     reason: str,
     matched_processes: list[str],
+    baseline_processes: list[str],
     has_screen: bool,
 ) -> None:
     """Execute all enabled alert actions for a triggered alert."""
     task_id = task["id"]
-    now = now_iso()
 
     # Get server info for templates
     server_name = server["name"]
@@ -809,7 +872,7 @@ def _trigger_alert_actions(
         action_type = action["action_type"]
         try:
             if action_type == "email":
-                _execute_email_action(action, task_name, server_name, process_count, threshold_str, reason, matched_processes)
+                _execute_email_action(action, task_name, server_name, process_count, threshold_str, reason, matched_processes, baseline_processes)
             elif action_type == "script":
                 _execute_script_action(action, server, has_screen)
 
@@ -837,31 +900,41 @@ def _execute_email_action(
     threshold_str: str,
     reason: str,
     matched_processes: list[str],
+    baseline_processes: list[str],
 ) -> None:
     recipients = _json_list(action["email_recipients"])
     if not recipients:
         logger.warning("No recipients configured for email action %s", action["id"])
         return
 
+    # 构建进程列表文本，供模板使用
+    def _proc_list_text(procs: list[str], label: str) -> str:
+        if not procs:
+            return f"（{label}为空）"
+        lines = [f"  {p}" for p in procs[:20]]
+        if len(procs) > 20:
+            lines.append(f"  ... 共 {len(procs)} 个进程")
+        return "\n".join(lines)
+
+    current_processes_text = _proc_list_text(matched_processes, "当前进程列表")
+    prev_processes_text = _proc_list_text(baseline_processes, "报警前进程列表")
+
     template_vars = {
         "task_name": task_name,
         "server_name": server_name,
         "current_count": str(process_count),
+        "prev_count": str(len(baseline_processes)),
         "threshold": threshold_str,
         "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "reason": reason,
+        # 当前采样到的进程名称列表（触发时）
+        "current_processes": current_processes_text,
+        # 报警触发前一刻记录的进程列表（基准）
+        "prev_processes": prev_processes_text,
     }
 
     subject = action["email_subject_template"].format(**template_vars)
     body = action["email_body_template"].format(**template_vars)
-
-    # Append process details
-    if matched_processes:
-        body += "\n\n匹配的进程（前20条）:\n"
-        for proc in matched_processes[:20]:
-            body += f"  {proc}\n"
-        if len(matched_processes) > 20:
-            body += f"  ... 共 {len(matched_processes)} 个进程\n"
 
     try:
         send_email(recipients, subject, body)
@@ -1168,10 +1241,18 @@ def _default_email_body() -> str:
 
 监控任务: {task_name}
 服务器: {server_name}
-当前进程数: {current_count}
-阈值条件: {threshold}
 触发原因: {reason}
 触发时间: {time}
+
+阈值条件: {threshold}
+报警前进程数: {prev_count}
+当前进程数: {current_count}
+
+── 报警前的进程列表（基准）──
+{prev_processes}
+
+── 当前采样到的进程列表 ──
+{current_processes}
 
 此邮件由实验监控系统自动发送。"""
 

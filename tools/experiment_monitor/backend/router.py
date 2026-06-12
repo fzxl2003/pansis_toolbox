@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field
+
+from backend.app.core.security import get_optional_user, require_admin, require_user
+
+from tools.experiment_monitor.backend.service import (
+    collect_due_checks,
+    create_alert_action,
+    create_monitor_task,
+    create_server,
+    delete_alert_action,
+    delete_monitor_task,
+    delete_server,
+    get_alert_state,
+    get_email_config,
+    get_task_history,
+    list_alert_actions,
+    list_monitor_tasks,
+    list_servers,
+    reset_alert_state,
+    run_monitor_check,
+    save_email_config,
+    test_ssh_connection,
+    update_alert_action,
+    update_monitor_task,
+    update_server,
+)
+
+router = APIRouter()
+
+
+# ============================================================
+# Server (SSH Connection) APIs
+# ============================================================
+
+class ServerPayload(BaseModel):
+    name: str
+    host: str
+    port: int = 22
+    sshUsername: str
+    sshPassword: str = ""
+
+
+class CreateServerPayload(ServerPayload):
+    sshPassword: str
+
+
+@router.get("/servers")
+def list_servers_route(request: Request) -> dict:
+    user = require_user(request)
+    return {"servers": list_servers(user)}
+
+
+@router.post("/servers")
+def create_server_route(request: Request, payload: CreateServerPayload) -> dict:
+    user = require_user(request)
+    return {"server": create_server(payload.model_dump(), user)}
+
+
+@router.put("/servers/{server_id}")
+def update_server_route(request: Request, server_id: str, payload: ServerPayload) -> dict:
+    user = require_user(request)
+    return {"server": update_server(server_id, payload.model_dump(exclude_unset=True), user)}
+
+
+@router.delete("/servers/{server_id}")
+def delete_server_route(request: Request, server_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    delete_server(server_id, user)
+    return {"deleted": True}
+
+
+@router.post("/servers/{server_id}/test")
+def test_ssh_route(request: Request, server_id: str) -> dict:
+    user = require_user(request)
+    return test_ssh_connection(server_id, user)
+
+
+# ============================================================
+# Monitor Task APIs
+# ============================================================
+
+class MonitorTaskPayload(BaseModel):
+    serverId: str
+    name: str
+    description: str = ""
+    matchMode: str = "simple"  # simple | regex
+    matchPattern: str = ""
+    filterUser: str = ""
+    alertCondition: str = "below"  # below | above | changed
+    alertThreshold: int = 0
+    alertChangeAmount: int = 1
+    confirmCount: int = 3
+    checkIntervalSeconds: int = 30
+    enabled: bool = True
+
+
+@router.get("/tasks")
+def list_tasks_route(request: Request, serverId: str | None = None) -> dict:
+    user = require_user(request)
+    return {"tasks": list_monitor_tasks(user, server_id=serverId)}
+
+
+@router.post("/tasks")
+def create_task_route(request: Request, payload: MonitorTaskPayload) -> dict:
+    user = require_user(request)
+    return {"task": create_monitor_task(payload.model_dump(), user)}
+
+
+@router.put("/tasks/{task_id}")
+def update_task_route(request: Request, task_id: str, payload: MonitorTaskPayload) -> dict:
+    user = require_user(request)
+    return {"task": update_monitor_task(task_id, payload.model_dump(exclude_unset=True), user)}
+
+
+@router.delete("/tasks/{task_id}")
+def delete_task_route(request: Request, task_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    delete_monitor_task(task_id, user)
+    return {"deleted": True}
+
+
+@router.get("/tasks/{task_id}/history")
+def task_history_route(request: Request, task_id: str, hours: int = 24) -> dict:
+    user = require_user(request)
+    return get_task_history(task_id, user, hours=hours)
+
+
+@router.get("/tasks/{task_id}/alert-state")
+def alert_state_route(request: Request, task_id: str) -> dict:
+    user = require_user(request)
+    state = get_alert_state(task_id, user)
+    return {"alertState": state}
+
+
+@router.post("/tasks/{task_id}/reset-alert")
+def reset_alert_route(request: Request, task_id: str) -> dict:
+    user = require_user(request)
+    return reset_alert_state(task_id, user)
+
+
+@router.post("/tasks/{task_id}/check-now")
+def check_now_route(request: Request, task_id: str) -> dict:
+    user = require_user(request)
+    result = run_monitor_check(task_id)
+    return result
+
+
+# ============================================================
+# Alert Action APIs
+# ============================================================
+
+class EmailActionConfig(BaseModel):
+    emailRecipients: list[str] = Field(default_factory=list)
+    emailSubjectTemplate: str = "实验监控报警: {task_name}"
+    emailBodyTemplate: str = ""
+
+
+class ScriptActionConfig(BaseModel):
+    scriptCommands: list[str] = Field(default_factory=list)
+    scriptScreenName: str = ""
+    scriptsPerTrigger: int = 1
+
+
+class CreateAlertActionPayload(BaseModel):
+    actionType: str  # email | script
+    emailRecipients: list[str] = Field(default_factory=list)
+    emailSubjectTemplate: str = "实验监控报警: {task_name}"
+    emailBodyTemplate: str = ""
+    scriptCommands: list[str] = Field(default_factory=list)
+    scriptScreenName: str = ""
+    scriptsPerTrigger: int = 1
+
+
+@router.get("/tasks/{task_id}/actions")
+def list_actions_route(request: Request, task_id: str) -> dict:
+    user = require_user(request)
+    return {"actions": list_alert_actions(task_id, user)}
+
+
+@router.post("/tasks/{task_id}/actions")
+def create_action_route(request: Request, task_id: str, payload: CreateAlertActionPayload) -> dict:
+    user = require_user(request)
+    return {"action": create_alert_action(task_id, payload.model_dump(), user)}
+
+
+@router.put("/actions/{action_id}")
+def update_action_route(request: Request, action_id: str, payload: CreateAlertActionPayload) -> dict:
+    user = require_user(request)
+    return {"action": update_alert_action(action_id, payload.model_dump(exclude_unset=True), user)}
+
+
+@router.delete("/actions/{action_id}")
+def delete_action_route(request: Request, action_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    delete_alert_action(action_id, user)
+    return {"deleted": True}
+
+
+# ============================================================
+# Email Configuration (Admin Only)
+# ============================================================
+
+class EmailConfigPayload(BaseModel):
+    smtpHost: str = "smtp.buaa.edu.cn"
+    smtpPort: int = 465
+    smtpUsername: str = ""
+    smtpPassword: str = ""
+    smtpFromAddress: str = ""
+    smtpFromName: str = "Experiment Monitor"
+
+
+@router.get("/email-config")
+def get_email_config_route(request: Request) -> dict:
+    user = require_admin(request)
+    return get_email_config(user)
+
+
+@router.post("/email-config")
+def save_email_config_route(request: Request, payload: EmailConfigPayload) -> dict:
+    user = require_admin(request)
+    return save_email_config(payload.model_dump(), user)
+
+
+@router.post("/email-config/test")
+def test_email_config_route(request: Request, payload: EmailConfigPayload) -> dict:
+    """Test email configuration by sending a test email."""
+    from tools.experiment_monitor.backend.service import send_email, save_email_config
+    from backend.app.core.errors import ToolboxError
+
+    user = require_admin(request)
+    # Save config first
+    config = save_email_config(payload.model_dump(), user)
+    # Try sending a test email to the from_address
+    test_to = payload.smtpFromAddress or payload.smtpUsername
+    if not test_to:
+        raise ToolboxError("INVALID_INPUT", "需要提供发件人地址作为测试收件人", status_code=400, tool_id="experiment_monitor")
+    try:
+        send_email([test_to], "实验监控系统 - 邮件配置测试", "这是一封测试邮件，如果您收到此邮件，说明邮件配置正确。")
+    except Exception as exc:
+        raise ToolboxError("EMAIL_SEND_FAILED", f"邮件发送失败: {exc}", status_code=500, tool_id="experiment_monitor") from exc
+
+    return {"success": True, "testTo": test_to}

@@ -15,7 +15,8 @@ export type ToolManifest = {
   version: string;
   enabled: boolean;
   category: string;
-  icon: string;
+  icon: ToolIcon;
+  displayMode: 'standard' | 'fullscreen' | 'flexible';
   permissions: {
     filesystem: boolean;
     network: boolean;
@@ -27,6 +28,19 @@ export type ToolManifest = {
   status: ToolStatus;
   errorMessage: string | null;
 };
+
+export type ToolIcon =
+  | {
+      type: 'lucide';
+      name: string;
+      alt?: string | null;
+    }
+  | {
+      type: 'image';
+      src: string;
+      alt?: string | null;
+    }
+  | string;
 
 export function fetchTools() {
   return apiGet<ToolManifest[]>('/api/tools');

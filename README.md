@@ -135,6 +135,24 @@ python scripts/generate_tool_views.py
 - `frontend/index.tsx`：导出 React 默认组件，由工具页懒加载。
 - `README.md`：说明工具用途和接口。
 
+工具可在 `manifest.json` 中声明 `displayMode`：
+
+- `standard`：默认模式，显示主框架侧边栏和工具页返回链接。
+- `fullscreen`：全屏模式，隐藏侧边栏、主内容 padding 等框架内容。
+- `flexible`：两者均可，工具页提供“全屏显示/退出全屏”切换。
+
+工具图标支持内置 Lucide 图标和工具自带图片：
+
+```json
+{ "icon": { "type": "lucide", "name": "compass" } }
+```
+
+```json
+{ "icon": { "type": "image", "src": "assets/icon.png", "alt": "工具图标" } }
+```
+
+图片路径为相对路径时，会从工具目录的 `assets/` 静态资源目录读取；也可以使用 `/` 开头的站内路径或完整 `https://` URL。
+
 ## 当前示例
 
 `text_cleaner` 是匿名可用的 MVP 示例工具，提供文本清洗能力：

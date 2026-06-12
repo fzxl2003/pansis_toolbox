@@ -29,6 +29,7 @@ export function AuthStatus() {
     <button className="auth-status button-like" type="button" onClick={signOut} title="退出登录">
       <UserCircle size={17} />
       {user.displayName}
+      {user.role === 'admin' && <span className="auth-role">管理员</span>}
       <LogOut size={15} />
     </button>
   );

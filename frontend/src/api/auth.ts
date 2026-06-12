@@ -4,6 +4,8 @@ export type AuthUser = {
   id: string;
   username: string;
   displayName: string;
+  role: 'admin' | 'user';
+  disabled: boolean;
 };
 
 export type AuthState = {

@@ -1,0 +1,28 @@
+{
+  "id": "url_navigator",
+  "name": "网址导航",
+  "description": "面向个人的多入口网址导航，按延迟或优先级自动选择可访问地址。",
+  "version": "1.0.0",
+  "enabled": true,
+  "category": "network",
+  "icon": {
+    "type": "lucide",
+    "name": "compass"
+  },
+  "displayMode": "flexible",
+  "entry": {
+    "frontend": "frontend/index.tsx",
+    "backend": "backend/router.py"
+  },
+  "api": {
+    "prefix": "/api/tools/url-navigator"
+  },
+  "widgets": [],
+  "dependencies": {},
+  "permissions": {
+    "filesystem": true,
+    "network": true,
+    "longRunningTask": false,
+    "userData": true
+  }
+}

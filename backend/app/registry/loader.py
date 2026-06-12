@@ -6,11 +6,13 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from backend.app.registry.models import RegisteredTool, ToolManifest, ToolStatus
 from backend.app.registry.tool_registry import tool_registry
 from backend.app.registry.widget_registry import widget_registry
+from backend.app.services.scheduler_service import Scheduler, scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +65,13 @@ def register_tool_routers(app: FastAPI, tools: list[RegisteredTool]) -> None:
     for tool in tools:
         if tool.status != ToolStatus.available:
             continue
+        assets_dir = tool.root_path / "assets"
+        if assets_dir.exists():
+            app.mount(f"/tool-assets/{tool.tool_id}", StaticFiles(directory=assets_dir), name=f"tool-assets:{tool.tool_id}")
         try:
             router = load_backend_router(tool)
             app.include_router(router, prefix=tool.api_prefix, tags=[f"tool:{tool.tool_id}"])
+            register_tool_scheduled_tasks(tool, scheduler)
         except Exception as exc:  # noqa: BLE001 - isolate bad tools from the host app.
             logger.exception("Failed to load tool router for %s", tool.tool_id)
             tool.status = ToolStatus.failed
@@ -87,6 +93,22 @@ def load_backend_router(tool: RegisteredTool) -> APIRouter:
     if not isinstance(router, APIRouter):
         raise RuntimeError("Tool backend entry must expose a FastAPI APIRouter named 'router'")
     return router
+
+
+def register_tool_scheduled_tasks(tool: RegisteredTool, target_scheduler: Scheduler) -> None:
+    scheduler_path = tool.root_path / "backend" / "scheduler.py"
+    if not scheduler_path.exists():
+        return
+    module_name = f"toolbox_tools.{tool.tool_id}.scheduler"
+    spec = importlib.util.spec_from_file_location(module_name, scheduler_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot import scheduler from {scheduler_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    register_tasks = getattr(module, "register_tasks", None)
+    if not callable(register_tasks):
+        raise RuntimeError("Tool scheduler entry must expose a callable register_tasks(scheduler)")
+    register_tasks(target_scheduler)
 
 
 def _initial_status(

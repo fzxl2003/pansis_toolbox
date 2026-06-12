@@ -1,0 +1,22 @@
+[
+  {
+    "name": "示例系统",
+    "description": "同一服务的多线路访问示例，可按需修改为真实地址。",
+    "category": "示例",
+    "strategy": "priority_first",
+    "entries": [
+      {
+        "label": "内网入口",
+        "url": "https://internal.example.com",
+        "probeUrl": "https://internal.example.com/favicon.ico",
+        "priority": 1
+      },
+      {
+        "label": "公网入口",
+        "url": "https://example.com",
+        "probeUrl": "https://example.com/favicon.ico",
+        "priority": 10
+      }
+    ]
+  }
+]

@@ -34,6 +34,8 @@ def init_database() -> None:
                 display_name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 password_salt TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                disabled INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -53,6 +55,14 @@ def init_database() -> None:
             );
             """
         )
+        _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
+        _ensure_column(connection, "users", "disabled", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def ensure_directory(path: Path) -> Path:

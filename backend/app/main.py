@@ -7,6 +7,7 @@ from backend.app.core.errors import ToolboxError, toolbox_error_handler, unhandl
 from backend.app.core.logging import configure_logging
 from backend.app.registry.loader import discover_tools, register_tool_routers
 from backend.app.services.auth_service import ensure_default_user
+from backend.app.services.scheduler_service import scheduler
 
 
 def create_app() -> FastAPI:
@@ -32,6 +33,15 @@ def create_app() -> FastAPI:
     ensure_default_user()
     tools = discover_tools(settings.tools_dir)
     register_tool_routers(app, tools)
+
+    @app.on_event("startup")
+    async def start_scheduler() -> None:
+        await scheduler.start()
+
+    @app.on_event("shutdown")
+    async def stop_scheduler() -> None:
+        await scheduler.stop()
+
     return app
 
 

@@ -799,21 +799,60 @@ function ServerForm(props: {
 }) {
   const { form, isAdmin, isEdit, isLoading, onChange, onSubmit } = props;
   return (
-    <form className="monitor-form" onSubmit={onSubmit}>
-      <input className="text-input" placeholder="名称" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} />
-      <input className="text-input" placeholder="主机/IP" value={form.host} onChange={(event) => onChange({ ...form, host: event.target.value })} />
-      <input className="text-input" type="number" min="1" max="65535" value={form.port} onChange={(event) => onChange({ ...form, port: Number(event.target.value) })} />
-      <input className="text-input" placeholder="SSH 用户名" value={form.sshUsername} onChange={(event) => onChange({ ...form, sshUsername: event.target.value })} />
-      <input className="text-input" type="password" placeholder={isEdit ? '留空则不修改 SSH 密码' : 'SSH 密码'} value={form.sshPassword} onChange={(event) => onChange({ ...form, sshPassword: event.target.value })} />
-      <textarea className="text-input" placeholder="目录白名单，每行一个绝对路径" value={form.directoryWhitelist} onChange={(event) => onChange({ ...form, directoryWhitelist: event.target.value })} />
-      <input className="text-input" type="number" min="10" value={form.directoryRefreshSeconds} onChange={(event) => onChange({ ...form, directoryRefreshSeconds: Number(event.target.value) })} />
+    <form className="em-form" onSubmit={onSubmit}>
+      <div className="form-group">
+        <label>服务器名称 *</label>
+        <input className="text-input" placeholder="如：实验服务器 A" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} />
+      </div>
+
+      <fieldset className="em-fieldset">
+        <legend>SSH 连接信息</legend>
+        <div className="em-form-grid2">
+          <div className="form-group">
+            <label>主机 / IP 地址 *</label>
+            <input className="text-input" placeholder="192.168.1.100 或 example.com" value={form.host} onChange={(event) => onChange({ ...form, host: event.target.value })} />
+          </div>
+          <div className="form-group">
+            <label>SSH 端口</label>
+            <input className="text-input" type="number" min="1" max="65535" placeholder="22" value={form.port} onChange={(event) => onChange({ ...form, port: Number(event.target.value) })} />
+          </div>
+        </div>
+        <div className="em-form-grid2">
+          <div className="form-group">
+            <label>SSH 用户名 *</label>
+            <input className="text-input" placeholder="root 或 ubuntu" value={form.sshUsername} onChange={(event) => onChange({ ...form, sshUsername: event.target.value })} />
+          </div>
+          <div className="form-group">
+            <label>SSH 密码{isEdit ? '（留空则不修改）' : ' *'}</label>
+            <input className="text-input" type="password" placeholder={isEdit ? '留空则不修改' : '••••••••'} value={form.sshPassword} onChange={(event) => onChange({ ...form, sshPassword: event.target.value })} />
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset className="em-fieldset">
+        <legend>目录监控配置</legend>
+        <div className="form-group">
+          <label>目录白名单</label>
+          <textarea className="text-input" rows={3} placeholder={'/data\n/home/user/projects'} value={form.directoryWhitelist} onChange={(event) => onChange({ ...form, directoryWhitelist: event.target.value })} />
+          <small className="form-hint">每行一个绝对路径，只有在白名单内的目录才会被追踪统计</small>
+        </div>
+        <div className="form-group">
+          <label>目录空间刷新间隔（秒）</label>
+          <input className="text-input" type="number" min="10" placeholder="300" value={form.directoryRefreshSeconds} onChange={(event) => onChange({ ...form, directoryRefreshSeconds: Number(event.target.value) })} />
+          <small className="form-hint">后台定期重新统计固定文件夹占用空间的频率，建议 60～600 秒</small>
+        </div>
+      </fieldset>
+
       {isAdmin && (
         <label className="check-row">
           <input type="checkbox" checked={form.isDefault} onChange={(event) => onChange({ ...form, isDefault: event.target.checked })} />
-          默认服务器
+          设为默认服务器（所有用户均可查看）
         </label>
       )}
-      <button className="primary-button" type="submit" disabled={isLoading}><Server size={16} />{isEdit ? '保存服务器' : '添加服务器'}</button>
+
+      <button className="primary-button" type="submit" disabled={isLoading}>
+        <Server size={16} />{isEdit ? '保存服务器' : '添加服务器'}
+      </button>
     </form>
   );
 }

@@ -158,10 +158,18 @@ select {
 .card-footer,
 .result-header,
 .widget-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 12px;
+}
+
+.result-header > span,
+.result-header > strong,
+.result-header > small {
+display: inline-flex;
+align-items: center;
+gap: 6px;
 }
 
 .section-heading h2,
@@ -177,9 +185,9 @@ select {
 
 .tool-grid-list,
 .widget-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 14px;
+display: grid;
+grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+gap: 16px;
 }
 
 .tool-card,
@@ -1748,16 +1756,15 @@ body {
 }
 
 .tool-grid-list {
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 18px;
+grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+gap: 16px;
 }
 
 .tool-card {
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  min-height: 220px;
-  align-content: start;
-  padding: 22px;
+display: grid;
+grid-template-rows: auto auto 1fr auto;
+align-content: start;
+padding: 20px 22px;
 }
 
 .card-topline {
@@ -2331,10 +2338,64 @@ body {
 }
 
 .em-fieldset legend {
-  font-size: 13px;
-  font-weight: 600;
-  color: #374151;
-  padding: 0 8px;
+font-size: 13px;
+font-weight: 600;
+color: #374151;
+padding: 0 8px;
+}
+
+.em-form-grid2 {
+display: grid;
+grid-template-columns: 1fr 1fr;
+gap: 12px;
+}
+
+@media (max-width: 520px) {
+  .em-form-grid2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.em-fieldset .form-group {
+margin-top: 12px;
+}
+
+.em-fieldset .form-group:first-child,
+.em-form-grid2 .form-group {
+margin-top: 0;
+}
+
+.em-fieldset .em-form-grid2:not(:first-child) {
+margin-top: 12px;
+}
+
+.em-form-footer {
+display: flex;
+align-items: center;
+gap: 10px;
+flex-wrap: wrap;
+}
+
+.em-test-result {
+display: flex;
+align-items: center;
+gap: 8px;
+padding: 10px 14px;
+border-radius: 10px;
+font-size: 13px;
+line-height: 1.4;
+}
+
+.em-test-result.success {
+background: #f0fdf4;
+color: #15803d;
+border: 1px solid #bbf7d0;
+}
+
+.em-test-result.error {
+background: #fef2f2;
+color: #dc2626;
+border: 1px solid #fecaca;
 }
 
 .admin-notice {
@@ -2442,13 +2503,15 @@ textarea.monospace {
 }
 
 .chip.small {
-  font-size: 11.5px;
-  padding: 4px 10px;
+font-size: 11.5px;
+padding: 4px 10px;
+gap: 5px;
 }
 
 .chip.tiny {
-  font-size: 11px;
-  padding: 3px 8px;
+font-size: 11px;
+padding: 3px 8px;
+gap: 4px;
 }
 
 /* ============================================================

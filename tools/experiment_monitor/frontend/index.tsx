@@ -1129,14 +1129,55 @@ function ServerForm(props: {
 }) {
   return (
     <form className="em-form" onSubmit={props.onSubmit}>
-      <input className="text-input" placeholder="名称，如：GPU 服务器 A" value={props.form.name} onChange={(e) => props.onChange({ ...props.form, name: e.target.value })} />
-      <input className="text-input" placeholder="主机/IP 地址" value={props.form.host} onChange={(e) => props.onChange({ ...props.form, host: e.target.value })} />
-      <input className="text-input" type="number" min="1" max="65535" placeholder="SSH 端口" value={props.form.port} onChange={(e) => props.onChange({ ...props.form, port: Number(e.target.value) })} />
-      <input className="text-input" placeholder="SSH 用户名" value={props.form.sshUsername} onChange={(e) => props.onChange({ ...props.form, sshUsername: e.target.value })} />
-      <input className="text-input" type="password" placeholder={props.isEdit ? '留空则不修改密码' : 'SSH 密码'} value={props.form.sshPassword} onChange={(e) => props.onChange({ ...props.form, sshPassword: e.target.value })} />
-      <button className="primary-button" type="submit" disabled={props.isLoading}>
-        <Server size={16} />{props.isEdit ? '保存' : '添加'}
-      </button>
+      <div className="form-group">
+        <label>服务器名称 *</label>
+        <input className="text-input" placeholder="如：GPU 服务器 A" value={props.form.name} onChange={(e) => props.onChange({ ...props.form, name: e.target.value })} />
+      </div>
+
+      <fieldset className="em-fieldset">
+        <legend>SSH 连接信息</legend>
+        <div className="em-form-grid2">
+          <div className="form-group">
+            <label>主机 / IP 地址 *</label>
+            <input className="text-input" placeholder="192.168.1.100 或 example.com" value={props.form.host} onChange={(e) => props.onChange({ ...props.form, host: e.target.value })} />
+          </div>
+          <div className="form-group">
+            <label>SSH 端口</label>
+            <input className="text-input" type="number" min="1" max="65535" placeholder="22" value={props.form.port} onChange={(e) => props.onChange({ ...props.form, port: Number(e.target.value) })} />
+          </div>
+        </div>
+        <div className="em-form-grid2">
+          <div className="form-group">
+            <label>SSH 用户名 *</label>
+            <input className="text-input" placeholder="root 或 ubuntu" value={props.form.sshUsername} onChange={(e) => props.onChange({ ...props.form, sshUsername: e.target.value })} />
+          </div>
+          <div className="form-group">
+            <label>SSH 密码{props.isEdit ? '（留空则不修改）' : ' *'}</label>
+            <input className="text-input" type="password" placeholder={props.isEdit ? '留空则不修改' : '••••••••'} value={props.form.sshPassword} onChange={(e) => props.onChange({ ...props.form, sshPassword: e.target.value })} />
+          </div>
+        </div>
+      </fieldset>
+
+      {props.testResult && (
+        <div className={`em-test-result ${props.testResult.connected ? 'success' : 'error'}`}>
+          {props.testResult.connected ? (
+            <span>✓ 连接成功，用户：{props.testResult.username}{props.testResult.hasScreen ? '，已安装 screen' : ''}</span>
+          ) : (
+            <span>✗ 连接失败：{props.testResult.error}</span>
+          )}
+        </div>
+      )}
+
+      <div className="em-form-footer">
+        <button className="primary-button" type="submit" disabled={props.isLoading}>
+          <Server size={16} />{props.isEdit ? '保存服务器' : '添加服务器'}
+        </button>
+        {props.isEdit && (
+          <button className="chip" type="button" disabled={props.isLoading} onClick={() => props.onTest()}>
+            <Activity size={15} />测试连接
+          </button>
+        )}
+      </div>
     </form>
   );
 }

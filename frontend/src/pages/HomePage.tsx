@@ -65,24 +65,18 @@ export function HomePage() {
       </section>
 
       <section className="content-band">
-        <div className="section-heading">
-          <h2>工具列表</h2>
-          <span>{visibleTools.length} 个工具</span>
-        </div>
         <div className="tool-grid-list">
           {visibleTools.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
         </div>
       </section>
 
-      <section className="content-band">
-        <div className="section-heading">
-          <h2>首页小组件</h2>
-          <span>{widgets.length} 个组件</span>
-        </div>
-        <div className="widget-grid">
-          {widgets.map((widget) => <WidgetHost key={widget.id} widget={widget} />)}
-        </div>
-      </section>
+      {widgets.length > 0 && (
+        <section className="content-band">
+          <div className="widget-grid">
+            {widgets.map((widget) => <WidgetHost key={widget.id} widget={widget} />)}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

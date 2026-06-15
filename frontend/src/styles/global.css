@@ -129,6 +129,10 @@ select {
 }
 
 .chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   border: 1px solid #d7dee8;
   background: #ffffff;
   border-radius: 8px;
@@ -2732,4 +2736,106 @@ textarea.monospace {
 .em-template-var-highlight span {
   color: #0369a1;
   font-weight: 500;
+}
+
+/* Keep icon-and-label controls visually bound together. */
+:where(
+  button,
+  .button-like,
+  .inline-link,
+  .card-footer a,
+  .status-pill,
+  .data-badge,
+  .widget-heading,
+  .metric-card span:first-child,
+  .usage-legend span,
+  .gpu-card-top span,
+  .gpu-stats span,
+  .em-task-meta span,
+  .em-alert-state.inline,
+  .log-badge
+) > svg {
+  flex: 0 0 auto;
+}
+
+:where(
+  .primary-button,
+  .secondary-button,
+  .fullscreen-exit-button,
+  .chip,
+  .status-pill,
+  .data-badge,
+  .inline-link,
+  .nav-item,
+  .card-footer a,
+  .auth-status.button-like,
+  .server-tab,
+  .danger-row,
+  .mount-chip,
+  .log-tab
+) {
+  white-space: nowrap;
+}
+
+:where(.primary-button, .secondary-button, .fullscreen-exit-button, .auth-status.button-like) {
+  flex-wrap: nowrap;
+}
+
+:where(.primary-button, .secondary-button, .fullscreen-exit-button) > span,
+:where(.status-pill, .data-badge, .inline-link, .card-footer a, .widget-heading) > span,
+.auth-name,
+.nav-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auth-name {
+  flex: 1 1 auto;
+}
+
+.toolbar {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.toolbar > * {
+  flex: 0 0 auto;
+}
+
+.result-header,
+.section-heading,
+.widget-heading,
+.card-topline {
+  min-width: 0;
+}
+
+.result-header > :first-child,
+.section-heading > :first-child,
+.widget-heading > span {
+  min-width: 0;
+}
+
+.section-heading {
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.section-heading h2,
+.section-heading span {
+  white-space: nowrap;
+}
+
+.section-heading span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
 }

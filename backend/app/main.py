@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app.api import routes_auth, routes_health, routes_tools, routes_widgets
+from backend.app.api import routes_auth, routes_health, routes_settings, routes_tools, routes_widgets
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError, toolbox_error_handler, unhandled_error_handler
 from backend.app.core.logging import configure_logging
@@ -29,6 +29,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_auth.router, prefix=settings.api_prefix)
     app.include_router(routes_tools.router, prefix=settings.api_prefix)
     app.include_router(routes_widgets.router, prefix=settings.api_prefix)
+    app.include_router(routes_settings.router, prefix=settings.api_prefix)
 
     ensure_default_user()
     tools = discover_tools(settings.tools_dir)

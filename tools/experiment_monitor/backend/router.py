@@ -19,7 +19,6 @@ from tools.experiment_monitor.backend.service import (
     delete_script_group,
     delete_server,
     get_alert_state,
-    get_email_config,
     get_task_history,
     list_alert_actions,
     list_monitor_tasks,
@@ -30,7 +29,6 @@ from tools.experiment_monitor.backend.service import (
     reset_alert_state,
     restore_history_to_queue,
     run_monitor_check,
-    save_email_config,
     test_ssh_connection,
     update_alert_action,
     update_monitor_task,
@@ -296,48 +294,3 @@ def refresh_sessions_route(request: Request, group_id: str) -> dict:
     user = require_user(request)
     return {"sessions": refresh_screen_sessions(group_id, user)}
 
-
-# ============================================================
-# Email Configuration (Admin Only)
-# ============================================================
-
-class EmailConfigPayload(BaseModel):
-    smtpHost: str = "smtp.buaa.edu.cn"
-    smtpPort: int = 465
-    smtpUsername: str = ""
-    smtpPassword: str = ""
-    smtpFromAddress: str = ""
-    smtpFromName: str = "Experiment Monitor"
-
-
-@router.get("/email-config")
-def get_email_config_route(request: Request) -> dict:
-    user = require_admin(request)
-    return get_email_config(user)
-
-
-@router.post("/email-config")
-def save_email_config_route(request: Request, payload: EmailConfigPayload) -> dict:
-    user = require_admin(request)
-    return save_email_config(payload.model_dump(), user)
-
-
-@router.post("/email-config/test")
-def test_email_config_route(request: Request, payload: EmailConfigPayload) -> dict:
-    """Test email configuration by sending a test email."""
-    from tools.experiment_monitor.backend.service import send_email, save_email_config
-    from backend.app.core.errors import ToolboxError
-
-    user = require_admin(request)
-    # Save config first
-    config = save_email_config(payload.model_dump(), user)
-    # Try sending a test email to the from_address
-    test_to = payload.smtpFromAddress or payload.smtpUsername
-    if not test_to:
-        raise ToolboxError("INVALID_INPUT", "需要提供发件人地址作为测试收件人", status_code=400, tool_id="experiment_monitor")
-    try:
-        send_email([test_to], "实验监控系统 - 邮件配置测试", "这是一封测试邮件，如果您收到此邮件，说明邮件配置正确。")
-    except Exception as exc:
-        raise ToolboxError("EMAIL_SEND_FAILED", f"邮件发送失败: {exc}", status_code=500, tool_id="experiment_monitor") from exc
-
-    return {"success": True, "testTo": test_to}

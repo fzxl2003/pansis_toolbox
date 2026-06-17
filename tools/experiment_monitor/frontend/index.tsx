@@ -11,7 +11,6 @@ import {
   ChevronRight,
   Clock,
   GripVertical,
-  Globe,
   Mail,
   Monitor,
   Play,
@@ -20,7 +19,6 @@ import {
   RotateCcw,
   Server,
   Settings,
-  Shield,
   Terminal,
   Trash2,
   X,
@@ -158,15 +156,6 @@ type LogEntry = {
   error?: string | null;
 };
 
-type EmailConfig = {
-  smtpHost: string;
-  smtpPort: number;
-  smtpUsername: string;
-  smtpFromAddress: string;
-  smtpFromName: string;
-  configured: boolean;
-};
-
 type SshTestResult = {
   connected: boolean;
   username?: string;
@@ -207,15 +196,6 @@ type EmailActionFormState = {
   emailBodyTemplate: string;
 };
 
-
-type EmailConfigFormState = {
-  smtpHost: string;
-  smtpPort: number;
-  smtpUsername: string;
-  smtpPassword: string;
-  smtpFromAddress: string;
-  smtpFromName: string;
-};
 
 // ============================================================
 // Constants
@@ -268,15 +248,6 @@ const emptyEmailAction: EmailActionFormState = {
 };
 
 
-const emptyEmailConfig: EmailConfigFormState = {
-  smtpHost: 'smtp.buaa.edu.cn',
-  smtpPort: 465,
-  smtpUsername: '',
-  smtpPassword: '',
-  smtpFromAddress: '',
-  smtpFromName: 'Experiment Monitor',
-};
-
 // ============================================================
 // Main Component
 // ============================================================
@@ -297,7 +268,7 @@ export default function ExperimentMonitorTool() {
 
   // Modal states
   const [modal, setModal] = useState<'server-create' | 'server-edit' | 'task-create' | 'task-edit'
-    | 'action-email' | 'email-config'
+    | 'action-email'
     | 'script-groups' | 'script-group-create' | null>(null);
   const [editingServerId, setEditingServerId] = useState<string>('');
   const [editingActionId, setEditingActionId] = useState<string>('');
@@ -310,7 +281,6 @@ export default function ExperimentMonitorTool() {
   const [serverForm, setServerForm] = useState<ServerFormState>(emptyServer);
   const [taskForm, setTaskForm] = useState<TaskFormState>(emptyTask);
   const [emailActionForm, setEmailActionForm] = useState<EmailActionFormState>(emptyEmailAction);
-  const [emailConfigForm, setEmailConfigForm] = useState<EmailConfigFormState>(emptyEmailConfig);
 
   // Script groups state (keyed by action id)
   const [scriptGroupsMap, setScriptGroupsMap] = useState<Record<string, ScriptGroup[]>>({});
@@ -784,60 +754,6 @@ export default function ExperimentMonitorTool() {
   }
 
   // ============================================================
-  // Email Config (Admin)
-  // ============================================================
-
-  async function openEmailConfig() {
-    if (!isAdmin) return;
-    try {
-      const config = await apiGet<EmailConfig>('/api/tools/experiment-monitor/email-config');
-      setEmailConfigForm({
-        smtpHost: config.smtpHost,
-        smtpPort: config.smtpPort,
-        smtpUsername: config.smtpUsername,
-        smtpPassword: '',
-        smtpFromAddress: config.smtpFromAddress,
-        smtpFromName: config.smtpFromName,
-      });
-      setModal('email-config');
-    } catch (err) {
-      handleError(err);
-    }
-  }
-
-  async function saveEmailConfig(event: FormEvent) {
-    event.preventDefault();
-    setIsLoading(true);
-    setError(null);
-    try {
-      await apiPost('/api/tools/experiment-monitor/email-config', emailConfigForm);
-      setModal(null);
-      showSuccess('邮件配置保存成功');
-    } catch (err) {
-      handleError(err);
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  async function testEmailConfig() {
-    if (!emailConfigForm.smtpFromAddress && !emailConfigForm.smtpUsername) {
-      setError('请先填写发件人地址');
-      return;
-    }
-    setIsLoading(true);
-    setError(null);
-    try {
-      const result = await apiPost<{ success: boolean; testTo: string }>('/api/tools/experiment-monitor/email-config/test', emailConfigForm);
-      showSuccess(`测试邮件已发送至 ${result.testTo}，请查收`);
-    } catch (err) {
-      handleError(err);
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  // ============================================================
   // UI Helpers
   // ============================================================
 
@@ -883,11 +799,6 @@ export default function ExperimentMonitorTool() {
               <button className="chip" type="button" onClick={openCreateServer}>
                 <Server size={15} />服务器
               </button>
-              {isAdmin && (
-                <button className="chip" type="button" onClick={openEmailConfig}>
-                  <Mail size={15} />邮件配置
-                </button>
-              )}
             </>
           )}
           <button className="chip" type="button" onClick={() => { void loadTasks(); void loadServers(); }}>
@@ -1006,12 +917,6 @@ export default function ExperimentMonitorTool() {
         </Modal>
       )}
 
-
-      {modal === 'email-config' && (
-      <Modal title="邮件发送配置（管理员）" onClose={() => setModal(null)}>
-        <EmailConfigForm form={emailConfigForm} isLoading={isLoading} onChange={setEmailConfigForm} onSubmit={saveEmailConfig} onTest={testEmailConfig} />
-      </Modal>
-      )}
 
       {modal === 'script-groups' && groupsActionId && singleGroupId && (() => {
         const group = (scriptGroupsMap[groupsActionId] || []).find((g) => g.id === singleGroupId);
@@ -1483,6 +1388,10 @@ function EmailActionForm(props: {
 }) {
   return (
     <form className="em-form" onSubmit={props.onSubmit}>
+      <div className="admin-notice" style={{ marginBottom: '12px' }}>
+        <Mail size={14} />
+        <span>邮件发送（SMTP）配置由管理员在「<a href="/settings" style={{ color: 'inherit', textDecoration: 'underline' }}>平台设置</a>」中统一管理，此处仅配置本通知动作的收件人和邮件内容。</span>
+      </div>
       <div className="form-group">
         <label>收件人邮箱（每行一个或逗号分隔）*</label>
         <textarea className="text-input" rows={3} placeholder="user1@example.com&#10;user2@example.com" value={props.form.emailRecipients} onChange={(e) => props.onChange({ ...props.form, emailRecipients: e.target.value })} />
@@ -1543,60 +1452,6 @@ function EmailActionForm(props: {
   );
 }
 
-
-function EmailConfigForm(props: {
-  form: EmailConfigFormState;
-  isLoading: boolean;
-  onChange: (form: EmailConfigFormState) => void;
-  onSubmit: (event: FormEvent) => void;
-  onTest: () => void;
-}) {
-  const canTest = props.form.smtpFromAddress || props.form.smtpUsername;
-
-  return (
-    <form className="em-form" onSubmit={props.onSubmit}>
-      <div className="form-group">
-        <label>SMTP 服务器地址 *</label>
-        <input className="text-input" placeholder="smtp.example.com" value={props.form.smtpHost} onChange={(e) => props.onChange({ ...props.form, smtpHost: e.target.value })} />
-      </div>
-      <div className="form-group">
-        <label>端口</label>
-        <input className="text-input" type="number" value={props.form.smtpPort} onChange={(e) => props.onChange({ ...props.form, smtpPort: Number(e.target.value) })} />
-        <small className="form-hint">SSL 模式（端口 465）</small>
-      </div>
-      <div className="form-group">
-        <label>SMTP 用户名</label>
-        <input className="text-input" placeholder="用户名" value={props.form.smtpUsername} onChange={(e) => props.onChange({ ...props.form, smtpUsername: e.target.value })} />
-      </div>
-      <div className="form-group">
-        <label>SMTP 密码</label>
-        <input className="text-input" type="password" placeholder="留空则不修改" value={props.form.smtpPassword} onChange={(e) => props.onChange({ ...props.form, smtpPassword: e.target.value })} />
-      </div>
-      <div className="form-row">
-        <div className="form-group">
-          <label>发件人地址</label>
-          <input className="text-input" placeholder="noreply@example.com" value={props.form.smtpFromAddress} onChange={(e) => props.onChange({ ...props.form, smtpFromAddress: e.target.value })} />
-        </div>
-        <div className="form-group">
-          <label>发件人名称</label>
-          <input className="text-input" placeholder="实验监控系统" value={props.form.smtpFromName} onChange={(e) => props.onChange({ ...props.form, smtpFromName: e.target.value })} />
-        </div>
-      </div>
-      <div className="admin-notice">
-        <Shield size={14} />
-        <span>邮件配置仅对管理员可见和可编辑，所有工具共享同一套邮件配置。测试邮件将发送至填写的发件人地址。</span>
-      </div>
-      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-        <button className="primary-button" type="submit" disabled={props.isLoading}>
-          <Globe size={16} />保存邮件配置
-        </button>
-        <button className="chip" type="button" disabled={!canTest || props.isLoading} onClick={() => props.onTest()}>
-          <Mail size={15} />发送测试邮件
-        </button>
-      </div>
-    </form>
-  );
-}
 
 // ============================================================
 // Create Group Form (standalone modal form)

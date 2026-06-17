@@ -296,11 +296,13 @@ export default function ExperimentMonitorTool() {
   // Modal states
   const [modal, setModal] = useState<'server-create' | 'server-edit' | 'task-create' | 'task-edit'
     | 'action-email' | 'email-config'
-    | 'script-groups' | null>(null);
+    | 'script-groups' | 'script-group-create' | null>(null);
   const [editingServerId, setEditingServerId] = useState<string>('');
   const [editingActionId, setEditingActionId] = useState<string>('');
   // currently open action for script groups panel
   const [groupsActionId, setGroupsActionId] = useState<string>('');
+  // currently open single group id for the single-group config panel
+  const [singleGroupId, setSingleGroupId] = useState<string>('');
 
   // Form states
   const [serverForm, setServerForm] = useState<ServerFormState>(emptyServer);
@@ -603,15 +605,13 @@ export default function ExperimentMonitorTool() {
 
   /**
    * 点击「脚本」按钮时调用：
-   * - 若当前 task 下还没有 script action，自动创建一个（无需用户填写额外信息）
-   * - 然后直接打开脚本分组管理面板
+   * - 若当前 task 下还没有 script action，先自动创建一个
+   * - 然后弹出「新建分组」表单（只填分组名称即可快速创建一个分组）
    */
-  async function openScriptGroupsPanel() {
+  async function openCreateGroupModal() {
     if (!selectedTask) return;
-    // 找到已有的 script action
     let scriptAction = actions.find((a) => a.actionType === 'script');
     if (!scriptAction) {
-      // 自动创建一个空的 script action
       try {
         const res = await apiPost<{ action: AlertAction }>(
           `/api/tools/experiment-monitor/tasks/${selectedTask.id}/actions`,
@@ -624,7 +624,18 @@ export default function ExperimentMonitorTool() {
         return;
       }
     }
-    openScriptGroups(scriptAction.id);
+    setGroupsActionId(scriptAction.id);
+    setModal('script-group-create');
+  }
+
+  /**
+   * 打开某个分组的专属配置面板（单分组模式）
+   */
+  function openSingleGroupPanel(groupId: string, actionId: string) {
+    setSingleGroupId(groupId);
+    setGroupsActionId(actionId);
+    setModal('script-groups');
+    void loadScriptGroups(actionId);
   }
 
   function editAction(action: AlertAction) {
@@ -912,9 +923,11 @@ export default function ExperimentMonitorTool() {
               onCheckNow={() => void runCheckNow(task.id)}
               onResetAlert={() => void resetAlert(task.id)}
               onAddEmailAction={openCreateEmailAction}
-              onAddScriptAction={() => void openScriptGroupsPanel()}
+              onAddScriptAction={() => void openCreateGroupModal()}
+              onOpenGroupPanel={(groupId, actionId) => openSingleGroupPanel(groupId, actionId)}
               onEditAction={(action) => editAction(action)}
               onDeleteAction={(actionId) => void removeAction(actionId)}
+              onDeleteGroup={(groupId, actionId) => void deleteGroup(groupId, actionId)}
             />
           ))
         )}
@@ -998,19 +1011,34 @@ export default function ExperimentMonitorTool() {
       </Modal>
       )}
 
-      {modal === 'script-groups' && groupsActionId && (
-        <Modal title="脚本触发分组管理" onClose={() => setModal(null)}>
-          <ScriptGroupsPanel
-            actionId={groupsActionId}
-            groups={scriptGroupsMap[groupsActionId] || []}
-            onCreateGroup={(name, prefix) => void createGroup(groupsActionId, name, prefix)}
-            onDeleteGroup={(groupId) => void deleteGroup(groupId, groupsActionId)}
-            onAddQueueItem={(groupId, cmd) => void addQueueItem(groupId, cmd, groupsActionId)}
-            onDeleteQueueItem={(itemId) => void deleteQueueItem(itemId, groupsActionId)}
-            onReorderQueue={(groupId, ids) => void reorderQueue(groupId, ids, groupsActionId)}
-            onRestoreHistory={(histId) => void restoreHistoryItem(histId, groupsActionId)}
-            onDeleteHistory={(histId) => void deleteHistoryItem(histId, groupsActionId)}
-            onRefreshSessions={(groupId) => void refreshSessions(groupId, groupsActionId)}
+      {modal === 'script-groups' && groupsActionId && singleGroupId && (() => {
+        const group = (scriptGroupsMap[groupsActionId] || []).find((g) => g.id === singleGroupId);
+        return group ? (
+          <Modal title={`脚本分组 · ${group.name}`} onClose={() => setModal(null)}>
+            <ScriptGroupsPanel
+              actionId={groupsActionId}
+              groups={[group]}
+              singleMode
+              onDeleteGroup={(groupId) => void deleteGroup(groupId, groupsActionId)}
+              onAddQueueItem={(groupId, cmd) => void addQueueItem(groupId, cmd, groupsActionId)}
+              onDeleteQueueItem={(itemId) => void deleteQueueItem(itemId, groupsActionId)}
+              onReorderQueue={(groupId, ids) => void reorderQueue(groupId, ids, groupsActionId)}
+              onRestoreHistory={(histId) => void restoreHistoryItem(histId, groupsActionId)}
+              onDeleteHistory={(histId) => void deleteHistoryItem(histId, groupsActionId)}
+              onRefreshSessions={(groupId) => void refreshSessions(groupId, groupsActionId)}
+            />
+          </Modal>
+        ) : null;
+      })()}
+
+      {modal === 'script-group-create' && groupsActionId && (
+        <Modal title="新建脚本分组" onClose={() => setModal(null)}>
+          <CreateGroupForm
+            onSubmit={async (name, prefix) => {
+              await createGroup(groupsActionId, name, prefix);
+              setModal(null);
+            }}
+            onCancel={() => setModal(null)}
           />
         </Modal>
       )}
@@ -1041,6 +1069,8 @@ function TaskCard(props: {
   onAddScriptAction: () => void;
   onEditAction: (action: AlertAction) => void;
   onDeleteAction: (actionId: string) => void;
+  onDeleteGroup: (groupId: string, actionId: string) => void;
+  onOpenGroupPanel: (groupId: string, actionId: string) => void;
 }) {
   const { task, server, alertState, latestSample } = props;
 
@@ -1103,30 +1133,50 @@ function TaskCard(props: {
             {props.actions.length === 0 ? (
               <p className="muted">尚未配置报警动作，添加邮件或脚本动作以在报警时自动执行。</p>
             ) : (
-              props.actions.map((action) => (
-                <div className="em-action-item" key={action.id}>
-                  <span className="action-icon">
-                    {action.actionType === 'email' ? <Mail size={14} /> : <Terminal size={14} />}
-                  </span>
-                  <div className="action-info">
-                    <strong>{action.actionType === 'email' ? '邮件通知' : '脚本触发'}</strong>
-                    {action.actionType === 'email' ? (
-                      <small className="muted">收件人: {action.emailRecipients.join(', ') || '未设置'}</small>
-                    ) : (
+              props.actions.flatMap((action) => {
+                if (action.actionType === 'email') {
+                  return [
+                    <div className="em-action-item" key={action.id}>
+                      <span className="action-icon"><Mail size={14} /></span>
+                      <div className="action-info">
+                        <strong>邮件通知</strong>
+                        <small className="muted">收件人: {action.emailRecipients.join(', ') || '未设置'}</small>
+                      </div>
+                      <button className="icon-button tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onEditAction(action); }} title="编辑"><Settings size={13} /></button>
+                      <button className="icon-button tiny danger" type="button" onClick={(e) => { e.stopPropagation(); props.onDeleteAction(action.id); }} title="删除"><Trash2 size={13} /></button>
+                    </div>,
+                  ];
+                }
+                // script action: 展开显示每个分组
+                const groups = props.scriptGroupsMap?.[action.id] || [];
+                if (groups.length === 0) {
+                  return [
+                    <div className="em-action-item" key={`${action.id}-empty`}>
+                      <span className="action-icon"><Terminal size={14} /></span>
+                      <div className="action-info">
+                        <strong>脚本触发</strong>
+                        <small className="muted">暂无分组，点击「脚本」添加分组</small>
+                      </div>
+                      <button className="icon-button tiny danger" type="button" onClick={(e) => { e.stopPropagation(); props.onDeleteAction(action.id); }} title="删除脚本动作"><Trash2 size={13} /></button>
+                    </div>,
+                  ];
+                }
+                return groups.map((group) => (
+                  <div className="em-action-item" key={`${action.id}-${group.id}`}>
+                    <span className="action-icon"><Terminal size={14} /></span>
+                    <div className="action-info">
+                      <strong>{group.name}</strong>
                       <small className="muted">
-                        {(props.scriptGroupsMap?.[action.id]?.length || 0)} 个分组
-                        {(() => {
-                          const groups = props.scriptGroupsMap?.[action.id] || [];
-                          const totalQueue = groups.reduce((s, g) => s + g.queue.length, 0);
-                          return totalQueue > 0 ? ` · 队列共 ${totalQueue} 条` : ' · 队列为空';
-                        })()}
+                        {group.queue.length > 0 ? `队列 ${group.queue.length} 条` : '队列为空'}
+                        {group.sessions.filter((s) => s.status === 'running').length > 0 &&
+                          ` · ${group.sessions.filter((s) => s.status === 'running').length} 运行中`}
                       </small>
-                    )}
+                    </div>
+                    <button className="icon-button tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onOpenGroupPanel(group.id, action.id); }} title="配置该分组"><Settings size={13} /></button>
+                    <button className="icon-button tiny danger" type="button" onClick={(e) => { e.stopPropagation(); if (window.confirm(`确认删除分组「${group.name}」及其所有队列和历史？`)) { props.onDeleteGroup(group.id, action.id); } }} title="删除分组"><Trash2 size={13} /></button>
                   </div>
-                  <button className="icon-button tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onEditAction(action); }} title={action.actionType === 'script' ? '管理脚本分组' : '编辑'}>{action.actionType === 'script' ? <Terminal size={13} /> : <Settings size={13} />}</button>
-                  <button className="icon-button tiny danger" type="button" onClick={(e) => { e.stopPropagation(); props.onDeleteAction(action.id); }} title="删除"><Trash2 size={13} /></button>
-                </div>
-              ))
+                ));
+              })
             )}
           </div>
         </div>
@@ -1553,13 +1603,66 @@ function EmailConfigForm(props: {
 }
 
 // ============================================================
+// Create Group Form (standalone modal form)
+// ============================================================
+
+function CreateGroupForm(props: {
+  onSubmit: (name: string, prefix: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [prefix, setPrefix] = useState('');
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    props.onSubmit(name.trim(), prefix.trim());
+  }
+
+  return (
+    <form className="em-form" onSubmit={handleSubmit}>
+      <div className="form-group">
+        <label>分组名称 *</label>
+        <input
+          className="text-input"
+          placeholder="如：实验 A、训练任务 1"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+        />
+        <small className="form-hint">每次报警触发时，该分组队列头部的命令将自动执行</small>
+      </div>
+      <div className="form-group">
+        <label>Screen 会话名前缀（可选）</label>
+        <input
+          className="text-input"
+          placeholder="留空则自动生成"
+          value={prefix}
+          onChange={(e) => setPrefix(e.target.value)}
+        />
+        <small className="form-hint">仅当远程服务器安装了 screen 时生效</small>
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="primary-button" type="submit" disabled={!name.trim()}>
+          <Plus size={16} />创建分组
+        </button>
+        <button className="chip" type="button" onClick={props.onCancel}>
+          <X size={14} />取消
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ============================================================
 // Script Groups Panel
 // ============================================================
 
 function ScriptGroupsPanel(props: {
   actionId: string;
   groups: ScriptGroup[];
-  onCreateGroup: (name: string, screenNamePrefix: string) => void;
+  singleMode?: boolean;
+  onCreateGroup?: (name: string, screenNamePrefix: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onAddQueueItem: (groupId: string, command: string) => void;
   onDeleteQueueItem: (itemId: string) => void;
@@ -1585,7 +1688,7 @@ function ScriptGroupsPanel(props: {
   function handleCreateGroup(e: FormEvent) {
     e.preventDefault();
     if (!newGroupName.trim()) return;
-    props.onCreateGroup(newGroupName.trim(), newGroupPrefix.trim());
+    props.onCreateGroup?.(newGroupName.trim(), newGroupPrefix.trim());
     setNewGroupName('');
     setNewGroupPrefix('');
     setShowCreateGroup(false);
@@ -1623,16 +1726,18 @@ function ScriptGroupsPanel(props: {
     <div className="sg-panel">
       <div className="sg-header">
         <p className="sg-desc">每个分组维护独立的脚本队列。每次报警触发时，各分组依次从队列头部取出一条命令执行，执行完毕后自动归入历史存档。</p>
-        <button
-          className="chip"
-          type="button"
-          onClick={() => setShowCreateGroup((v) => !v)}
-        >
-          <Plus size={14} />添加分组
-        </button>
+        {!props.singleMode && (
+          <button
+            className="chip"
+            type="button"
+            onClick={() => setShowCreateGroup((v) => !v)}
+          >
+            <Plus size={14} />添加分组
+          </button>
+        )}
       </div>
 
-      {showCreateGroup && (
+      {!props.singleMode && showCreateGroup && (
         <form className="sg-create-form em-fieldset" onSubmit={handleCreateGroup}>
           <div className="em-form-grid2">
             <div className="form-group">

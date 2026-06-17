@@ -2902,3 +2902,385 @@ gap: 4px;
   font-weight: 700;
   line-height: 1;
 }
+
+/* ============================================================
+   Shared Badge Utility (used in EM and ScriptGroupsPanel)
+   ============================================================ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.badge.disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+
+.badge.danger {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.badge.warning {
+  background: #fffbeb;
+  color: #d97706;
+}
+
+.badge.success {
+  background: #ecfdf5;
+  color: #059669;
+}
+
+.badge.info {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+/* ============================================================
+   Script Groups Panel (sg-*)
+   ============================================================ */
+
+.sg-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.sg-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.sg-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.5;
+  flex: 1;
+}
+
+.sg-create-form {
+  background: rgba(255,255,255,0.7);
+  border-radius: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sg-create-form-footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sg-empty {
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.sg-empty-inline {
+  margin: 8px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.sg-group {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.82);
+}
+
+.sg-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(248,250,253,0.9);
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-group-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sg-group-prefix {
+  font-size: 11px;
+  flex: 1;
+}
+
+.sg-group-badges {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+/* Tabs */
+.sg-tabs {
+  display: flex;
+  gap: 0;
+  background: rgba(244,246,250,0.8);
+  border-bottom: 1px solid var(--border);
+}
+
+.sg-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sg-tab:hover {
+  color: var(--text);
+}
+
+.sg-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: transparent;
+}
+
+/* Tab content */
+.sg-tab-content {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sg-tab-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.sg-sessions-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* Queue list */
+.sg-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sg-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: rgba(245,247,252,0.8);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: grab;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.sg-queue-item:active {
+  cursor: grabbing;
+}
+
+.sg-queue-item.next {
+  border-color: #a7c4f5;
+  background: rgba(239,246,255,0.9);
+}
+
+.sg-queue-item:hover {
+  background: rgba(235,241,255,0.9);
+}
+
+.sg-drag-handle {
+  display: inline-flex;
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.sg-queue-idx {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.sg-next-badge {
+  flex-shrink: 0;
+}
+
+.sg-cmd {
+  flex: 1;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  word-break: break-all;
+  background: none;
+}
+
+.sg-cmd-sm {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Add command area */
+.sg-add-cmd {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 4px;
+}
+
+.sg-cmd-input {
+  flex: 1;
+  font-size: 12px;
+  resize: vertical;
+  min-height: 42px;
+}
+
+/* History list */
+.sg-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sg-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  background: rgba(250,250,252,0.8);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.sg-history-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-screen-tag {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.sg-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Sessions list */
+.sg-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sg-session-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(250,250,252,0.85);
+}
+
+.sg-session-item.running {
+  border-color: #fbbf24;
+  background: rgba(255,251,235,0.8);
+}
+
+.sg-session-item.done {
+  border-color: #6ee7b7;
+  background: rgba(236,253,245,0.8);
+}
+
+.sg-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+
+.sg-status-dot.running {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.2);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+.sg-status-dot.done {
+  background: #10b981;
+}
+
+.sg-status-dot.unknown {
+  background: #94a3b8;
+}
+
+.sg-session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-session-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sg-session-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

@@ -6,25 +6,35 @@ from pydantic import BaseModel, Field
 from backend.app.core.security import get_optional_user, require_admin, require_user
 
 from tools.experiment_monitor.backend.service import (
+    add_queue_item,
     collect_due_checks,
     create_alert_action,
     create_monitor_task,
+    create_script_group,
     create_server,
     delete_alert_action,
+    delete_history_item,
     delete_monitor_task,
+    delete_queue_item,
+    delete_script_group,
     delete_server,
     get_alert_state,
     get_email_config,
     get_task_history,
     list_alert_actions,
     list_monitor_tasks,
+    list_script_groups,
     list_servers,
+    refresh_screen_sessions,
+    reorder_queue,
     reset_alert_state,
+    restore_history_to_queue,
     run_monitor_check,
     save_email_config,
     test_ssh_connection,
     update_alert_action,
     update_monitor_task,
+    update_script_group,
     update_server,
 )
 
@@ -197,6 +207,94 @@ def delete_action_route(request: Request, action_id: str) -> dict[str, bool]:
     user = require_user(request)
     delete_alert_action(action_id, user)
     return {"deleted": True}
+
+
+# ============================================================
+# Script Groups APIs
+# ============================================================
+
+class ScriptGroupPayload(BaseModel):
+    name: str = "脚本组"
+    screenNamePrefix: str = ""
+    sortOrder: int = 0
+    commands: list[str] = Field(default_factory=list)
+
+
+class QueueItemPayload(BaseModel):
+    command: str
+
+
+class ReorderPayload(BaseModel):
+    orderedIds: list[str]
+
+
+@router.get("/actions/{action_id}/groups")
+def list_groups_route(request: Request, action_id: str) -> dict:
+    user = require_user(request)
+    return {"groups": list_script_groups(action_id, user)}
+
+
+@router.post("/actions/{action_id}/groups")
+def create_group_route(request: Request, action_id: str, payload: ScriptGroupPayload) -> dict:
+    user = require_user(request)
+    return {"group": create_script_group(action_id, payload.model_dump(), user)}
+
+
+@router.put("/groups/{group_id}")
+def update_group_route(request: Request, group_id: str, payload: ScriptGroupPayload) -> dict:
+    user = require_user(request)
+    return {"group": update_script_group(group_id, payload.model_dump(exclude_unset=True), user)}
+
+
+@router.delete("/groups/{group_id}")
+def delete_group_route(request: Request, group_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    delete_script_group(group_id, user)
+    return {"deleted": True}
+
+
+# ── Queue ──────────────────────────────────────────────────────────────────────
+
+@router.post("/groups/{group_id}/queue")
+def add_queue_item_route(request: Request, group_id: str, payload: QueueItemPayload) -> dict:
+    user = require_user(request)
+    return {"item": add_queue_item(group_id, payload.command, user)}
+
+
+@router.delete("/queue/{item_id}")
+def delete_queue_item_route(request: Request, item_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    delete_queue_item(item_id, user)
+    return {"deleted": True}
+
+
+@router.post("/groups/{group_id}/queue/reorder")
+def reorder_queue_route(request: Request, group_id: str, payload: ReorderPayload) -> dict:
+    user = require_user(request)
+    return {"group": reorder_queue(group_id, payload.orderedIds, user)}
+
+
+# ── History ───────────────────────────────────────────────────────────────────
+
+@router.post("/history/{history_id}/restore")
+def restore_history_route(request: Request, history_id: str) -> dict:
+    user = require_user(request)
+    return {"group": restore_history_to_queue(history_id, user)}
+
+
+@router.delete("/history/{history_id}")
+def delete_history_route(request: Request, history_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    delete_history_item(history_id, user)
+    return {"deleted": True}
+
+
+# ── Screen Sessions ───────────────────────────────────────────────────────────
+
+@router.post("/groups/{group_id}/sessions/refresh")
+def refresh_sessions_route(request: Request, group_id: str) -> dict:
+    user = require_user(request)
+    return {"sessions": refresh_screen_sessions(group_id, user)}
 
 
 # ============================================================

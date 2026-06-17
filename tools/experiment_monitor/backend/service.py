@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import secrets
+import shlex
 import smtplib
 import sqlite3
 import time
@@ -150,12 +151,62 @@ def init_database() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            -- 脚本触发分组（一个 script 类型的 action 可以拥有多个分组）
+            CREATE TABLE IF NOT EXISTS em_script_groups (
+                id TEXT PRIMARY KEY,
+                action_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '脚本组',
+                screen_name_prefix TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(action_id) REFERENCES em_alert_actions(id)
+            );
+
+            -- 脚本队列（每个分组的待执行命令队列，有序）
+            CREATE TABLE IF NOT EXISTS em_script_queue (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                command TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(group_id) REFERENCES em_script_groups(id)
+            );
+
+            -- 脚本历史存档（已触发执行过的命令，可恢复回队列）
+            CREATE TABLE IF NOT EXISTS em_script_history (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                command TEXT NOT NULL,
+                triggered_at TEXT NOT NULL,
+                screen_session TEXT,
+                FOREIGN KEY(group_id) REFERENCES em_script_groups(id)
+            );
+
+            -- Screen 会话状态追踪
+            CREATE TABLE IF NOT EXISTS em_screen_sessions (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                history_id TEXT,
+                session_name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',  -- running | done | unknown
+                started_at TEXT NOT NULL,
+                checked_at TEXT,
+                FOREIGN KEY(group_id) REFERENCES em_script_groups(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_em_samples_task_time
                 ON em_samples(task_id, checked_at);
             CREATE INDEX IF NOT EXISTS idx_em_alert_events_task
                 ON em_alert_events(task_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_em_monitor_tasks_server
                 ON em_monitor_tasks(server_id);
+            CREATE INDEX IF NOT EXISTS idx_em_script_groups_action
+                ON em_script_groups(action_id);
+            CREATE INDEX IF NOT EXISTS idx_em_script_queue_group
+                ON em_script_queue(group_id, position);
+            CREATE INDEX IF NOT EXISTS idx_em_screen_sessions_group
+                ON em_screen_sessions(group_id);
             """
         )
         # 迁移：为旧表补充新字段（ALTER TABLE IF NOT EXISTS column 仅 SQLite 3.37+ 支持，用 try/except 兼容旧版本）
@@ -507,6 +558,322 @@ def delete_alert_action(action_id: str, user: User) -> None:
     with get_connection() as connection:
         connection.execute("UPDATE em_alert_actions SET enabled = 0 WHERE id = ?", (action_id,))
         connection.commit()
+
+
+# ============================================================
+# Script Groups (per action, queue + history + screen sessions)
+# ============================================================
+
+def _get_action_for_user(action_id: str, user: User) -> sqlite3.Row:
+    """Fetch action and verify ownership via task ownership."""
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM em_alert_actions WHERE id = ?", (action_id,)).fetchone()
+    if row is None:
+        raise ToolboxError("ACTION_NOT_FOUND", "报警动作不存在", status_code=404, tool_id=TOOL_ID)
+    get_monitor_task(row["task_id"], user)
+    return row
+
+
+def _get_group(group_id: str, user: User) -> sqlite3.Row:
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM em_script_groups WHERE id = ?", (group_id,)).fetchone()
+    if row is None:
+        raise ToolboxError("GROUP_NOT_FOUND", "脚本分组不存在", status_code=404, tool_id=TOOL_ID)
+    _get_action_for_user(row["action_id"], user)
+    return row
+
+
+def list_script_groups(action_id: str, user: User) -> list[dict[str, Any]]:
+    _get_action_for_user(action_id, user)
+    with get_connection() as connection:
+        groups = connection.execute(
+            "SELECT * FROM em_script_groups WHERE action_id = ? ORDER BY sort_order, created_at",
+            (action_id,),
+        ).fetchall()
+    result = []
+    for g in groups:
+        result.append(_public_group_full(g))
+    return result
+
+
+def _public_group_full(g: sqlite3.Row) -> dict[str, Any]:
+    group_id = g["id"]
+    with get_connection() as connection:
+        queue_rows = connection.execute(
+            "SELECT * FROM em_script_queue WHERE group_id = ? ORDER BY position, created_at",
+            (group_id,),
+        ).fetchall()
+        history_rows = connection.execute(
+            "SELECT * FROM em_script_history WHERE group_id = ? ORDER BY triggered_at DESC LIMIT 100",
+            (group_id,),
+        ).fetchall()
+        session_rows = connection.execute(
+            "SELECT * FROM em_screen_sessions WHERE group_id = ? ORDER BY started_at DESC LIMIT 50",
+            (group_id,),
+        ).fetchall()
+    return {
+        "id": group_id,
+        "actionId": g["action_id"],
+        "name": g["name"],
+        "screenNamePrefix": g["screen_name_prefix"],
+        "sortOrder": g["sort_order"],
+        "createdAt": g["created_at"],
+        "queue": [{"id": r["id"], "command": r["command"], "position": r["position"]} for r in queue_rows],
+        "history": [
+            {
+                "id": r["id"],
+                "command": r["command"],
+                "triggeredAt": r["triggered_at"],
+                "screenSession": r["screen_session"],
+            }
+            for r in history_rows
+        ],
+        "sessions": [
+            {
+                "id": r["id"],
+                "sessionName": r["session_name"],
+                "command": r["command"],
+                "status": r["status"],
+                "startedAt": r["started_at"],
+                "checkedAt": r["checked_at"],
+                "historyId": r["history_id"],
+            }
+            for r in session_rows
+        ],
+    }
+
+
+def create_script_group(action_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
+    _get_action_for_user(action_id, user)
+    group_id = secrets.token_hex(12)
+    now = now_iso()
+    with get_connection() as connection:
+        max_order = connection.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM em_script_groups WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO em_script_groups (id, action_id, name, screen_name_prefix, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (group_id, action_id, payload.get("name", "脚本组"), payload.get("screenNamePrefix", ""), max_order + 1, now),
+        )
+        # Optionally pre-populate queue from payload
+        commands = payload.get("commands", [])
+        for pos, cmd in enumerate(commands):
+            if cmd.strip():
+                connection.execute(
+                    "INSERT INTO em_script_queue (id, group_id, command, position, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (secrets.token_hex(10), group_id, cmd.strip(), pos, now),
+                )
+        connection.commit()
+        row = connection.execute("SELECT * FROM em_script_groups WHERE id = ?", (group_id,)).fetchone()
+    return _public_group_full(row)
+
+
+def update_script_group(group_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
+    row = _get_group(group_id, user)
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE em_script_groups SET name = ?, screen_name_prefix = ?, sort_order = ? WHERE id = ?",
+            (
+                payload.get("name", row["name"]),
+                payload.get("screenNamePrefix", row["screen_name_prefix"]),
+                int(payload.get("sortOrder", row["sort_order"])),
+                group_id,
+            ),
+        )
+        connection.commit()
+        updated = connection.execute("SELECT * FROM em_script_groups WHERE id = ?", (group_id,)).fetchone()
+    return _public_group_full(updated)
+
+
+def delete_script_group(group_id: str, user: User) -> None:
+    _get_group(group_id, user)
+    with get_connection() as connection:
+        connection.execute("DELETE FROM em_screen_sessions WHERE group_id = ?", (group_id,))
+        connection.execute("DELETE FROM em_script_history WHERE group_id = ?", (group_id,))
+        connection.execute("DELETE FROM em_script_queue WHERE group_id = ?", (group_id,))
+        connection.execute("DELETE FROM em_script_groups WHERE id = ?", (group_id,))
+        connection.commit()
+
+
+# ── Queue management ──────────────────────────────────────────────────────────
+
+def add_queue_item(group_id: str, command: str, user: User) -> dict[str, Any]:
+    _get_group(group_id, user)
+    now = now_iso()
+    with get_connection() as connection:
+        max_pos = connection.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM em_script_queue WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()[0]
+        item_id = secrets.token_hex(10)
+        connection.execute(
+            "INSERT INTO em_script_queue (id, group_id, command, position, created_at) VALUES (?, ?, ?, ?, ?)",
+            (item_id, group_id, command.strip(), max_pos + 1, now),
+        )
+        connection.commit()
+    return {"id": item_id, "command": command.strip(), "position": max_pos + 1}
+
+
+def delete_queue_item(item_id: str, user: User) -> None:
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM em_script_queue WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        raise ToolboxError("ITEM_NOT_FOUND", "队列条目不存在", status_code=404, tool_id=TOOL_ID)
+    _get_group(row["group_id"], user)
+    with get_connection() as connection:
+        connection.execute("DELETE FROM em_script_queue WHERE id = ?", (item_id,))
+        connection.commit()
+    _reorder_queue(row["group_id"])
+
+
+def reorder_queue(group_id: str, ordered_ids: list[str], user: User) -> dict[str, Any]:
+    """Reorder queue items by providing an ordered list of their IDs."""
+    group = _get_group(group_id, user)
+    with get_connection() as connection:
+        for pos, item_id in enumerate(ordered_ids):
+            connection.execute(
+                "UPDATE em_script_queue SET position = ? WHERE id = ? AND group_id = ?",
+                (pos, item_id, group_id),
+            )
+        connection.commit()
+    return _public_group_full(group)
+
+
+def _reorder_queue(group_id: str) -> None:
+    """Compact positions after deletion."""
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT id FROM em_script_queue WHERE group_id = ? ORDER BY position, created_at",
+            (group_id,),
+        ).fetchall()
+        for pos, row in enumerate(rows):
+            connection.execute("UPDATE em_script_queue SET position = ? WHERE id = ?", (pos, row["id"]))
+        connection.commit()
+
+
+# ── History management ────────────────────────────────────────────────────────
+
+def restore_history_to_queue(history_id: str, user: User) -> dict[str, Any]:
+    """Move a history entry back to the queue (append to end)."""
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM em_script_history WHERE id = ?", (history_id,)).fetchone()
+    if row is None:
+        raise ToolboxError("HISTORY_NOT_FOUND", "历史记录不存在", status_code=404, tool_id=TOOL_ID)
+    group = _get_group(row["group_id"], user)
+    now = now_iso()
+    with get_connection() as connection:
+        max_pos = connection.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM em_script_queue WHERE group_id = ?",
+            (row["group_id"],),
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO em_script_queue (id, group_id, command, position, created_at) VALUES (?, ?, ?, ?, ?)",
+            (secrets.token_hex(10), row["group_id"], row["command"], max_pos + 1, now),
+        )
+        connection.commit()
+    return _public_group_full(group)
+
+
+def delete_history_item(history_id: str, user: User) -> None:
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM em_script_history WHERE id = ?", (history_id,)).fetchone()
+    if row is None:
+        raise ToolboxError("HISTORY_NOT_FOUND", "历史记录不存在", status_code=404, tool_id=TOOL_ID)
+    _get_group(row["group_id"], user)
+    with get_connection() as connection:
+        connection.execute("DELETE FROM em_script_history WHERE id = ?", (history_id,))
+        connection.commit()
+
+
+# ── Screen session status polling ─────────────────────────────────────────────
+
+def refresh_screen_sessions(group_id: str, user: User) -> list[dict[str, Any]]:
+    """SSH into the server and check which screen sessions are still alive."""
+    group = _get_group(group_id, user)
+    # Find the server via action → task → server
+    with get_connection() as connection:
+        action = connection.execute(
+            "SELECT * FROM em_alert_actions WHERE id = ?", (group["action_id"],)
+        ).fetchone()
+        task = connection.execute(
+            "SELECT * FROM em_monitor_tasks WHERE id = ?", (action["task_id"],)
+        ).fetchone()
+        server = connection.execute(
+            "SELECT * FROM em_servers WHERE id = ?", (task["server_id"],)
+        ).fetchone()
+        sessions = connection.execute(
+            "SELECT * FROM em_screen_sessions WHERE group_id = ? AND status = 'running' ORDER BY started_at DESC",
+            (group_id,),
+        ).fetchall()
+
+    if not sessions:
+        return []
+
+    # Get alive screen session names from remote
+    try:
+        output = _run_ssh(server, "screen -ls 2>/dev/null || true", timeout=10)
+        alive_names: set[str] = set()
+        for line in output.splitlines():
+            # screen -ls output line: "\t12345.my_session\t(Detached)"
+            stripped = line.strip()
+            if stripped and "\t" in line:
+                # Extract session name part (after the PID.)
+                parts = stripped.split("\t")
+                for part in parts:
+                    if "." in part:
+                        alive_names.add(part.split(".", 1)[1].strip())
+    except Exception:
+        # If SSH fails, mark all as unknown
+        now = now_iso()
+        with get_connection() as connection:
+            for s in sessions:
+                connection.execute(
+                    "UPDATE em_screen_sessions SET status = 'unknown', checked_at = ? WHERE id = ?",
+                    (now, s["id"]),
+                )
+            connection.commit()
+        return _get_sessions_for_group(group_id)
+
+    now = now_iso()
+    with get_connection() as connection:
+        for s in sessions:
+            # Match by session name (without PID prefix)
+            session_name = s["session_name"]
+            # alive_names contains names like "my_session", session_name is the full name we set
+            new_status = "running" if session_name in alive_names else "done"
+            connection.execute(
+                "UPDATE em_screen_sessions SET status = ?, checked_at = ? WHERE id = ?",
+                (new_status, now, s["id"]),
+            )
+        connection.commit()
+
+    return _get_sessions_for_group(group_id)
+
+
+def _get_sessions_for_group(group_id: str) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM em_screen_sessions WHERE group_id = ? ORDER BY started_at DESC LIMIT 50",
+            (group_id,),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "sessionName": r["session_name"],
+            "command": r["command"],
+            "status": r["status"],
+            "startedAt": r["started_at"],
+            "checkedAt": r["checked_at"],
+            "historyId": r["history_id"],
+        }
+        for r in rows
+    ]
 
 
 # ============================================================
@@ -946,32 +1313,109 @@ def _execute_email_action(
 
 
 def _execute_script_action(action: sqlite3.Row, server: sqlite3.Row, has_screen: bool) -> None:
-    commands = _json_list(action["script_commands"])
-    if not commands:
+    """Execute script groups for this action.
+
+    新逻辑：
+    - 遍历该 action 下的所有脚本分组（em_script_groups），按 sort_order 顺序执行。
+    - 每个分组从队列中取出第一条命令执行，执行后将其移入历史存档，并记录 screen session。
+    - 每条命令独立创建一个 screen 窗口（session），session 名为 {prefix}_{timestamp}_{idx}。
+    - 若分组队列为空，则跳过该分组。
+    """
+    action_id = action["id"]
+    task_id = action["task_id"]
+
+    with get_connection() as connection:
+        groups = connection.execute(
+            "SELECT * FROM em_script_groups WHERE action_id = ? ORDER BY sort_order, created_at",
+            (action_id,),
+        ).fetchall()
+
+    if not groups:
+        # 兼容旧数据：没有分组时用旧字段 script_commands 执行
+        commands = _json_list(action["script_commands"])
+        if not commands:
+            return
+        scripts_per_trigger = action["scripts_per_trigger"] or 1
+        screen_name_prefix = action["script_screen_name"] or f"em_{action_id[:8]}"
+        for i, cmd in enumerate(commands[:scripts_per_trigger]):
+            _run_single_script(cmd, i, screen_name_prefix, server, has_screen, task_id, action_id, group_id=None)
         return
 
-    scripts_per_trigger = action["scripts_per_trigger"] or 1
-    screen_name_prefix = action["script_screen_name"] or f"em_trigger_{action['id'][:8]}"
+    for group in groups:
+        group_id = group["id"]
+        screen_prefix = group["screen_name_prefix"] or f"em_{group_id[:8]}"
 
-    # Determine how many scripts to execute this time
-    # Use a queue-like approach: track which scripts have been executed
-    commands_to_run = commands[:scripts_per_trigger]
+        with get_connection() as connection:
+            queue_item = connection.execute(
+                "SELECT * FROM em_script_queue WHERE group_id = ? ORDER BY position, created_at LIMIT 1",
+                (group_id,),
+            ).fetchone()
 
-    for i, cmd in enumerate(commands_to_run):
-        if has_screen and screen_name_prefix:
-            screen_session = f"{screen_name_prefix}_{i}_{int(time.time())}"
-            full_cmd = f'screen -dmS {shlex_quote(screen_session)} bash -c {shlex_quote(cmd + "; exec bash")}'
-        else:
-            full_cmd = cmd
+        if queue_item is None:
+            continue  # 队列为空，跳过该分组
 
-        try:
-            output = _run_ssh(server, full_cmd, timeout=30)
-            _record_event(action["task_id"], action["id"], "script_executed",
-                         f"脚本已在远程服务器执行{(f' (screen: {screen_session})' if has_screen else '')}",
-                         {"command": cmd[:200], "screenSession": screen_session if has_screen else None,
-                          "output": output[:500] if output else None})
-        except Exception as exc:
-            raise ToolboxError("SCRIPT_EXEC_FAILED", f"脚本执行失败: {exc}", status_code=500, tool_id=TOOL_ID) from exc
+        cmd = queue_item["command"]
+        item_id = queue_item["id"]
+        now = now_iso()
+
+        # Execute the command (each command gets its own screen window)
+        screen_session = _run_single_script(cmd, 0, screen_prefix, server, has_screen, task_id, action_id, group_id=group_id)
+
+        # Move from queue to history archive
+        history_id = secrets.token_hex(10)
+        with get_connection() as connection:
+            connection.execute("DELETE FROM em_script_queue WHERE id = ?", (item_id,))
+            connection.execute(
+                "INSERT INTO em_script_history (id, group_id, command, triggered_at, screen_session) VALUES (?, ?, ?, ?, ?)",
+                (history_id, group_id, cmd, now, screen_session),
+            )
+            # Record screen session entry if screen was used
+            if has_screen and screen_session:
+                session_id = secrets.token_hex(10)
+                connection.execute(
+                    """INSERT INTO em_screen_sessions
+                       (id, group_id, history_id, session_name, command, status, started_at)
+                       VALUES (?, ?, ?, ?, ?, 'running', ?)""",
+                    (session_id, group_id, history_id, screen_session, cmd, now),
+                )
+            connection.commit()
+        _reorder_queue(group_id)
+
+
+def _run_single_script(
+    cmd: str,
+    idx: int,
+    screen_prefix: str,
+    server: sqlite3.Row,
+    has_screen: bool,
+    task_id: str,
+    action_id: str,
+    group_id: str | None,
+) -> str | None:
+    """Run one command on the remote server. Returns screen session name or None."""
+    screen_session: str | None = None
+    if has_screen:
+        screen_session = f"{screen_prefix}_{int(time.time())}_{idx}"
+        full_cmd = f'screen -dmS {shlex.quote(screen_session)} bash -c {shlex.quote(cmd + "; exec bash")}'
+    else:
+        full_cmd = cmd
+
+    try:
+        output = _run_ssh(server, full_cmd, timeout=30)
+        _record_event(
+            task_id, action_id, "script_executed",
+            f"脚本已在远程服务器执行{(f' (screen: {screen_session})' if has_screen else '')}",
+            {
+                "command": cmd[:200],
+                "screenSession": screen_session,
+                "groupId": group_id,
+                "output": (output[:500] if output else None),
+            },
+        )
+    except Exception as exc:
+        raise ToolboxError("SCRIPT_EXEC_FAILED", f"脚本执行失败: {exc}", status_code=500, tool_id=TOOL_ID) from exc
+
+    return screen_session
 
 
 # ============================================================

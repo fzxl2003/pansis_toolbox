@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Activity,
@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  GripVertical,
   Globe,
   Mail,
   Monitor,
@@ -76,6 +77,41 @@ type AlertAction = {
   sortOrder: number;
   enabled: boolean;
   createdAt: string;
+};
+
+type QueueItem = {
+  id: string;
+  command: string;
+  position: number;
+};
+
+type HistoryItem = {
+  id: string;
+  command: string;
+  triggeredAt: string;
+  screenSession: string | null;
+};
+
+type ScreenSession = {
+  id: string;
+  sessionName: string;
+  command: string;
+  status: 'running' | 'done' | 'unknown';
+  startedAt: string;
+  checkedAt: string | null;
+  historyId: string | null;
+};
+
+type ScriptGroup = {
+  id: string;
+  actionId: string;
+  name: string;
+  screenNamePrefix: string;
+  sortOrder: number;
+  createdAt: string;
+  queue: QueueItem[];
+  history: HistoryItem[];
+  sessions: ScreenSession[];
 };
 
 type Sample = {
@@ -169,11 +205,6 @@ type EmailActionFormState = {
   emailBodyTemplate: string;
 };
 
-type ScriptActionFormState = {
-  scriptCommands: string;
-  scriptScreenName: string;
-  scriptsPerTrigger: number;
-};
 
 type EmailConfigFormState = {
   smtpHost: string;
@@ -234,11 +265,6 @@ const emptyEmailAction: EmailActionFormState = {
 此邮件由实验监控系统自动发送。`,
 };
 
-const emptyScriptAction: ScriptActionFormState = {
-  scriptCommands: '',
-  scriptScreenName: '',
-  scriptsPerTrigger: 1,
-};
 
 const emptyEmailConfig: EmailConfigFormState = {
   smtpHost: 'smtp.buaa.edu.cn',
@@ -269,16 +295,21 @@ export default function ExperimentMonitorTool() {
 
   // Modal states
   const [modal, setModal] = useState<'server-create' | 'server-edit' | 'task-create' | 'task-edit'
-    | 'action-email' | 'action-script' | 'email-config' | null>(null);
+    | 'action-email' | 'email-config'
+    | 'script-groups' | null>(null);
   const [editingServerId, setEditingServerId] = useState<string>('');
   const [editingActionId, setEditingActionId] = useState<string>('');
+  // currently open action for script groups panel
+  const [groupsActionId, setGroupsActionId] = useState<string>('');
 
   // Form states
   const [serverForm, setServerForm] = useState<ServerFormState>(emptyServer);
   const [taskForm, setTaskForm] = useState<TaskFormState>(emptyTask);
   const [emailActionForm, setEmailActionForm] = useState<EmailActionFormState>(emptyEmailAction);
-  const [scriptActionForm, setScriptActionForm] = useState<ScriptActionFormState>(emptyScriptAction);
   const [emailConfigForm, setEmailConfigForm] = useState<EmailConfigFormState>(emptyEmailConfig);
+
+  // Script groups state (keyed by action id)
+  const [scriptGroupsMap, setScriptGroupsMap] = useState<Record<string, ScriptGroup[]>>({});
 
   // UI state
   const [error, setError] = useState<string | null>(null);
@@ -381,6 +412,23 @@ export default function ExperimentMonitorTool() {
         `/api/tools/experiment-monitor/tasks/${taskId}/actions`,
       );
       setActions(payload.actions);
+      // Also preload groups for script actions
+      for (const action of payload.actions) {
+        if (action.actionType === 'script') {
+          void loadScriptGroups(action.id);
+        }
+      }
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function loadScriptGroups(actionId: string) {
+    try {
+      const payload = await apiGet<{ groups: ScriptGroup[] }>(
+        `/api/tools/experiment-monitor/actions/${actionId}/groups`,
+      );
+      setScriptGroupsMap((prev) => ({ ...prev, [actionId]: payload.groups }));
     } catch (err) {
       handleError(err);
     }
@@ -553,16 +601,35 @@ export default function ExperimentMonitorTool() {
     setModal('action-email');
   }
 
-  function openCreateScriptAction() {
+  /**
+   * 点击「脚本」按钮时调用：
+   * - 若当前 task 下还没有 script action，自动创建一个（无需用户填写额外信息）
+   * - 然后直接打开脚本分组管理面板
+   */
+  async function openScriptGroupsPanel() {
     if (!selectedTask) return;
-    setScriptActionForm({ ...emptyScriptAction });
-    setEditingActionId('');
-    setModal('action-script');
+    // 找到已有的 script action
+    let scriptAction = actions.find((a) => a.actionType === 'script');
+    if (!scriptAction) {
+      // 自动创建一个空的 script action
+      try {
+        const res = await apiPost<{ action: AlertAction }>(
+          `/api/tools/experiment-monitor/tasks/${selectedTask.id}/actions`,
+          { actionType: 'script' as ActionType, scriptCommands: [], scriptScreenName: '', scriptsPerTrigger: 1 },
+        );
+        scriptAction = res.action;
+        await loadActions(selectedTask.id);
+      } catch (err) {
+        handleError(err);
+        return;
+      }
+    }
+    openScriptGroups(scriptAction.id);
   }
 
   function editAction(action: AlertAction) {
-    setEditingActionId(action.id);
     if (action.actionType === 'email') {
+      setEditingActionId(action.id);
       setEmailActionForm({
         emailRecipients: action.emailRecipients.join(', '),
         emailSubjectTemplate: action.emailSubjectTemplate,
@@ -570,12 +637,8 @@ export default function ExperimentMonitorTool() {
       });
       setModal('action-email');
     } else {
-      setScriptActionForm({
-        scriptCommands: action.scriptCommands.join('\n'),
-        scriptScreenName: action.scriptScreenName,
-        scriptsPerTrigger: action.scriptsPerTrigger,
-      });
-      setModal('action-script');
+      // 对于脚本类型，直接打开分组管理面板
+      openScriptGroups(action.id);
     }
   }
 
@@ -606,39 +669,102 @@ export default function ExperimentMonitorTool() {
     }
   }
 
-  async function saveScriptAction(event: FormEvent) {
-    event.preventDefault();
-    if (!selectedTask) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const payload = {
-        actionType: 'script' as ActionType,
-        scriptCommands: splitLines(scriptActionForm.scriptCommands),
-        scriptScreenName: scriptActionForm.scriptScreenName,
-        scriptsPerTrigger: scriptActionForm.scriptsPerTrigger,
-      };
-      if (editingActionId) {
-        await apiPut(`/api/tools/experiment-monitor/actions/${editingActionId}`, payload);
-      } else {
-        await apiPost(`/api/tools/experiment-monitor/tasks/${selectedTask.id}/actions`, payload);
-      }
-      setModal(null);
-      showSuccess('脚本动作保存成功');
-      await loadActions(selectedTask.id);
-    } catch (err) {
-      handleError(err);
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
   async function removeAction(actionId: string) {
     if (!window.confirm('确认删除该报警动作？')) return;
     try {
       await apiDelete(`/api/tools/experiment-monitor/actions/${actionId}`);
       showSuccess('动作已删除');
       if (selectedTask) await loadActions(selectedTask.id);
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  function openScriptGroups(actionId: string) {
+    setGroupsActionId(actionId);
+    setModal('script-groups');
+    void loadScriptGroups(actionId);
+  }
+
+  // ============================================================
+  // Script Group Management
+  // ============================================================
+
+  async function createGroup(actionId: string, name: string, screenNamePrefix: string) {
+    try {
+      await apiPost<{ group: ScriptGroup }>(
+        `/api/tools/experiment-monitor/actions/${actionId}/groups`,
+        { name, screenNamePrefix },
+      );
+      await loadScriptGroups(actionId);
+      showSuccess('脚本分组已创建');
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function deleteGroup(groupId: string, actionId: string) {
+    if (!window.confirm('确认删除该脚本分组及其所有队列和历史？')) return;
+    try {
+      await apiDelete(`/api/tools/experiment-monitor/groups/${groupId}`);
+      await loadScriptGroups(actionId);
+      showSuccess('分组已删除');
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function addQueueItem(groupId: string, command: string, actionId: string) {
+    try {
+      await apiPost(`/api/tools/experiment-monitor/groups/${groupId}/queue`, { command });
+      await loadScriptGroups(actionId);
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function deleteQueueItem(itemId: string, actionId: string) {
+    try {
+      await apiDelete(`/api/tools/experiment-monitor/queue/${itemId}`);
+      await loadScriptGroups(actionId);
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function reorderQueue(groupId: string, orderedIds: string[], actionId: string) {
+    try {
+      await apiPost(`/api/tools/experiment-monitor/groups/${groupId}/queue/reorder`, { orderedIds });
+      await loadScriptGroups(actionId);
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function restoreHistoryItem(historyId: string, actionId: string) {
+    try {
+      await apiPost(`/api/tools/experiment-monitor/history/${historyId}/restore`, {});
+      await loadScriptGroups(actionId);
+      showSuccess('已添加回队列');
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function deleteHistoryItem(historyId: string, actionId: string) {
+    try {
+      await apiDelete(`/api/tools/experiment-monitor/history/${historyId}`);
+      await loadScriptGroups(actionId);
+    } catch (err) {
+      handleError(err);
+    }
+  }
+
+  async function refreshSessions(groupId: string, actionId: string) {
+    try {
+      await apiPost(`/api/tools/experiment-monitor/groups/${groupId}/sessions/refresh`, {});
+      await loadScriptGroups(actionId);
+      showSuccess('Session 状态已刷新');
     } catch (err) {
       handleError(err);
     }
@@ -778,6 +904,7 @@ export default function ExperimentMonitorTool() {
               actions={selectedTaskId === task.id ? actions : []}
               alertState={selectedTaskId === task.id ? history.alertState : null}
               latestSample={selectedTaskId === task.id ? history.samples[history.samples.length - 1] : null}
+              scriptGroupsMap={scriptGroupsMap}
               onSelect={() => { setSelectedTaskId(task.id); toggleExpand(task.id); }}
               onToggleExpand={() => toggleExpand(task.id)}
               onEdit={() => openEditTask(task)}
@@ -785,7 +912,7 @@ export default function ExperimentMonitorTool() {
               onCheckNow={() => void runCheckNow(task.id)}
               onResetAlert={() => void resetAlert(task.id)}
               onAddEmailAction={openCreateEmailAction}
-              onAddScriptAction={openCreateScriptAction}
+              onAddScriptAction={() => void openScriptGroupsPanel()}
               onEditAction={(action) => editAction(action)}
               onDeleteAction={(actionId) => void removeAction(actionId)}
             />
@@ -864,16 +991,28 @@ export default function ExperimentMonitorTool() {
         </Modal>
       )}
 
-      {modal === 'action-script' && (
-        <Modal title={editingActionId ? '编辑脚本触发' : '添加脚本触发'} onClose={() => setModal(null)}>
-          <ScriptActionForm form={scriptActionForm} isLoading={isLoading} isEdit={!!editingActionId} onChange={setScriptActionForm} onSubmit={saveScriptAction} />
-        </Modal>
-      )}
 
       {modal === 'email-config' && (
       <Modal title="邮件发送配置（管理员）" onClose={() => setModal(null)}>
         <EmailConfigForm form={emailConfigForm} isLoading={isLoading} onChange={setEmailConfigForm} onSubmit={saveEmailConfig} onTest={testEmailConfig} />
       </Modal>
+      )}
+
+      {modal === 'script-groups' && groupsActionId && (
+        <Modal title="脚本触发分组管理" onClose={() => setModal(null)}>
+          <ScriptGroupsPanel
+            actionId={groupsActionId}
+            groups={scriptGroupsMap[groupsActionId] || []}
+            onCreateGroup={(name, prefix) => void createGroup(groupsActionId, name, prefix)}
+            onDeleteGroup={(groupId) => void deleteGroup(groupId, groupsActionId)}
+            onAddQueueItem={(groupId, cmd) => void addQueueItem(groupId, cmd, groupsActionId)}
+            onDeleteQueueItem={(itemId) => void deleteQueueItem(itemId, groupsActionId)}
+            onReorderQueue={(groupId, ids) => void reorderQueue(groupId, ids, groupsActionId)}
+            onRestoreHistory={(histId) => void restoreHistoryItem(histId, groupsActionId)}
+            onDeleteHistory={(histId) => void deleteHistoryItem(histId, groupsActionId)}
+            onRefreshSessions={(groupId) => void refreshSessions(groupId, groupsActionId)}
+          />
+        </Modal>
       )}
     </div>
   );
@@ -891,6 +1030,7 @@ function TaskCard(props: {
   actions: AlertAction[];
   alertState: AlertState | null;
   latestSample: Sample | null;
+  scriptGroupsMap: Record<string, ScriptGroup[]>;
   onSelect: () => void;
   onToggleExpand: () => void;
   onEdit: () => void;
@@ -973,10 +1113,17 @@ function TaskCard(props: {
                     {action.actionType === 'email' ? (
                       <small className="muted">收件人: {action.emailRecipients.join(', ') || '未设置'}</small>
                     ) : (
-                      <small className="muted">{action.scriptCommands.length} 个脚本 · 每次 {action.scriptsPerTrigger} 个</small>
+                      <small className="muted">
+                        {(props.scriptGroupsMap?.[action.id]?.length || 0)} 个分组
+                        {(() => {
+                          const groups = props.scriptGroupsMap?.[action.id] || [];
+                          const totalQueue = groups.reduce((s, g) => s + g.queue.length, 0);
+                          return totalQueue > 0 ? ` · 队列共 ${totalQueue} 条` : ' · 队列为空';
+                        })()}
+                      </small>
                     )}
                   </div>
-                  <button className="icon-button tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onEditAction(action); }} title="编辑"><Settings size={13} /></button>
+                  <button className="icon-button tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onEditAction(action); }} title={action.actionType === 'script' ? '管理脚本分组' : '编辑'}>{action.actionType === 'script' ? <Terminal size={13} /> : <Settings size={13} />}</button>
                   <button className="icon-button tiny danger" type="button" onClick={(e) => { e.stopPropagation(); props.onDeleteAction(action.id); }} title="删除"><Trash2 size={13} /></button>
                 </div>
               ))
@@ -1350,36 +1497,6 @@ function EmailActionForm(props: {
   );
 }
 
-function ScriptActionForm(props: {
-  form: ScriptActionFormState;
-  isLoading: boolean;
-  isEdit?: boolean;
-  onChange: (form: ScriptActionFormState) => void;
-  onSubmit: (event: FormEvent) => void;
-}) {
-  return (
-    <form className="em-form" onSubmit={props.onSubmit}>
-      <div className="form-group">
-        <label>脚本命令（每行一个，按顺序组成队列）*</label>
-        <textarea className="text-input monospace" rows={6} placeholder={'cd /data/project && python run_experiment.py --config exp1.json\nbash /data/scripts/backup_results.sh'} value={props.form.scriptCommands} onChange={(e) => props.onChange({ ...props.form, scriptCommands: e.target.value })} />
-        <small className="form-hint">每次触发报警时按队列顺序执行脚本。如果服务器安装了 screen，脚本将在 screen 会话中运行。</small>
-      </div>
-      <div className="form-group">
-        <label>Screen 会话名前缀（可选）</label>
-        <input className="text-input" placeholder="默认自动生成前缀" value={props.form.scriptScreenName} onChange={(e) => props.onChange({ ...props.form, scriptScreenName: e.target.value })} />
-        <small className="form-hint">仅当远程服务器安装了 screen 时生效</small>
-      </div>
-      <div className="form-group">
-        <label>每次触发执行的脚本数量</label>
-        <input className="text-input" type="number" min="1" value={props.form.scriptsPerTrigger} onChange={(e) => props.onChange({ ...props.form, scriptsPerTrigger: Number(e.target.value) })} />
-        <small className="form-hint">设为 1 表示每次只执行队列中的下一个脚本；设为更大值可一次执行多个</small>
-      </div>
-      <button className="primary-button" type="submit" disabled={props.isLoading}>
-        <Terminal size={16} />{props.isEdit ? '保存' : '添加'}
-      </button>
-    </form>
-  );
-}
 
 function EmailConfigForm(props: {
   form: EmailConfigFormState;
@@ -1432,6 +1549,315 @@ function EmailConfigForm(props: {
         </button>
       </div>
     </form>
+  );
+}
+
+// ============================================================
+// Script Groups Panel
+// ============================================================
+
+function ScriptGroupsPanel(props: {
+  actionId: string;
+  groups: ScriptGroup[];
+  onCreateGroup: (name: string, screenNamePrefix: string) => void;
+  onDeleteGroup: (groupId: string) => void;
+  onAddQueueItem: (groupId: string, command: string) => void;
+  onDeleteQueueItem: (itemId: string) => void;
+  onReorderQueue: (groupId: string, orderedIds: string[]) => void;
+  onRestoreHistory: (histId: string) => void;
+  onDeleteHistory: (histId: string) => void;
+  onRefreshSessions: (groupId: string) => void;
+}) {
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupPrefix, setNewGroupPrefix] = useState('');
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [activeGroupTab, setActiveGroupTab] = useState<Record<string, 'queue' | 'history' | 'sessions'>>({});
+  const [newCommands, setNewCommands] = useState<Record<string, string>>({});
+
+  function getGroupTab(groupId: string): 'queue' | 'history' | 'sessions' {
+    return activeGroupTab[groupId] || 'queue';
+  }
+
+  function setGroupTab(groupId: string, tab: 'queue' | 'history' | 'sessions') {
+    setActiveGroupTab((prev) => ({ ...prev, [groupId]: tab }));
+  }
+
+  function handleCreateGroup(e: FormEvent) {
+    e.preventDefault();
+    if (!newGroupName.trim()) return;
+    props.onCreateGroup(newGroupName.trim(), newGroupPrefix.trim());
+    setNewGroupName('');
+    setNewGroupPrefix('');
+    setShowCreateGroup(false);
+  }
+
+  function handleAddCmd(groupId: string) {
+    const cmd = (newCommands[groupId] || '').trim();
+    if (!cmd) return;
+    props.onAddQueueItem(groupId, cmd);
+    setNewCommands((prev) => ({ ...prev, [groupId]: '' }));
+  }
+
+  // Drag-to-reorder state
+  const dragIdRef = useRef<string | null>(null);
+
+  function handleDragStart(itemId: string) {
+    dragIdRef.current = itemId;
+  }
+
+  function handleDrop(groupId: string, targetId: string, queue: QueueItem[]) {
+    const dragId = dragIdRef.current;
+    if (!dragId || dragId === targetId) return;
+    const ids = queue.map((q) => q.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const newIds = [...ids];
+    newIds.splice(from, 1);
+    newIds.splice(to, 0, dragId);
+    props.onReorderQueue(groupId, newIds);
+    dragIdRef.current = null;
+  }
+
+  return (
+    <div className="sg-panel">
+      <div className="sg-header">
+        <p className="sg-desc">每个分组维护独立的脚本队列。每次报警触发时，各分组依次从队列头部取出一条命令执行，执行完毕后自动归入历史存档。</p>
+        <button
+          className="chip"
+          type="button"
+          onClick={() => setShowCreateGroup((v) => !v)}
+        >
+          <Plus size={14} />添加分组
+        </button>
+      </div>
+
+      {showCreateGroup && (
+        <form className="sg-create-form em-fieldset" onSubmit={handleCreateGroup}>
+          <div className="em-form-grid2">
+            <div className="form-group">
+              <label>分组名称 *</label>
+              <input
+                className="text-input"
+                placeholder="如：实验 A"
+                value={newGroupName}
+                onChange={(e) => setNewGroupName(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label>Screen 会话名前缀</label>
+              <input
+                className="text-input"
+                placeholder="留空则自动生成"
+                value={newGroupPrefix}
+                onChange={(e) => setNewGroupPrefix(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="sg-create-form-footer">
+            <button className="primary-button" type="submit"><Plus size={14} />创建分组</button>
+            <button className="chip" type="button" onClick={() => setShowCreateGroup(false)}><X size={14} />取消</button>
+          </div>
+        </form>
+      )}
+
+      {props.groups.length === 0 && !showCreateGroup && (
+        <div className="empty-state sg-empty">
+          <Terminal size={28} />
+          <p>暂无脚本分组，点击「添加分组」创建第一个脚本分组。</p>
+        </div>
+      )}
+
+      {props.groups.map((group) => {
+        const tab = getGroupTab(group.id);
+        const runningSessions = group.sessions.filter((s) => s.status === 'running');
+        return (
+          <div className="sg-group" key={group.id}>
+            <div className="sg-group-header">
+              <span className="sg-group-name"><Terminal size={14} />{group.name}</span>
+              {group.screenNamePrefix && (
+                <span className="sg-group-prefix muted">screen: {group.screenNamePrefix}_*</span>
+              )}
+              <div className="sg-group-badges">
+                {group.queue.length > 0 && (
+                  <span className="badge info">{group.queue.length} 队列</span>
+                )}
+                {runningSessions.length > 0 && (
+                  <span className="badge warning">{runningSessions.length} 运行中</span>
+                )}
+              </div>
+              <button
+                className="icon-button tiny danger"
+                type="button"
+                title="删除分组"
+                onClick={() => props.onDeleteGroup(group.id)}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="sg-tabs">
+              <button
+                className={`sg-tab ${tab === 'queue' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setGroupTab(group.id, 'queue')}
+              >
+                队列 {group.queue.length > 0 && <span className="badge info">{group.queue.length}</span>}
+              </button>
+              <button
+                className={`sg-tab ${tab === 'history' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setGroupTab(group.id, 'history')}
+              >
+                历史存档 {group.history.length > 0 && <span className="badge">{group.history.length}</span>}
+              </button>
+              <button
+                className={`sg-tab ${tab === 'sessions' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setGroupTab(group.id, 'sessions')}
+              >
+                Screen 会话 {runningSessions.length > 0 && <span className="badge warning">{runningSessions.length}</span>}
+              </button>
+            </div>
+
+            {/* Queue Tab */}
+            {tab === 'queue' && (
+              <div className="sg-tab-content">
+                <p className="sg-tab-hint">队列头部的命令将在下次报警触发时执行。可拖拽调整顺序。</p>
+                {group.queue.length === 0 ? (
+                  <p className="muted sg-empty-inline">队列为空，下次触发将跳过此分组。</p>
+                ) : (
+                  <div className="sg-queue-list">
+                    {group.queue.map((item, idx) => (
+                      <div
+                        key={item.id}
+                        className={`sg-queue-item ${idx === 0 ? 'next' : ''}`}
+                        draggable
+                        onDragStart={() => handleDragStart(item.id)}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={() => handleDrop(group.id, item.id, group.queue)}
+                      >
+                        <span className="sg-drag-handle"><GripVertical size={14} /></span>
+                        <span className="sg-queue-idx">{idx + 1}</span>
+                        {idx === 0 && <span className="badge success sg-next-badge">下次</span>}
+                        <code className="sg-cmd">{item.command}</code>
+                        <button
+                          className="icon-button tiny danger"
+                          type="button"
+                          title="删除"
+                          onClick={() => props.onDeleteQueueItem(item.id)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Add command input */}
+                <div className="sg-add-cmd">
+                  <textarea
+                    className="text-input monospace sg-cmd-input"
+                    rows={2}
+                    placeholder="输入命令，如：cd /data && python train.py --exp exp1"
+                    value={newCommands[group.id] || ''}
+                    onChange={(e) => setNewCommands((prev) => ({ ...prev, [group.id]: e.target.value }))}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleAddCmd(group.id); } }}
+                  />
+                  <button
+                    className="chip"
+                    type="button"
+                    onClick={() => handleAddCmd(group.id)}
+                    disabled={!(newCommands[group.id] || '').trim()}
+                  >
+                    <Plus size={14} />加入队列
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* History Tab */}
+            {tab === 'history' && (
+              <div className="sg-tab-content">
+                <p className="sg-tab-hint">以下为已触发过的命令存档，可点击「恢复」将命令重新加入队列末尾。</p>
+                {group.history.length === 0 ? (
+                  <p className="muted sg-empty-inline">暂无历史记录。</p>
+                ) : (
+                  <div className="sg-history-list">
+                    {group.history.map((item) => (
+                      <div className="sg-history-item" key={item.id}>
+                        <div className="sg-history-main">
+                          <code className="sg-cmd">{item.command}</code>
+                          {item.screenSession && (
+                            <span className="sg-screen-tag muted">screen: {item.screenSession}</span>
+                          )}
+                        </div>
+                        <div className="sg-history-meta">
+                          <span className="muted">{formatTime(item.triggeredAt)}</span>
+                          <button
+                            className="chip tiny"
+                            type="button"
+                            title="恢复到队列"
+                            onClick={() => props.onRestoreHistory(item.id)}
+                          >
+                            <RotateCcw size={12} />恢复
+                          </button>
+                          <button
+                            className="icon-button tiny danger"
+                            type="button"
+                            title="删除记录"
+                            onClick={() => props.onDeleteHistory(item.id)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Sessions Tab */}
+            {tab === 'sessions' && (
+              <div className="sg-tab-content">
+                <div className="sg-sessions-header">
+                  <p className="sg-tab-hint">每条命令在独立的 screen 窗口中运行，可刷新检测是否执行完毕。</p>
+                  <button
+                    className="chip"
+                    type="button"
+                    onClick={() => props.onRefreshSessions(group.id)}
+                  >
+                    <RefreshCw size={13} />刷新状态
+                  </button>
+                </div>
+                {group.sessions.length === 0 ? (
+                  <p className="muted sg-empty-inline">暂无 Screen 会话记录。</p>
+                ) : (
+                  <div className="sg-sessions-list">
+                    {group.sessions.map((sess) => (
+                      <div className={`sg-session-item ${sess.status}`} key={sess.id}>
+                        <span className={`sg-status-dot ${sess.status}`} />
+                        <div className="sg-session-info">
+                          <code className="sg-session-name">{sess.sessionName}</code>
+                          <code className="sg-cmd sg-cmd-sm">{sess.command}</code>
+                        </div>
+                        <div className="sg-session-meta">
+                          <span className={`badge ${sess.status === 'running' ? 'warning' : sess.status === 'done' ? 'success' : ''}`}>
+                            {sess.status === 'running' ? '运行中' : sess.status === 'done' ? '已完成' : '未知'}
+                          </span>
+                          <span className="muted">{formatTime(sess.startedAt)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

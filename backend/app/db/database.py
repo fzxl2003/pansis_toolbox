@@ -53,6 +53,12 @@ def init_database() -> None:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS platform_email_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")

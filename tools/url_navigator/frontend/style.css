@@ -1,0 +1,258 @@
+/* ============================================================
+   URL Navigator Tool — 专属样式
+   仅供 tools/url_navigator/frontend/index.tsx 使用。
+   ============================================================ */
+
+/* ── Nav Control Panel ── */
+
+.url-navigator .nav-control-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 420px) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+/* ── Navigator Card Grid ── */
+
+.navigator-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+/* ── Navigator Site Card ── */
+
+.navigator-site-card {
+  position: relative;
+  display: grid;
+  gap: 14px;
+  min-height: 230px;
+}
+
+.site-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.site-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.site-main:hover {
+  transform: none;
+}
+
+.site-main span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.site-main strong {
+  overflow: hidden;
+  color: #202124;
+  font-size: 18px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-main small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.site-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 18px;
+  color: #174ea6;
+  background: #e8f0fe;
+  box-shadow: inset 0 0 0 1px rgba(66, 133, 244, 0.12);
+  object-fit: cover;
+}
+
+.fallback-icon {
+  font-size: 22px;
+  font-weight: 780;
+}
+
+/* ── Site Menu (⋮ popover) ── */
+
+.site-menu {
+  position: relative;
+}
+
+.site-menu summary {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: #475467;
+  background: rgba(255, 255, 255, 0.74);
+  cursor: pointer;
+  list-style: none;
+}
+
+.site-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.site-menu-popover {
+  position: absolute;
+  top: 42px;
+  right: 0;
+  z-index: 8;
+  display: grid;
+  min-width: 150px;
+  gap: 4px;
+  border: 1px solid rgba(116, 137, 166, 0.22);
+  border-radius: 18px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(18px);
+}
+
+.site-menu-popover button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 10px;
+  color: #344054;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.site-menu-popover button:hover {
+  background: #e8f0fe;
+  transform: none;
+}
+
+/* ── Site Meta & Entry Pills ── */
+
+.site-meta,
+.entry-pill-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.site-meta span {
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #475467;
+  background: rgba(232, 240, 254, 0.72);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.entry-pill {
+  display: grid;
+  min-width: 124px;
+  flex: 1 1 124px;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.66);
+  text-decoration: none;
+}
+
+.entry-pill:hover {
+  border-color: rgba(66, 133, 244, 0.3);
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.1);
+}
+
+.entry-pill span {
+  font-weight: 720;
+}
+
+.entry-pill small,
+.entry-pill em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.entry-pill.ok em {
+  color: #137333;
+}
+
+.entry-pill.timeout em,
+.entry-pill.failed em {
+  color: var(--danger);
+}
+
+.entry-pill.checking em {
+  color: var(--accent);
+}
+
+/* ── Hidden File Input ── */
+
+.hidden-file-input {
+  display: none;
+}
+
+/* ── Navigator Modal ── */
+
+.navigator-modal {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: auto;
+}
+
+.navigator-modal form {
+  display: grid;
+  gap: 12px;
+}
+
+/* ── Entry Form ── */
+
+.entry-form-title {
+  margin-top: 4px;
+}
+
+.entry-form {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 14px;
+  background: rgba(248, 250, 252, 0.74);
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 920px) {
+  .url-navigator .nav-control-panel {
+    grid-template-columns: 1fr;
+  }
+}

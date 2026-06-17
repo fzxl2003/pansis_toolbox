@@ -1,3 +1,4 @@
+import './style.css';
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Compass, MoreVertical, Plus, Search, Trash2, Upload, Wand2, X } from 'lucide-react';
 

@@ -27,6 +27,7 @@ import {
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
 import { fetchMe, type AuthUser } from '../../../frontend/src/api/auth';
 import { LoginPanel } from '../../../frontend/src/components/LoginPanel';
+import { ScatterChart } from '../../../frontend/src/components/ScatterChart';
 
 type MonitorServer = {
   id: string;
@@ -574,20 +575,23 @@ function MetricCard({ icon, label, value, detail }: { icon: ReactNode; label: st
 }
 
 function LineChart({ title, samples, getValue }: { title: string; samples: Sample[]; getValue: (sample: Sample) => number | null }) {
-  const points = samples.map((sampleItem, index) => ({ index, value: getValue(sampleItem) })).filter((point) => point.value !== null) as { index: number; value: number }[];
-  const path = points.map((point, pointIndex) => {
-    const x = points.length === 1 ? 150 : (pointIndex / (points.length - 1)) * 300;
-    const y = 100 - Math.max(0, Math.min(100, point.value));
-    return `${pointIndex === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
-  }).join(' ');
+  const chartPoints = samples
+    .filter((s) => getValue(s) !== null)
+    .map((s) => ({
+      x: s.collectedAt,
+      y: getValue(s) as number,
+    }));
+  const lastVal = chartPoints.at(-1)?.y ?? null;
   return (
-    <div className="mini-chart">
-      <div className="result-header"><span>{title}</span><small>{points.length ? formatPercent(points.at(-1)?.value ?? null) : '--'}</small></div>
-      <svg viewBox="0 0 300 100" role="img" aria-label={title}>
-        <path d="M 0 100 L 300 100" />
-        {path && <path className="chart-line" d={path} />}
-      </svg>
-    </div>
+    <ScatterChart
+      title={title}
+      subLabel={lastVal !== null ? formatPercent(lastVal) : '--'}
+      points={chartPoints}
+      yLabel="%"
+      timeAxis
+      formatY={(v) => `${Math.round(v)}%`}
+      formatTooltipY={(v) => `${v.toFixed(1)}%`}
+    />
   );
 }
 

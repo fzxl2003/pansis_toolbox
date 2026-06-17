@@ -3284,3 +3284,164 @@ gap: 4px;
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* ============================================================
+   ScatterChart / LineChart — 通用图表组件
+   SVG 内部的线条宽度、字号等全部通过内联属性控制，
+   不在 CSS 里设置，确保不随容器缩放而变化。
+   ============================================================ */
+
+.scatter-chart {
+  display: grid;
+  gap: 10px;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #dce3ec);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.scatter-chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.scatter-chart-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted, #526071);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scatter-chart-sublabel {
+  font-size: 12px;
+  color: var(--muted, #64748b);
+}
+
+/* Time preset buttons */
+.scatter-chart-presets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.scatter-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border, #d7dee8);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted, #64748b);
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+
+.scatter-preset-btn:hover {
+  border-color: var(--accent, #1a73e8);
+  color: var(--accent, #1a73e8);
+  background: var(--accent-soft, #e8f0fe);
+}
+
+.scatter-preset-btn.active {
+  border-color: var(--accent, #1a73e8);
+  background: var(--accent, #1a73e8);
+  color: #ffffff;
+}
+
+/* Chart body layout */
+.scatter-chart-body {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  gap: 4px 0;
+  align-items: start;
+}
+
+.scatter-y-label {
+  grid-column: 1;
+  grid-row: 1;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+  text-align: center;
+  padding-right: 4px;
+  user-select: none;
+  align-self: center;
+}
+
+.scatter-svg-wrapper {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  width: 100%;
+  /* height is set via inline style from the component (px) */
+  overflow: visible;
+}
+
+.scatter-x-label {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+  text-align: center;
+  user-select: none;
+  padding-top: 2px;
+}
+
+.scatter-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  font-size: 13px;
+  color: var(--muted, #94a3b8);
+}
+
+/* SVG — displayed at its natural pixel size, no CSS scaling */
+.scatter-svg {
+  display: block;
+  /* width/height are set as SVG attributes matching the viewBox */
+  max-width: 100%;
+  overflow: visible;
+}
+
+/* Tooltip */
+.scatter-tooltip {
+  position: absolute;
+  pointer-events: none;
+  display: grid;
+  gap: 2px;
+  background: rgba(15, 23, 42, 0.88);
+  color: #f8fafc;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+  z-index: 10;
+  transform: translateY(-50%);
+}
+
+.tooltip-y {
+  font-size: 14px;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.tooltip-x {
+  font-size: 11px;
+  color: #94a3b8;
+}
+

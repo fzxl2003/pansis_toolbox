@@ -28,6 +28,7 @@ import {
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
 import { fetchMe, type AuthUser } from '../../../frontend/src/api/auth';
 import { LoginPanel } from '../../../frontend/src/components/LoginPanel';
+import { ScatterChart } from '../../../frontend/src/components/ScatterChart';
 
 // ============================================================
 // Types
@@ -1187,27 +1188,21 @@ function TaskCard(props: {
 
 function MiniChart({ samples }: { samples: Sample[] }) {
   if (samples.length < 2) return null;
-  const points = samples.map((s, i) => ({ index: i, value: s.processCount }));
-  const maxVal = Math.max(...points.map((p) => p.value), 1);
-  const path = points.map((p, i) => {
-    const x = points.length === 1 ? 200 : (i / (points.length - 1)) * 400;
-    const y = 80 - (p.value / maxVal) * 70;
-    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
-  }).join(' ');
-
+  const chartPoints = samples.map((s) => ({
+    x: s.checkedAt,
+    y: s.processCount,
+    label: `进程数: ${s.processCount}`,
+  }));
   return (
-    <div className="mini-chart">
-      <div className="result-header"><span>进程数趋势</span><small>最近 {samples.length} 次采样</small></div>
-      <svg viewBox="0 0 400 90" role="img" aria-label="process-count-chart">
-        <path d="M 0 85 L 400 85" className="chart-grid-line" />
-        {path && <path className="chart-line" d={path} fill="none" />}
-        {points.map((p) => {
-          const x = points.length === 1 ? 200 : (p.index / (points.length - 1)) * 400;
-          const y = 80 - (p.value / maxVal) * 70;
-          return <circle key={p.index} cx={x} cy={y} r="2.5" className="chart-dot" />;
-        })}
-      </svg>
-    </div>
+    <ScatterChart
+      title="进程数趋势"
+      subLabel={`最近 ${samples.length} 次采样`}
+      points={chartPoints}
+      yLabel="进程数"
+      timeAxis
+      formatY={(v) => String(Math.round(v))}
+      formatTooltipY={(v) => `${Math.round(v)} 个进程`}
+    />
   );
 }
 

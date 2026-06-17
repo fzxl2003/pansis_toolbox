@@ -1,0 +1,528 @@
+/* ============================================================
+   Unified Shell Theme
+   Defines design tokens (CSS custom properties) and applies
+   glassmorphism overrides to framework shell components.
+   Keep this file last in the import order so these rules
+   take precedence over base component styles.
+   ============================================================ */
+
+:root {
+  --page-bg: #f6f8fc;
+  --surface: rgba(255, 255, 255, 0.84);
+  --surface-solid: #ffffff;
+  --surface-soft: #eef3fb;
+  --border: rgba(116, 137, 166, 0.22);
+  --text: #1f2937;
+  --muted: #667085;
+  --accent: #1a73e8;
+  --accent-strong: #1558d6;
+  --accent-soft: #e8f0fe;
+  --danger: #c5221f;
+  --shadow-sm: 0 8px 24px rgba(31, 41, 55, 0.08);
+  --shadow-md: 0 18px 48px rgba(60, 64, 67, 0.14);
+}
+
+body {
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(66, 133, 244, 0.12), transparent 34rem),
+    radial-gradient(circle at 88% 10%, rgba(26, 115, 232, 0.08), transparent 26rem),
+    linear-gradient(135deg, #f8fbff 0%, #f2f5fb 54%, #f9fbff 100%);
+}
+
+/* ── App Shell ── */
+
+.app-shell {
+  grid-template-columns: 292px minmax(0, 1fr);
+  gap: 22px;
+  padding: 16px;
+}
+
+.sidebar {
+  position: sticky;
+  top: 16px;
+  align-self: start;
+  min-height: calc(100vh - 32px);
+  color: #3c4043;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 30px;
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(24px);
+  padding: 18px;
+}
+
+.brand {
+  gap: 12px;
+  margin-bottom: 26px;
+  padding: 8px 10px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 16px;
+  color: #ffffff;
+  background:
+    radial-gradient(circle at 30% 20%, #ffffff 0 8%, transparent 9%),
+    linear-gradient(135deg, #4285f4, #1a73e8 58%, #7baaf7);
+  box-shadow: 0 14px 30px rgba(66, 133, 244, 0.25);
+}
+
+.brand-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.brand-copy span {
+  font-size: 17px;
+  font-weight: 760;
+}
+
+.brand-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.nav-item {
+  min-height: 48px;
+  color: #475467;
+  border-radius: 999px;
+  padding: 0 16px;
+}
+
+.nav-item.active,
+.nav-item:hover {
+  color: #174ea6;
+  background: #e8f0fe;
+  box-shadow: inset 0 0 0 1px rgba(66, 133, 244, 0.08);
+  transform: translateX(2px);
+}
+
+.main-content {
+  min-width: 0;
+  padding: 12px 18px 32px 0;
+}
+
+/* ── Fullscreen shell mode ── */
+
+.shell-fullscreen {
+  display: block;
+  padding: 0;
+}
+
+.shell-fullscreen .sidebar {
+  display: none;
+}
+
+.shell-fullscreen .main-content {
+  min-height: 100vh;
+  padding: 0;
+  overflow: auto;
+}
+
+/* ── Tool page actions bar ── */
+
+.tool-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 2px 2px 0;
+}
+
+.tool-page-fullscreen {
+  min-height: 100vh;
+}
+
+.fullscreen-exit-button {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 1px solid rgba(116, 137, 166, 0.22);
+  border-radius: 999px;
+  padding: 0 16px;
+  color: #344054;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+}
+
+/* ── Surfaces (glassmorphism) ── */
+
+.content-band,
+.tool-card,
+.widget,
+.panel,
+.empty-state,
+.error-box {
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 26px;
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(18px);
+}
+
+/* ── Tool Card (home page) ── */
+
+.tool-card {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  align-content: start;
+  padding: 20px 22px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.tool-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(66, 133, 244, 0.2);
+  box-shadow: var(--shadow-md);
+}
+
+.tool-card h3 {
+  margin: 18px 0 8px;
+  color: #1f2937;
+  font-size: 20px;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.tool-card p {
+  display: -webkit-box;
+  min-height: 0;
+  margin: 0 0 20px;
+  overflow: hidden;
+  color: var(--muted);
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.card-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.card-footer {
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.card-footer > span:first-child {
+  color: #475467;
+  background: rgba(238, 243, 251, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+.card-footer a {
+  margin-left: auto;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+/* ── Tool Icon ── */
+
+.tool-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 18px;
+  color: #174ea6;
+  background: var(--accent-soft);
+}
+
+.tool-icon.image-icon {
+  overflow: hidden;
+  padding: 0;
+  background: #ffffff;
+}
+
+.tool-icon.image-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ── Tool Grid List ── */
+
+.tool-grid-list {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+/* ── Status Pills ── */
+
+.status-pill.ok {
+  color: #174ea6;
+  background: var(--accent-soft);
+}
+
+.status-pill.warn {
+  color: #b42318;
+  background: #fff1f0;
+}
+
+/* ── Auth Status ── */
+
+.auth-status,
+.auth-status.button-like {
+  color: #344054;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.08);
+}
+
+.auth-status.button-like:hover {
+  color: #174ea6;
+  background: var(--accent-soft);
+  border-color: rgba(66, 133, 244, 0.22);
+}
+
+/* ── Auth Role ── */
+
+.auth-role {
+  color: #174ea6;
+  background: var(--accent-soft);
+  border: 1px solid rgba(66, 133, 244, 0.16);
+}
+
+/* ── Data Badge ── */
+
+.data-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #475467;
+  background: rgba(238, 243, 251, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+/* ── Shared surface override (monitor/gpu/modal/chart cards) ── */
+
+.content-band,
+.tool-card,
+.widget,
+.panel,
+.empty-state,
+.error-box,
+.monitor-section,
+.metric-card,
+.mini-chart,
+.disk-card,
+.directory-result,
+.gpu-card,
+.modal-panel,
+.settings-card,
+.history-view,
+.process-row {
+  background: var(--surface);
+  border-color: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── Search Box & Toolbar ── */
+
+.search-box,
+.toolbar,
+.server-selector,
+.monitor-toolbar,
+.layout-toolbar {
+  background: rgba(255, 255, 255, 0.74);
+  border-color: var(--border);
+  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.07);
+}
+
+.page-header {
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.page-header h1 {
+  letter-spacing: 0;
+}
+
+.search-box {
+  width: min(420px, 100%);
+  min-height: 48px;
+  border-radius: 16px;
+}
+
+.toolbar {
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  border-radius: 18px;
+  padding: 10px;
+}
+
+.toolbar svg {
+  color: #475467;
+}
+
+/* ── Chip ── */
+
+.chip {
+  color: #344054;
+  background: rgba(255, 255, 255, 0.72);
+  border-color: var(--border);
+  box-shadow: 0 4px 12px rgba(60, 64, 67, 0.05);
+}
+
+.content-band {
+  border-color: rgba(255, 255, 255, 0.72);
+}
+
+/* ── Active States (accent colour) ── */
+
+.chip.active,
+.server-tab.active,
+.server-tab:hover,
+.mount-chip.active,
+.segmented-control button.active {
+  color: #174ea6;
+  background: var(--accent-soft);
+  border-color: rgba(66, 133, 244, 0.28);
+}
+
+.server-tab em,
+.card-footer a,
+.inline-link,
+.metric,
+.entry-pill.checking em {
+  color: var(--accent);
+}
+
+/* ── Primary Button ── */
+
+.primary-button {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 12px 24px rgba(26, 115, 232, 0.18);
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+/* ── Secondary Button ── */
+
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 18px;
+  color: #344054;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.08);
+  cursor: pointer;
+}
+
+/* ── Progress & Usage Bars ── */
+
+.progress-track span,
+.stacked-usage-bar .current,
+.stacked-usage-bar span.current,
+.usage-legend i.current {
+  background: var(--accent);
+}
+
+.mini-chart .chart-line {
+  stroke: var(--accent);
+}
+
+/* ── GPU / Disk / Directory hover ── */
+
+.gpu-card.active,
+.gpu-card:hover,
+.disk-card:hover,
+.directory-result:hover {
+  border-color: rgba(66, 133, 244, 0.3);
+  box-shadow: 0 14px 34px rgba(66, 133, 244, 0.14);
+}
+
+/* ── Disk / Directory grids ── */
+
+.disk-grid,
+.directory-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+@media (min-width: 1280px) {
+  .disk-grid,
+  .directory-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* ── Responsive overrides ── */
+
+@media (max-width: 920px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 12px;
+  }
+
+  .sidebar {
+    top: 12px;
+    z-index: 10;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    min-height: auto;
+    border-radius: 24px;
+    padding: 12px;
+  }
+
+  .brand {
+    margin: 0;
+    padding: 0;
+  }
+
+  .brand-copy small {
+    display: none;
+  }
+
+  .nav-list {
+    display: flex;
+    justify-content: center;
+    margin: 0;
+  }
+
+  .nav-item {
+    min-height: 42px;
+    padding: 0 12px;
+  }
+
+  .main-content {
+    padding: 0 0 24px;
+  }
+}

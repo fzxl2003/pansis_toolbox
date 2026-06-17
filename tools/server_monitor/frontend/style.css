@@ -1,0 +1,569 @@
+/* ============================================================
+   Server Monitor Tool — 专属样式
+   仅供 tools/server_monitor/frontend/index.tsx 使用。
+   ============================================================ */
+
+.monitor-tool {
+  max-width: 1440px;
+}
+
+.monitor-titlebar {
+  align-items: flex-start;
+}
+
+/* ── Server Strip & Tabs ── */
+
+.server-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+}
+
+.server-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.server-tab,
+.danger-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17202a;
+  min-height: 42px;
+  padding: 0 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.server-tab.active,
+.server-tab:hover {
+  border-color: #0f766e;
+  background: #ecfdf5;
+}
+
+.server-tab strong {
+  font-size: 14px;
+}
+
+.server-tab small {
+  color: #64748b;
+}
+
+.server-tab em {
+  border-radius: 6px;
+  background: #dff4ef;
+  color: #0f766e;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+/* ── Metric Grid ── */
+
+.metric-grid,
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.metric-card,
+.mini-chart,
+.directory-result {
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 8px;
+}
+
+.metric-card span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #526071;
+  font-weight: 700;
+}
+
+.metric-card strong {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.metric-card small,
+.mini-chart small,
+.directory-result small {
+  color: #64748b;
+}
+
+/* ── Monitor Section ── */
+
+.monitor-section {
+  display: grid;
+  gap: 12px;
+  background: #ffffff;
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+/* ── Mini Chart ── */
+
+.mini-chart {
+  display: grid;
+  gap: 10px;
+  min-height: 158px;
+}
+
+.mini-chart svg {
+  width: 100%;
+  height: 110px;
+}
+
+.mini-chart path {
+  fill: none;
+  stroke: #d7dee8;
+  stroke-width: 1.5;
+}
+
+.mini-chart .chart-line {
+  stroke: #0f766e;
+  stroke-width: 2.5;
+}
+
+/* ── Monitor Table ── */
+
+.monitor-table {
+  display: grid;
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.monitor-table-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1.2fr 1fr 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border-bottom: 1px solid #eef2f7;
+  font-size: 14px;
+}
+
+.monitor-table-row:last-child {
+  border-bottom: 0;
+}
+
+/* ── Mount / Directory / Disk / GPU Grids ── */
+
+.mount-filter,
+.directory-grid,
+.disk-grid,
+.gpu-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.mount-filter {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.mount-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 0 10px;
+  color: #475569;
+}
+
+.mount-chip.active {
+  border-color: #0f766e;
+  background: #ecfdf5;
+  color: #0f766e;
+}
+
+.directory-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.disk-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.disk-card,
+.directory-result {
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.disk-card strong,
+.directory-result > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* ── Progress Track ── */
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #0f766e;
+}
+
+/* ── Stacked Usage Bar ── */
+
+.stacked-usage-bar {
+  display: flex;
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.stacked-usage-bar span {
+  display: block;
+  height: 100%;
+}
+
+.stacked-usage-bar .current,
+.usage-legend i.current {
+  background: #0f766e;
+}
+
+.stacked-usage-bar .other,
+.usage-legend i.other {
+  background: #64748b;
+}
+
+.stacked-usage-bar .free,
+.usage-legend i.free {
+  background: #dbeafe;
+}
+
+.usage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #526071;
+  font-size: 12px;
+}
+
+.usage-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.usage-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+/* ── Segmented Control (monitor variant) ── */
+
+.segmented-control {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.segmented-control button {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 34px;
+  border: 0;
+  border-right: 1px solid #d7dee8;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.segmented-control button:last-child {
+  border-right: 0;
+}
+
+.segmented-control button.active {
+  background: #0f766e;
+  color: #ffffff;
+}
+
+/* ── GPU Layout & Cards ── */
+
+.gpu-layout {
+  display: grid;
+  gap: 14px;
+}
+
+.gpu-layout.split {
+  grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.4fr);
+  align-items: start;
+}
+
+.gpu-layout.split .gpu-grid {
+  grid-template-columns: 1fr;
+  max-height: 720px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.gpu-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.gpu-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17202a;
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gpu-card.active,
+.gpu-card:hover {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.09);
+}
+
+.gpu-card-top,
+.gpu-stats,
+.process-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gpu-card-top {
+  justify-content: space-between;
+}
+
+.gpu-card-top span,
+.gpu-stats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.gpu-card-top em {
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.gpu-card strong {
+  min-height: 38px;
+  line-height: 1.25;
+}
+
+.gpu-stats {
+  flex-wrap: wrap;
+  color: #526071;
+  font-size: 13px;
+}
+
+/* ── Progress Line ── */
+
+.progress-line {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+  color: #526071;
+  font-size: 12px;
+}
+
+.progress-line small {
+  text-align: right;
+  color: #64748b;
+}
+
+/* ── GPU Detail ── */
+
+.gpu-detail {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #eef2f7;
+  padding-top: 14px;
+}
+
+/* ── Process Table ── */
+
+.process-table {
+  display: grid;
+  gap: 8px;
+}
+
+.process-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.6fr) minmax(80px, 0.7fr) repeat(4, minmax(82px, 0.8fr)) auto;
+  gap: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.process-row small {
+  display: block;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.process-row.with-gpu {
+  grid-template-columns: 64px minmax(190px, 1.6fr) minmax(80px, 0.7fr) repeat(4, minmax(82px, 0.8fr)) auto;
+}
+
+.process-name {
+  min-width: 0;
+}
+
+.process-name strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── GPU Overview ── */
+
+.gpu-overview {
+  display: grid;
+  gap: 14px;
+}
+
+.gpu-overview-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.gpu-overview-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(160px, 1fr) minmax(160px, 1fr) minmax(150px, 0.8fr) minmax(80px, 0.5fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+
+.gpu-overview-row strong,
+.gpu-overview-row small {
+  display: block;
+}
+
+.gpu-overview-row small {
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Modal Mount Filter ── */
+
+.modal-mount-filter {
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+/* ── Directory / Monitor / User Forms ── */
+
+.directory-query,
+.monitor-form,
+.user-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: start;
+}
+
+.monitor-form textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  color: #526071;
+}
+
+.danger-row {
+  color: #991b1b;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 900px) {
+  .monitor-table-row {
+    grid-template-columns: 1fr;
+  }
+
+  .server-strip,
+  .process-row,
+  .process-row.with-gpu,
+  .gpu-overview-row {
+    grid-template-columns: 1fr;
+  }
+
+  .gpu-layout.split {
+    grid-template-columns: 1fr;
+  }
+
+  .gpu-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .disk-grid,
+  .directory-grid {
+    grid-template-columns: 1fr;
+  }
+}

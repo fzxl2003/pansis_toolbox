@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
-from backend.app.core.security import get_optional_user, require_admin
+from backend.app.core.security import get_optional_user, require_admin, require_user
 from backend.app.services.auth_service import (
     create_user,
     delete_user,
@@ -72,6 +72,22 @@ def me_route(request: Request) -> dict:
 def list_users_route(request: Request) -> dict:
     require_admin(request)
     return {"users": [user.public_dict() for user in list_users()]}
+
+
+@router.get("/auth/users-basic")
+def list_users_basic_route(request: Request) -> dict:
+    """返回所有已激活用户的基础信息（id/username/displayName），供所有已登录用户查看。
+    用于非管理员用户在分配 viewer 时选择目标用户。
+    """
+    require_user(request)
+    users = list_users()
+    return {
+        "users": [
+            {"id": u.id, "username": u.username, "displayName": u.display_name}
+            for u in users
+            if not u.disabled
+        ]
+    }
 
 
 @router.post("/auth/users")

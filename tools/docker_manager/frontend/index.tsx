@@ -1,5 +1,5 @@
 import './style.css';
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   AlertCircle,
@@ -403,6 +403,82 @@ function ResourceLoadingWrapper({ loading, children }: { loading: boolean; child
   );
 }
 
+/** 超长文本省略显示，鼠标悬停时以 CSS 气泡显示完整内容 */
+function TruncText({ text, style: extraStyle }: { text: string; style?: React.CSSProperties }) {
+  return (
+    <span
+      className="dm-tooltip-wrap"
+      data-tip={text}
+      style={extraStyle}
+    >
+      {text}
+    </span>
+  );
+}
+
+/**
+ * 省略号截断文本，鼠标悬停显示全局置顶气泡（含「点击复制」提示），
+ * 点击后复制到剪切板并短暂显示「已复制！」反馈。
+ * 气泡使用 position:fixed 渲染，不受父级 overflow:hidden 影响。
+ */
+function CopyTruncText({ text, style: extraStyle }: { text: string; style?: React.CSSProperties }) {
+  const [copied, setCopied] = useState(false);
+  const [tipPos, setTipPos] = useState<{ x: number; y: number } | null>(null);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+
+  function handleMouseEnter() {
+    if (!wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    setTipPos({ x: rect.left, y: rect.top });
+  }
+
+  function handleMouseLeave() {
+    if (!copied) setTipPos(null);
+  }
+
+  function handleClick(e: React.MouseEvent) {
+    e.stopPropagation();
+    navigator.clipboard.writeText(text).catch(() => {
+      const el = document.createElement('textarea');
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    });
+    setCopied(true);
+    setTimeout(() => {
+      setCopied(false);
+      setTipPos(null);
+    }, 1600);
+  }
+
+  return (
+    <>
+      <span
+        ref={wrapRef}
+        className="dm-copy-trunc-wrap"
+        onClick={handleClick}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        style={extraStyle}
+      >
+        <span className="dm-copy-trunc-text">{text}</span>
+      </span>
+      {tipPos && (
+        <span
+          className="dm-copy-trunc-tip-fixed"
+          style={{ left: tipPos.x, top: tipPos.y - 8 }}
+          onMouseEnter={() => setTipPos(tipPos)}
+          onMouseLeave={() => { if (!copied) setTipPos(null); }}
+        >
+          {copied ? '✓ 已复制！' : text + '\n── 点击复制'}
+        </span>
+      )}
+    </>
+  );
+}
+
 function Modal({ title, onClose, children, foot, wide }: { title: string; onClose: () => void; children: ReactNode; foot?: ReactNode; wide?: boolean }) {
   return (
     <div className="dm-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -568,7 +644,7 @@ function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
           </div>
           {images.map((img) => (
             <div key={img.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 1fr 1fr auto' }}>
-              <span style={{ fontFamily: 'monospace', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{img.repo}</span>
+              <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={img.repo} /></span>
               <span><code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{img.tag}</code></span>
               <span style={{ color: '#526071' }}>{img.size}</span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>{img.created}</span>
@@ -648,6 +724,11 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
   const [detail, setDetail] = useState<ContainerDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // 重启策略修改
+  const [restartEditMode, setRestartEditMode] = useState(false);
+  const [restartPolicy, setRestartPolicy] = useState('');
+  const [savingRestart, setSavingRestart] = useState(false);
+  const [restartMsg, setRestartMsg] = useState<string | null>(null);
   // 复制成功提示
   const [copyHint, setCopyHint] = useState<string | null>(null);
 
@@ -735,6 +816,26 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
     setDetailTarget(null);
     setDetail(null);
     setDetailError(null);
+    setRestartEditMode(false);
+    setRestartMsg(null);
+  }
+
+  async function saveRestartPolicy() {
+    if (!serverId || !detail) return;
+    setSavingRestart(true);
+    setRestartMsg(null);
+    try {
+      await apiPut(`${API}/servers/${serverId}/containers/${encodeURIComponent(detail.shortId)}/restart-policy`, { policy: restartPolicy });
+      setRestartMsg('重启策略已更新');
+      setRestartEditMode(false);
+      // 同步更新本地 detail
+      setDetail((d) => d ? { ...d, restartPolicy } : d);
+      setTimeout(() => setRestartMsg(null), 2500);
+    } catch (e) {
+      setRestartMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingRestart(false);
+    }
   }
 
   function copyText(text: string, hint: string) {
@@ -765,24 +866,57 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
     return match ? match[1] : null;
   }
 
-  // 解析端口字符串，过滤仅显示用户标记的端口（此版本直接展示全部端口，精简显示）
-  function formatPorts(ports: string | undefined): string {
-    if (!ports) return '—';
-    // 每段格式：0.0.0.0:8080->80/tcp
+  // 解析端口字符串，返回彩色椭圆标签 JSX
+  function formatPortTags(ports: string | undefined): React.ReactNode {
+    if (!ports) return <span style={{ color: '#cbd5e1', fontSize: 12 }}>—</span>;
     const parts = ports.split(', ').filter(Boolean);
-    if (parts.length === 0) return '—';
-    // 提取宿主机端口
-    const formatted = parts
-      .map((p) => {
-        const m = p.match(/(?:\S+:)?(\d+)->(\d+\/\w+)/);
-        if (m) return `${m[1]}→${m[2]}`;
-        return p;
-      })
-      .filter(Boolean);
-    if (formatted.length === 0) return '—';
-    // 最多显示 2 条，其余用 +N
-    if (formatted.length <= 2) return formatted.join(', ');
-    return `${formatted.slice(0, 2).join(', ')} +${formatted.length - 2}`;
+    if (parts.length === 0) return <span style={{ color: '#cbd5e1', fontSize: 12 }}>—</span>;
+
+    // 提取 { hostPort, containerPort, protocol }
+    type PortEntry = { host: string; container: string; proto: string };
+    const entries: PortEntry[] = [];
+    for (const p of parts) {
+      const m = p.match(/(?:[^:]+:)?(\d+)->(\d+)\/(\w+)/);
+      if (m) {
+        entries.push({ host: m[1], container: m[2], proto: m[3].toLowerCase() });
+      }
+    }
+    if (entries.length === 0) return <span style={{ color: '#cbd5e1', fontSize: 12 }}>—</span>;
+
+    const protoColor: Record<string, { bg: string; color: string; border: string }> = {
+      tcp:  { bg: '#dbeafe', color: '#1d4ed8', border: '#bfdbfe' },
+      udp:  { bg: '#fef3c7', color: '#92400e', border: '#fde68a' },
+      sctp: { bg: '#f3e8ff', color: '#7c3aed', border: '#e9d5ff' },
+    };
+
+    const visible = entries.slice(0, 3);
+    const rest = entries.length - visible.length;
+
+    return (
+      <span style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+        {visible.map((e, i) => {
+          const c = protoColor[e.proto] ?? { bg: '#f1f5f9', color: '#475569', border: '#e2e8f0' };
+          return (
+            <span key={i} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 2,
+              padding: '1px 7px', borderRadius: 999,
+              background: c.bg, color: c.color, border: `1px solid ${c.border}`,
+              fontSize: 11, fontFamily: 'monospace', fontWeight: 600, whiteSpace: 'nowrap',
+            }}>
+              {e.host}:{e.container}
+              <span style={{ opacity: 0.65, fontSize: 10, fontWeight: 400 }}>{e.proto}</span>
+            </span>
+          );
+        })}
+        {rest > 0 && (
+          <span style={{
+            padding: '1px 7px', borderRadius: 999,
+            background: '#f1f5f9', color: '#64748b', border: '1px solid #e2e8f0',
+            fontSize: 11, fontWeight: 600,
+          }}>+{rest}</span>
+        )}
+      </span>
+    );
   }
 
   return (
@@ -822,8 +956,8 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
         <div className="dm-empty"><Box size={32} /> 暂无容器</div>
       ) : (
         <div className="dm-table">
-          <div className="dm-table-header" style={{ gridTemplateColumns: '1.8fr 1.2fr 1fr 1fr auto' }}>
-            <span>名称</span><span>状态</span><span>端口</span><span>SSH 端口</span><span>操作</span>
+          <div className="dm-table-header" style={{ gridTemplateColumns: '0.7fr 1.5fr 1.5fr 1fr 1.2fr' }}>
+            <span>状态</span><span>名称</span><span>端口</span><span>SSH 端口</span><span>操作</span>
           </div>
           {containers.map((c) => {
             const state = (c.State ?? c.Status ?? '').toLowerCase();
@@ -835,23 +969,23 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
               ? `ssh -p ${sshPort} root@${server.host}`
               : null;
             return (
-              <div key={cid(c)} className="dm-table-row" style={{ gridTemplateColumns: '1.8fr 1.2fr 1fr 1fr auto' }}>
-                {/* 名称 */}
-                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {cname(c)}
-                </span>
-                {/* 状态（两行） */}
+              <div key={cid(c)} className="dm-table-row" style={{ gridTemplateColumns: '0.7fr 1.5fr 1.5fr 1fr 1.2fr' }}>
+                {/* 状态 */}
                 <span>
                   <span className={`dm-status ${containerStateClass(state)}`}>
                     <span className="dm-status-dot" />
                     {stateLabel}
                   </span>
-                  {stateTime && (
-                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2, paddingLeft: 14 }}>{stateTime}</div>
-                  )}
+                  {/* {stateTime && (
+                    <div style={{ fontSize: 9, color: '#b0bec5', marginTop: 3, paddingLeft: 14 }}>{stateTime}</div>
+                  )} */}
+                </span>
+                {/* 名称 */}
+                <span style={{ fontWeight: 600, minWidth: 0 }}>
+                  <TruncText text={cname(c)} />
                 </span>
                 {/* 端口 */}
-                <span style={{ color: '#64748b', fontSize: 12 }}>{formatPorts(c.Ports)}</span>
+                <span style={{ minWidth: 0 }}>{formatPortTags(c.Ports)}</span>
                 {/* SSH 端口 */}
                 <span>
                   {sshCmd ? (
@@ -966,8 +1100,44 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
                     <div><span style={{ color: '#94a3b8' }}>退出码：</span>
                       <span style={{ color: detail.exitCode !== 0 ? '#ef4444' : '#22c55e' }}>{detail.exitCode}</span></div>
                   )}
-                  <div><span style={{ color: '#94a3b8' }}>重启策略：</span>
-                    <span>{detail.restartPolicy || '不重启'}</span></div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ color: '#94a3b8' }}>重启策略：</span>
+                    {restartEditMode ? (
+                      <>
+                        <select
+                          value={restartPolicy}
+                          onChange={(e) => setRestartPolicy(e.target.value)}
+                          style={{ fontSize: 12, padding: '2px 6px', borderRadius: 5, border: '1px solid #d0d9e4', background: '#f8fafc', minWidth: 140 }}
+                        >
+                          <option value="no">不重启 (no)</option>
+                          <option value="always">always（始终重启）</option>
+                          <option value="unless-stopped">unless-stopped</option>
+                          <option value="on-failure">on-failure</option>
+                        </select>
+                        <button className="btn btn-primary" style={{ padding: '2px 10px', fontSize: 12, minHeight: 26 }} onClick={saveRestartPolicy} disabled={savingRestart}>
+                          {savingRestart ? <Spin /> : '保存'}
+                        </button>
+                        <button className="btn" style={{ padding: '2px 8px', fontSize: 12, minHeight: 26 }} onClick={() => { setRestartEditMode(false); setRestartMsg(null); }}>取消</button>
+                      </>
+                    ) : (
+                      <>
+                        <span>{detail.restartPolicy || '不重启'}</span>
+                        {canManage(serverId) && (
+                          <button
+                            className="dm-btn-icon"
+                            style={{ width: 22, height: 22 }}
+                            title="修改重启策略"
+                            onClick={() => { setRestartPolicy(detail.restartPolicy || 'no'); setRestartEditMode(true); setRestartMsg(null); }}
+                          >
+                            <Pencil size={11} />
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {restartMsg && (
+                      <span style={{ fontSize: 12, color: restartMsg.includes('已更新') ? '#22c55e' : '#ef4444' }}>{restartMsg}</span>
+                    )}
+                  </div>
                   <div><span style={{ color: '#94a3b8' }}>主机名：</span>
                     <span style={{ fontFamily: 'monospace' }}>{detail.hostname || '—'}</span></div>
                   {detail.workingDir && (
@@ -1018,29 +1188,29 @@ function ContainersPanel({ servers, me }: { servers: DmServer[]; me: AuthUser })
               {detail.ports.length > 0 && (
                 <div className="dm-perm-section">
                   <div className="dm-perm-section-title"><Globe size={13} /> 端口映射</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
-                    {detail.ports.map((p, i) => (
-                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, background: '#f8fafc', borderRadius: 6, padding: '5px 10px' }}>
-                        <span style={{ color: '#94a3b8', minWidth: 80 }}>
-                          {p.hostIp ? `${p.hostIp}:${p.hostPort}` : p.hostPort || '未绑定'}
-                        </span>
-                        <span style={{ color: '#64748b' }}>→</span>
-                        <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{p.containerPort}</span>
-                        {p.hostPort && (
-                          <button
-                            className="dm-btn-icon"
-                            style={{ marginLeft: 'auto' }}
-                            title="复制映射信息"
-                            onClick={() => copyText(
-                              `${p.hostIp || '0.0.0.0'}:${p.hostPort}->${p.containerPort}`,
-                              '已复制端口映射'
-                            )}
-                          >
-                            <Copy size={11} />
-                          </button>
-                        )}
-                      </div>
-                    ))}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 80px', gap: '2px 0', marginTop: 6, fontSize: 12 }}>
+                    {/* 表头 */}
+                    <div style={{ padding: '4px 8px', background: '#f1f5f9', borderRadius: '6px 0 0 0', color: '#526071', fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>主机端口</div>
+                    <div style={{ padding: '4px 8px', background: '#f1f5f9', color: '#526071', fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>容器端口</div>
+                    <div style={{ padding: '4px 8px', background: '#f1f5f9', borderRadius: '0 6px 0 0', color: '#526071', fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>类型</div>
+                    {/* 数据行 */}
+                    {detail.ports.map((p, i) => {
+                      const isLast = i === detail.ports.length - 1;
+                      const hostDisplay = p.hostPort
+                        ? (p.hostIp && p.hostIp !== '0.0.0.0' ? `${p.hostIp}:${p.hostPort}` : p.hostPort)
+                        : '未绑定';
+                      const protocol = p.containerPort?.includes('/') ? p.containerPort.split('/')[1] : 'tcp';
+                      const containerPort = p.containerPort?.includes('/') ? p.containerPort.split('/')[0] : p.containerPort;
+                      return (
+                        <>
+                          <div key={`h-${i}`} style={{ padding: '5px 8px', background: i % 2 === 0 ? '#ffffff' : '#f8fafc', borderBottom: isLast ? 'none' : '1px solid #f1f5f9', borderBottomLeftRadius: isLast ? 6 : 0, fontFamily: 'monospace', color: p.hostPort ? '#1e293b' : '#94a3b8' }}>{hostDisplay}</div>
+                          <div key={`c-${i}`} style={{ padding: '5px 8px', background: i % 2 === 0 ? '#ffffff' : '#f8fafc', borderBottom: isLast ? 'none' : '1px solid #f1f5f9', fontFamily: 'monospace', fontWeight: 600, color: '#1e293b' }}>{containerPort}</div>
+                          <div key={`t-${i}`} style={{ padding: '5px 8px', background: i % 2 === 0 ? '#ffffff' : '#f8fafc', borderBottom: isLast ? 'none' : '1px solid #f1f5f9', borderBottomRightRadius: isLast ? 6 : 0 }}>
+                            <span style={{ background: protocol === 'udp' ? '#fef3c7' : '#dbeafe', color: protocol === 'udp' ? '#92400e' : '#1d4ed8', padding: '1px 6px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>{protocol.toUpperCase()}</span>
+                          </div>
+                        </>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1542,12 +1712,12 @@ function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
         <div className="dm-empty"><HardDrive size={32} /> 暂无卷</div>
       ) : (
         <div className="dm-table">
-          <div className="dm-table-header" style={{ gridTemplateColumns: '2fr 1fr 1fr 1fr auto' }}>
+          <div className="dm-table-header" style={{ gridTemplateColumns: '1.4fr 1fr 1fr 1fr auto' }}>
             <span>卷名称</span><span>驱动</span><span>大小</span><span>所有者</span><span>操作</span>
           </div>
           {volumes.map((v) => (
-            <div key={v.name} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 1fr 1fr auto' }}>
-              <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{v.name}</span>
+            <div key={v.name} className="dm-table-row" style={{ gridTemplateColumns: '1.4fr 1fr 1fr 1fr auto' }}>
+              <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><CopyTruncText text={v.name} /></span>
               <span style={{ color: '#526071' }}>{v.driver}</span>
               <span style={{ color: '#526071' }}>{v.sizeGb != null ? `${v.sizeGb} GB` : '—'}</span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>
@@ -1598,7 +1768,7 @@ function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
       {/* 卷详情弹窗 */}
       {detailTarget && (
         <Modal
-          title={`卷详情 — ${detailTarget.name}`}
+          title={`卷详情 — ${detailTarget.name.length > 28 ? detailTarget.name.slice(0, 28) + '…' : detailTarget.name}`}
           onClose={closeDetail}
           foot={<button className="btn btn-primary" onClick={closeDetail}>关闭</button>}
         >
@@ -1613,11 +1783,15 @@ function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
               {/* 基本信息 */}
               <div className="dm-perm-section">
                 <div className="dm-perm-section-title"><HardDrive size={13} /> 基本信息</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: 13 }}>
-                  <div><span style={{ color: '#94a3b8' }}>卷名称：</span><span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{detail.name}</span></div>
-                  <div><span style={{ color: '#94a3b8' }}>大小：</span><span>{detail.sizeGb != null ? `${detail.sizeGb} GB` : '未知'}</span></div>
-                  <div><span style={{ color: '#94a3b8' }}>创建时间：</span><span>{detail.createdAt ? new Date(detail.createdAt).toLocaleString('zh-CN') : '未知'}</span></div>
-                  <div><span style={{ color: '#94a3b8' }}>平台管理：</span><span>{detail.platformManaged ? '是' : '否（平台外创建）'}</span></div>
+<div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr max-content 1fr', gap: '8px 12px', fontSize: 13, alignItems: 'start' }}>
+                  <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>卷名称：</span>
+                  <span style={{ fontFamily: 'monospace', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={detail.name}>{detail.name}</span>
+                  <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>大小：</span>
+                  <span>{detail.sizeGb != null ? `${detail.sizeGb} GB` : '未知'}</span>
+                  <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>创建时间：</span>
+                  <span>{detail.createdAt ? new Date(detail.createdAt).toLocaleString('zh-CN') : '未知'}</span>
+                  <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>平台管理：</span>
+                  <span>{detail.platformManaged ? '是' : '否（平台外创建）'}</span>
                 </div>
               </div>
 
@@ -1996,8 +2170,9 @@ function MyResourcesPanel({ me }: { me: AuthUser }) {
               <div key={`${res.serverId}-${res.resourceType}-${res.resourceRef}`}
                 className="dm-table-row"
                 style={{ gridTemplateColumns: '2fr 1fr 2fr 2fr auto' }}>
-                <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {resourceTypeIcon[res.resourceType]} {res.resourceRef}
+                <span style={{ fontWeight: 500, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  {resourceTypeIcon[res.resourceType]}
+                  <TruncText text={res.resourceRef} />
                 </span>
                 <span>
                   <span className="dm-role-tag" style={{ background: res.resourceType === 'container' ? '#dbeafe' : res.resourceType === 'image' ? '#fce7f3' : '#d1fae5', color: '#1e293b' }}>
@@ -2223,6 +2398,8 @@ function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
       setAddForm({ name: '', host: '', port: '22', sshUsername: '', sshPassword: '' });
       void load();
       onRefresh();
+      // 延迟关闭弹窗，让用户看到成功消息
+      setTimeout(() => { setShowAdd(false); setAddMsg(''); }, 1200);
     } catch (e) {
       setError(e);
     } finally {
@@ -2338,24 +2515,14 @@ function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     <div style={{ display: 'grid', gap: 20 }}>
       {error && <Alert type="error">{error}</Alert>}
 
-      {/* Add Server Form */}
-      <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 20 }}>
-        <div style={{ fontWeight: 700, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Plus size={16} /> 添加服务器
-        </div>
-        {addMsg && <Alert type="success">{addMsg}</Alert>}
-        <div className="dm-form-grid">
-          <Field label="显示名称"><input value={addForm.name} onChange={af('name')} placeholder="实验室服务器A" /></Field>
-          <Field label="主机地址"><input value={addForm.host} onChange={af('host')} placeholder="192.168.1.100" /></Field>
-          <Field label="SSH 端口"><input type="number" value={addForm.port} onChange={af('port')} /></Field>
-          <Field label="SSH 用户名"><input value={addForm.sshUsername} onChange={af('sshUsername')} placeholder="labuser" /></Field>
-          <Field label="SSH 密码" full><input type="password" value={addForm.sshPassword} onChange={af('sshPassword')} /></Field>
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <button className="btn btn-primary" onClick={doAdd} disabled={adding || !addForm.host || !addForm.sshUsername || !addForm.sshPassword || !addForm.name}>
-            {adding ? <Spin /> : <Plus size={14} />} 连接并添加（自动验证 Docker 权限）
-          </button>
-        </div>
+      {/* 顶部工具栏 */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="btn btn-primary" onClick={() => { setShowAdd(true); setAddMsg(''); clearError(); }}>
+          <Plus size={14} /> 添加服务器
+        </button>
+        <button className="btn" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={14} /> 刷新
+        </button>
       </div>
 
       {/* Server List */}
@@ -2489,8 +2656,8 @@ function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                   const ownerList = (ctr.ownerUserIds ?? []).map((id) => users.find((u) => u.userId === id)).filter(Boolean) as ServerPermEntry[];
                   return (
                     <div key={ref} className="dm-table-row" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr 1.5fr 1.5fr auto' }}>
-                      <span style={{ fontFamily: 'monospace', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ref}</span>
-                      <span style={{ fontSize: 12, color: '#526071', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ctr.Image}</span>
+                      <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={ref} /></span>
+                      <span style={{ fontSize: 12, color: '#526071', minWidth: 0 }}><TruncText text={ctr.Image ?? ''} /></span>
                       <span>
                         <span className={`dm-status ${containerStateClass(ctr.State ?? ctr.Status)}`}>
                           <span className="dm-status-dot" />
@@ -2537,7 +2704,7 @@ function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                   const ownerList = (img.ownerUserIds ?? []).map((id) => users.find((u) => u.userId === id)).filter(Boolean) as ServerPermEntry[];
                   return (
                     <div key={img.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 1fr 1.5fr 1.5fr auto' }}>
-                      <span style={{ fontFamily: 'monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{img.repo}</span>
+                      <span style={{ fontFamily: 'monospace', fontSize: 12, minWidth: 0 }}><TruncText text={img.repo} /></span>
                       <span><code style={{ background: '#f1f5f9', padding: '2px 5px', borderRadius: 3, fontSize: 12 }}>{img.tag}</code></span>
                       <span style={{ fontSize: 12, color: '#526071' }}>{img.size}</span>
                       <span>
@@ -2579,7 +2746,7 @@ function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                   const ownerList = (vol.ownerUserIds ?? []).map((id) => users.find((u) => u.userId === id)).filter(Boolean) as ServerPermEntry[];
                   return (
                     <div key={vol.name} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1.5fr 1.5fr auto' }}>
-                      <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{vol.name}</span>
+                      <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={vol.name} /></span>
                       <span>
                         {creator
                           ? <span className="dm-role-tag creator">{creator.displayName}</span>
@@ -2851,6 +3018,39 @@ function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 编辑/删除模板
               </label>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Add Server Modal */}
+      {showAdd && (
+        <Modal
+          title="添加服务器"
+          onClose={() => { setShowAdd(false); setAddMsg(''); clearError(); }}
+          foot={
+            <>
+              <button className="btn" onClick={() => { setShowAdd(false); setAddMsg(''); clearError(); }}>取消</button>
+              <button
+                className="btn btn-primary"
+                onClick={doAdd}
+                disabled={adding || !addForm.host || !addForm.sshUsername || !addForm.sshPassword || !addForm.name}
+              >
+                {adding ? <Spin /> : <Plus size={14} />} 连接并添加
+              </button>
+            </>
+          }
+        >
+          {error && <Alert type="error">{error}</Alert>}
+          {addMsg && <Alert type="success">{addMsg}</Alert>}
+          <div className="dm-form-grid">
+            <Field label="显示名称"><input value={addForm.name} onChange={af('name')} placeholder="实验室服务器A" /></Field>
+            <Field label="主机地址"><input value={addForm.host} onChange={af('host')} placeholder="192.168.1.100" /></Field>
+            <Field label="SSH 端口"><input type="number" value={addForm.port} onChange={af('port')} /></Field>
+            <Field label="SSH 用户名"><input value={addForm.sshUsername} onChange={af('sshUsername')} placeholder="labuser" /></Field>
+            <Field label="SSH 密码" full><input type="password" value={addForm.sshPassword} onChange={af('sshPassword')} /></Field>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: '#94a3b8' }}>
+            提交后将通过 SSH 自动验证 Docker 权限，请确保目标服务器已安装 Docker。
           </div>
         </Modal>
       )}

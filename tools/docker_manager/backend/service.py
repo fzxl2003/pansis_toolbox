@@ -1141,6 +1141,51 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
     return {"success": True, "action": action, "containerId": container_id}
 
 
+def update_restart_policy(server_id: str, container_id: str, policy: str, user: User) -> dict[str, Any]:
+    """
+    更新容器重启策略（docker update --restart）。
+    支持：no / always / unless-stopped / on-failure / on-failure:N
+    权限：ctr_manage_own（自己的容器）或 ctr_manage_all / admin（任意容器）。
+    """
+    allowed = {"no", "always", "unless-stopped", "on-failure"}
+    base = policy.split(":")[0] if ":" in policy else policy
+    if base not in allowed:
+        raise ToolboxError("INVALID_POLICY", "无效的重启策略", status_code=400, tool_id=TOOL_ID)
+
+    init_docker_database()
+    with get_connection() as conn:
+        if user.role != "admin":
+            perms = _get_user_perms(conn, server_id, user)
+            can_manage_all = perms.get("ctr_manage_all", False)
+            can_manage_own = perms.get("ctr_manage_own", False)
+            if not can_manage_all and not can_manage_own:
+                raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限", status_code=403, tool_id=TOOL_ID)
+            if not can_manage_all:
+                meta = conn.execute(
+                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id = ? AND container_ref = ?",
+                    (server_id, container_id),
+                ).fetchone()
+                if meta and meta["owner_user_id"] != user.id:
+                    raise ToolboxError("PERMISSION_DENIED", "您只能管理自己拥有的容器", status_code=403, tool_id=TOOL_ID)
+        row = _get_server_row(conn, server_id)
+
+    cmd = f"docker update --restart {shlex.quote(policy)} {shlex.quote(container_id)}"
+    client = _ssh_connect(row)
+    try:
+        stdout, stderr, code = _ssh_exec(client, cmd, timeout=30)
+    finally:
+        client.close()
+
+    if code != 0:
+        raise ToolboxError(
+            "UPDATE_RESTART_FAILED",
+            f"重启策略更新失败: {stderr.strip()}",
+            status_code=502,
+            tool_id=TOOL_ID,
+        )
+    return {"success": True, "restartPolicy": policy}
+
+
 def get_container_detail(server_id: str, container_id: str, user: User) -> dict[str, Any]:
     """
     获取容器详情（docker inspect），返回基础信息、环境变量、端口映射、卷挂载、网络等。

@@ -161,7 +161,6 @@
 .dm-table-header,
 .dm-table-row {
   display: grid;
-  align-items: center;
   gap: 12px;
   padding: 10px 14px;
   font-size: 13px;
@@ -175,10 +174,12 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   border-bottom: 1px solid #e2e8f0;
+  align-items: center;
 }
 
 .dm-table-row {
   border-bottom: 1px solid #f1f5f9;
+  align-items: start;
 }
 
 .dm-table-row:last-child {
@@ -691,6 +692,164 @@
   .dm-table-row {
     grid-template-columns: 1fr !important;
   }
+}
+
+/* ── General Buttons ── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 14px;
+  min-height: 32px;
+  border: 1px solid #d7dee8;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  vertical-align: middle;
+}
+
+.btn:hover {
+  background: #f8fafc;
+  border-color: #adb9c8;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn.btn-primary {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ffffff;
+}
+
+.btn.btn-primary:hover:not(:disabled) {
+  background: #0d6b64;
+  border-color: #0d6b64;
+}
+
+.btn.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn.danger {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #ef4444;
+  color: #991b1b;
+}
+
+/* ── Tooltip（省略号文本的鼠标悬停气泡）── */
+
+.dm-tooltip-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.dm-tooltip-wrap[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 12px;
+  font-family: monospace;
+  padding: 5px 10px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 380px;
+  z-index: 9999;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  pointer-events: none;
+  line-height: 1.5;
+}
+
+.dm-tooltip-wrap[data-tip]:hover::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 12px;
+  border: 4px solid transparent;
+  border-top-color: #1e293b;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+/* ── CopyTruncText（省略号 + 悬停气泡 + 点击复制）── */
+
+.dm-copy-trunc-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.dm-copy-trunc-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  /* 悬停时轻微高亮，提示可点击 */
+  border-bottom: 1px dashed transparent;
+  transition: border-color 0.15s;
+}
+
+.dm-copy-trunc-wrap:hover .dm-copy-trunc-text {
+  border-bottom-color: #94a3b8;
+}
+
+/* 气泡本体：fixed 定位，全局置顶，不受父级 overflow 影响 */
+.dm-copy-trunc-tip-fixed {
+  position: fixed;
+  transform: translateY(-100%) translateY(-10px);
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 12px;
+  font-family: monospace;
+  padding: 7px 13px;
+  border-radius: 7px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 420px;
+  min-width: 140px;
+  z-index: 99999;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.32);
+  line-height: 1.7;
+  pointer-events: auto;
+  cursor: default;
+}
+
+/* 气泡小三角（向下） */
+.dm-copy-trunc-tip-fixed::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 16px;
+  border: 5px solid transparent;
+  border-top-color: #1e293b;
 }
 
 /* ── SSH Port Button（容器列表行内 SSH 端口点击按钮）── */

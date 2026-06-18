@@ -28,6 +28,7 @@ from tools.docker_manager.backend.service import (
     delete_volume,
     get_container_detail,
     get_container_logs,
+    update_restart_policy,
     get_my_quota,
     get_template,
     get_user_perms_for_user,
@@ -313,6 +314,17 @@ def container_detail_route(request: Request, server_id: str, container_id: str) 
     """获取容器详情（docker inspect 信息）"""
     user = require_user(request)
     return get_container_detail(server_id, container_id, user)
+
+
+class UpdateRestartPayload(BaseModel):
+    policy: str
+
+
+@router.put("/servers/{server_id}/containers/{container_id}/restart-policy")
+def update_restart_policy_route(request: Request, server_id: str, container_id: str, payload: UpdateRestartPayload) -> dict:
+    """更新容器重启策略"""
+    user = require_user(request)
+    return update_restart_policy(server_id, container_id, payload.policy, user)
 
 
 @router.get("/servers/{server_id}/containers/{container_id}/logs")

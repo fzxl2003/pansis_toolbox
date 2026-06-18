@@ -7,7 +7,7 @@ import { Box, Copy, HardDrive, Info, Plus, RefreshCw, Shield, Trash2 } from 'luc
 import { apiDelete, apiGet, apiPost } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
 import { Alert, CopyTruncText, Field, Modal, ServerSelector, Spin } from './components';
-import { API, useErrorMsg } from './utils';
+import { API, formatSize, useErrorMsg } from './utils';
 import type { DmServer, DockerVolume, VolumeDetail } from './types';
 
 export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
@@ -143,7 +143,7 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
         <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 16px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
             <span>卷空间配额</span>
-            <span style={{ color: '#526071' }}>已用 {quota.volumeUsedGb?.toFixed(2)} GB / {quota.volumeTotalGb} GB</span>
+            <span style={{ color: '#526071' }}>已用 {quota.volumeUsedGb != null ? formatSize(quota.volumeUsedGb) : '—'} / {quota.volumeTotalGb} GB</span>
           </div>
           <div className="dm-quota-track">
             <div className={`dm-quota-fill${usedPct && usedPct > 90 ? ' danger' : usedPct && usedPct > 70 ? ' warn' : ''}`}
@@ -170,7 +170,7 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
             <div key={v.name} className="dm-table-row" style={{ gridTemplateColumns: '1.4fr 1fr 1fr 1fr auto' }}>
               <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><CopyTruncText text={v.name} /></span>
               <span style={{ color: '#526071' }}>{v.driver}</span>
-              <span style={{ color: '#526071' }}>{v.sizeGb != null ? `${v.sizeGb} GB` : '—'}</span>
+              <span style={{ color: '#526071' }}>{v.sizeGb != null ? formatSize(v.sizeGb) : '—'}</span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>
                 {v.platformManaged ? (v.ownerUserId === me.id ? '本人' : (v.ownerUserId ?? '未知')) : '平台外'}
               </span>
@@ -211,7 +211,7 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
             </Field>
           </div>
           {quota.volumeTotalGb != null && quota.volumeTotalGb > 0 && (
-            <Alert type="info">剩余配额：{((quota.volumeTotalGb ?? 0) - (quota.volumeUsedGb ?? 0)).toFixed(2)} GB</Alert>
+            <Alert type="info">剩余配额：{formatSize((quota.volumeTotalGb ?? 0) - (quota.volumeUsedGb ?? 0))}</Alert>
           )}
         </Modal>
       )}
@@ -238,7 +238,7 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
                   <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>卷名称：</span>
                   <span style={{ fontFamily: 'monospace', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={detail.name}>{detail.name}</span>
                   <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>大小：</span>
-                  <span>{detail.sizeGb != null ? `${detail.sizeGb} GB` : '未知'}</span>
+                  <span>{detail.sizeGb != null ? formatSize(detail.sizeGb) : '未知'}</span>
                   <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>创建时间：</span>
                   <span>{detail.createdAt ? new Date(detail.createdAt).toLocaleString('zh-CN') : '未知'}</span>
                   <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>平台管理：</span>

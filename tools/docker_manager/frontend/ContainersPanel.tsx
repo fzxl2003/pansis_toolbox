@@ -55,14 +55,23 @@ function formatPortTags(ports: string | undefined): React.ReactNode {
   }
   if (entries.length === 0) return <span style={{ color: '#cbd5e1', fontSize: 12 }}>—</span>;
 
+  // Docker 同一端口会同时生成 0.0.0.0:xxx 和 :::xxx 两条记录，去重保留唯一映射
+  const seen = new Set<string>();
+  const unique = entries.filter((e) => {
+    const key = `${e.host}:${e.container}/${e.proto}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   const protoColor: Record<string, { bg: string; color: string; border: string }> = {
     tcp:  { bg: '#dbeafe', color: '#1d4ed8', border: '#bfdbfe' },
     udp:  { bg: '#fef3c7', color: '#92400e', border: '#fde68a' },
     sctp: { bg: '#f3e8ff', color: '#7c3aed', border: '#e9d5ff' },
   };
 
-  const visible = entries.slice(0, 3);
-  const rest = entries.length - visible.length;
+  const visible = unique.slice(0, 3);
+  const rest = unique.length - visible.length;
 
   return (
     <span style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>

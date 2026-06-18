@@ -61,7 +61,25 @@ export function useErrorMsg(): [string | null, (e: unknown) => void, () => void]
   return [msg, set, clear];
 }
 
+// ---- 文件大小格式化 ----
+
+/**
+ * 将 GB 数值格式化为人类可读的大小字符串
+ * < 1 MB  → KB；< 1 GB → MB；≥ 1 GB → GB
+ */
+export function formatSize(sizeGb: number): string {
+  const bytes = sizeGb * 1024 * 1024 * 1024;
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
+
 // ---- Markdown 渲染 ----
+
 
 export function renderMarkdown(md: string): string {
   let html = md

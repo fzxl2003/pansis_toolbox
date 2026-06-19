@@ -928,3 +928,191 @@
 .dm-form-check.disabled input {
   cursor: not-allowed;
 }
+
+/* ── Resource Overview Strip（创建容器弹窗顶部的额度概览条）── */
+
+.dm-resource-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  align-items: center;
+}
+
+.dm-resource-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: #ffffff;
+  border: 1px solid #d1fae5;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #374151;
+  white-space: nowrap;
+}
+
+/* ── Server Overview Cards（服务器 Tab 展开后的额度卡片）── */
+
+.dm-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.dm-overview-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.dm-overview-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dm-overview-card-body {
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.dm-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.dm-overview-label {
+  color: #64748b;
+}
+
+.dm-overview-value {
+  font-weight: 600;
+  color: #1e293b;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.dm-overview-mini-label {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.dm-overview-progress {
+  height: 5px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.dm-overview-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.3s;
+}
+
+/* ── CUDA / GPU Badges ── */
+
+.dm-cuda-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px solid #c4b5fd;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dm-cuda-gpu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.dm-cuda-gpu-row:last-child {
+  border-bottom: none;
+}
+
+.dm-cuda-gpu-label {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  font-size: 13px;
+}
+
+/* ── RunCreateModal 分区样式 ── */
+
+.dm-run-section {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: visible;
+}
+
+.dm-run-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* 每条端口/卷/环境变量的行容器 */
+.dm-run-list-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.dm-run-list-row:last-child {
+  border-bottom: none;
+}
+
+/* 行内输入区域（flex 自动平分宽度） */
+.dm-run-list-row-inputs {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dm-run-list-row-inputs .dm-field {
+  flex: 1;
+  min-width: 80px;
+}
+
+/* dm-btn-icon 已在上方定义，此处为列表行删除按钮额外 flex-shrink */
+.dm-run-list-row .dm-btn-icon {
+  flex-shrink: 0;
+}

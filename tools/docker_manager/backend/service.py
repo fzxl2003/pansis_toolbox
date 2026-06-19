@@ -77,7 +77,10 @@ def init_docker_database() -> None:
                     ssh_password_encrypted TEXT NOT NULL,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    cuda_available INTEGER NOT NULL DEFAULT 0,
+                    gpu_count INTEGER NOT NULL DEFAULT 0,
+                    gpu_info TEXT NOT NULL DEFAULT '[]'
                 );
 
                 -- 旧的粗粒度权限表（保留兼容）
@@ -119,6 +122,8 @@ def init_docker_database() -> None:
                     tpl_use INTEGER NOT NULL DEFAULT 0,
                     tpl_create INTEGER NOT NULL DEFAULT 0,
                     tpl_edit INTEGER NOT NULL DEFAULT 0,
+                    -- CUDA 权限（可用显卡序号列表，JSON 数组）
+                    cuda_gpu_indices TEXT NOT NULL DEFAULT '[]',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(server_id, user_id),
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
@@ -190,6 +195,16 @@ def init_docker_database() -> None:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_user_perms)").fetchall()}
             if "vol_copy" not in cols:
                 conn.execute("ALTER TABLE docker_user_perms ADD COLUMN vol_copy INTEGER NOT NULL DEFAULT 0")
+            if "cuda_gpu_indices" not in cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN cuda_gpu_indices TEXT NOT NULL DEFAULT '[]'")
+            # 兼容迁移：为旧版 docker_servers 表添加 CUDA 字段
+            srv_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_servers)").fetchall()}
+            if "cuda_available" not in srv_cols:
+                conn.execute("ALTER TABLE docker_servers ADD COLUMN cuda_available INTEGER NOT NULL DEFAULT 0")
+            if "gpu_count" not in srv_cols:
+                conn.execute("ALTER TABLE docker_servers ADD COLUMN gpu_count INTEGER NOT NULL DEFAULT 0")
+            if "gpu_info" not in srv_cols:
+                conn.execute("ALTER TABLE docker_servers ADD COLUMN gpu_info TEXT NOT NULL DEFAULT '[]'")
             # 兼容迁移：为旧版 docker_volumes_meta 表添加 creator_user_id 列
             vol_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_volumes_meta)").fetchall()}
             if "creator_user_id" not in vol_cols:
@@ -245,6 +260,7 @@ _PERMS_DEFAULTS: dict[str, Any] = {
     "tpl_use": False,
     "tpl_create": False,
     "tpl_edit": False,
+    "cuda_gpu_indices": [],
 }
 
 # 管理员拥有所有权限的完整集合
@@ -255,6 +271,7 @@ _ADMIN_PERMS["vol_quota_gb"] = 0.0        # 管理员配额无限制（0=不限�
 
 def _row_to_perms(row: sqlite3.Row) -> dict[str, Any]:
     """将数据库行转换为权限字典"""
+    keys = set(row.keys())
     return {
         "server_visible": bool(row["server_visible"]),
         "img_pull": bool(row["img_pull"]),
@@ -271,11 +288,12 @@ def _row_to_perms(row: sqlite3.Row) -> dict[str, Any]:
         "vol_create": bool(row["vol_create"]),
         "vol_delete_own": bool(row["vol_delete_own"]),
         "vol_delete_all": bool(row["vol_delete_all"]),
-        "vol_copy": bool(row["vol_copy"]),
+        "vol_copy": bool(row["vol_copy"]) if "vol_copy" in keys else False,
         "vol_quota_gb": float(row["vol_quota_gb"]),
         "tpl_use": bool(row["tpl_use"]),
         "tpl_create": bool(row["tpl_create"]),
         "tpl_edit": bool(row["tpl_edit"]),
+        "cuda_gpu_indices": json.loads(row["cuda_gpu_indices"]) if "cuda_gpu_indices" in keys else [],
     }
 
 
@@ -365,6 +383,7 @@ def _get_quota(conn: sqlite3.Connection, server_id: str, user_id: str) -> dict[s
 
 
 def _public_server(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "name": row["name"],
@@ -374,6 +393,9 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
         "createdBy": row["created_by"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        "cudaAvailable": bool(row["cuda_available"]) if "cuda_available" in keys else False,
+        "gpuCount": int(row["gpu_count"]) if "gpu_count" in keys else 0,
+        "gpuInfo": json.loads(row["gpu_info"]) if "gpu_info" in keys else [],
     }
 
 
@@ -447,6 +469,9 @@ def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     except Exception as exc:
         raise ToolboxError("SSH_CONNECT_FAILED", f"SSH 连接失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
 
+    cuda_available = False
+    gpu_count = 0
+    gpu_info: list[dict[str, Any]] = []
     try:
         stdout_data, stderr_data, exit_code = _ssh_exec(client, "docker info", timeout=20)
         if exit_code != 0:
@@ -463,6 +488,25 @@ def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
                 status_code=502,
                 tool_id=TOOL_ID,
             )
+
+        # 检测 CUDA/nvidia-smi 支持
+        cuda_out, _, cuda_rc = _ssh_exec(
+            client,
+            "docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null || "
+            "nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null",
+            timeout=30,
+        )
+        if cuda_rc == 0 and cuda_out.strip():
+            cuda_available = True
+            for line in cuda_out.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3:
+                    gpu_info.append({
+                        "index": int(parts[0]) if parts[0].isdigit() else len(gpu_info),
+                        "name": parts[1],
+                        "memoryTotal": parts[2],
+                    })
+            gpu_count = len(gpu_info)
     finally:
         client.close()
 
@@ -473,10 +517,11 @@ def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO docker_servers (id, name, host, port, ssh_username, ssh_password_encrypted, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO docker_servers (id, name, host, port, ssh_username, ssh_password_encrypted, created_by, created_at, updated_at, cuda_available, gpu_count, gpu_info)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (server_id, name, host, port, ssh_username, encrypted_pw, user.id, now, now),
+            (server_id, name, host, port, ssh_username, encrypted_pw, user.id, now, now,
+             1 if cuda_available else 0, gpu_count, json.dumps(gpu_info)),
         )
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM docker_servers WHERE id = ?", (server_id,)).fetchone()
@@ -582,6 +627,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
         now = _now()
         path_whitelist_json = json.dumps(perms.get("ctr_path_whitelist", []))
         vol_quota_gb = float(perms.get("vol_quota_gb", 0))
+        cuda_gpu_indices_json = json.dumps(perms.get("cuda_gpu_indices", []))
         conn.execute(
             """
             INSERT INTO docker_user_perms (
@@ -592,6 +638,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 ctr_manage_own, ctr_manage_all, ctr_path_whitelist,
                 vol_create, vol_delete_own, vol_delete_all, vol_copy, vol_quota_gb,
                 tpl_use, tpl_create, tpl_edit,
+                cuda_gpu_indices,
                 updated_at
             ) VALUES (
                 ?, ?, ?,
@@ -601,6 +648,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
+                ?,
                 ?
             )
             ON CONFLICT(server_id, user_id) DO UPDATE SET
@@ -624,6 +672,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 tpl_use = excluded.tpl_use,
                 tpl_create = excluded.tpl_create,
                 tpl_edit = excluded.tpl_edit,
+                cuda_gpu_indices = excluded.cuda_gpu_indices,
                 updated_at = excluded.updated_at
             """,
             (
@@ -634,6 +683,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 b("ctr_manage_own"), b("ctr_manage_all"), path_whitelist_json,
                 b("vol_create"), b("vol_delete_own"), b("vol_delete_all"), b("vol_copy"), vol_quota_gb,
                 b("tpl_use"), b("tpl_create"), b("tpl_edit"),
+                cuda_gpu_indices_json,
                 now,
             ),
         )
@@ -1045,6 +1095,42 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
             "CREATE_CONTAINER_FAILED", f"创建容器失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID
         )
     return {"success": True, "containerId": stdout.strip(), "command": full_cmd}
+
+
+def create_container_run_raw(server_id: str, command: str, user: User) -> dict[str, Any]:
+    """
+    直接在服务器上执行用户提供的完整 docker run 命令（命令行模式）。
+    安全校验：
+    - 命令必须以 `docker run` 开头（大小写不敏感、允许前缀空格）
+    - 用户必须拥有创建容器的权限
+    """
+    init_docker_database()
+    cmd = command.strip()
+    # 安全性：只允许 docker run 命令
+    if not cmd.lower().startswith("docker run"):
+        raise ToolboxError("INVALID_COMMAND", "命令必须以 'docker run' 开头", status_code=400, tool_id=TOOL_ID)
+
+    with get_connection() as conn:
+        level = _get_user_permission(conn, server_id, user)
+        if user.role != "admin" and _permission_level(level) < _permission_level("manage"):
+            quota = _get_quota(conn, server_id, user.id)
+            if not quota["canCreateContainer"]:
+                raise ToolboxError(
+                    "NO_CREATE_PERMISSION", "您没有在此服务器创建容器的权限", status_code=403, tool_id=TOOL_ID
+                )
+        row = _get_server_row(conn, server_id)
+
+    client = _ssh_connect(row)
+    try:
+        stdout, stderr, code = _ssh_exec(client, cmd, timeout=120)
+    finally:
+        client.close()
+
+    if code != 0:
+        raise ToolboxError(
+            "CREATE_CONTAINER_FAILED", f"创建容器失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID
+        )
+    return {"success": True, "containerId": stdout.strip(), "command": cmd}
 
 
 def create_container_compose(server_id: str, yaml_content: str, user: User, project_name: str = "") -> dict[str, Any]:
@@ -1542,8 +1628,14 @@ def get_template(template_id: str, user: User) -> dict[str, Any]:
     }
 
 
-def create_from_template(server_id: str, template_id: str, overrides: dict[str, Any], user: User) -> dict[str, Any]:
-    """从模板创建容器"""
+def create_from_template(
+    server_id: str,
+    template_id: str,
+    overrides: dict[str, Any],
+    user: User,
+    gpus: str = "",
+) -> dict[str, Any]:
+    """从模板创建容器。gpus 为 GPU 挂载参数，优先级高于模板自身配置（若非空）"""
     init_docker_database()
     template = get_template(template_id, user)
     config = template["config"].copy()
@@ -1551,6 +1643,10 @@ def create_from_template(server_id: str, template_id: str, overrides: dict[str, 
     # 合并用户覆盖参数
     for key, val in overrides.items():
         config[key] = val
+
+    # 若调用方传入了 gpus 参数，则覆盖模板配置中的 gpus
+    if gpus:
+        config["gpus"] = gpus
 
     deploy_type = config.get("type", "run")
     if deploy_type == "compose":
@@ -2395,4 +2491,151 @@ def set_resource_viewers(
         "resourceRef": resource_ref,
         "viewerUserIds": viewer_user_ids,
         "updatedAt": now,
+    }
+
+
+# ==============================================================
+# CUDA 重新扫描
+# ==============================================================
+
+def rescan_server_cuda(server_id: str, user: User) -> dict[str, Any]:
+    """重新扫描服务器的 CUDA/GPU 情况并更新数据库（管理员专用）"""
+    init_docker_database()
+    if user.role != "admin":
+        raise ToolboxError("ADMIN_REQUIRED", "只有管理员可以重新扫描服务器 CUDA", status_code=403, tool_id=TOOL_ID)
+    with get_connection() as conn:
+        row = _get_server_row(conn, server_id)
+    client = _ssh_connect(row)
+    cuda_available = False
+    gpu_count = 0
+    gpu_info: list[dict[str, Any]] = []
+    try:
+        cuda_out, _, cuda_rc = _ssh_exec(
+            client,
+            "nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null",
+            timeout=20,
+        )
+        if cuda_rc == 0 and cuda_out.strip():
+            cuda_available = True
+            for line in cuda_out.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3:
+                    gpu_info.append({
+                        "index": int(parts[0]) if parts[0].isdigit() else len(gpu_info),
+                        "name": parts[1],
+                        "memoryTotal": parts[2],
+                    })
+            gpu_count = len(gpu_info)
+    finally:
+        client.close()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE docker_servers SET cuda_available=?, gpu_count=?, gpu_info=?, updated_at=? WHERE id=?",
+            (1 if cuda_available else 0, gpu_count, json.dumps(gpu_info), _now(), server_id),
+        )
+        row = _get_server_row(conn, server_id)
+    return _public_server(row)
+
+
+# ==============================================================
+# 服务器资源概览（用户侧：卷配额、路径磁盘、CUDA 权限）
+# ==============================================================
+
+def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
+    """
+    获取当前用户在指定服务器上的资源使用概览：
+    - 卷配额（总量 / 已用 / 剩余）
+    - 挂载路径的磁盘空间（总量 / 剩余 / 自己已用 / 他人已用）
+    - 用户可用的 CUDA GPU 列表
+    """
+    init_docker_database()
+    with get_connection() as conn:
+        _require_permission(conn, server_id, user, "view")
+        srv_row = _get_server_row(conn, server_id)
+        perms = _get_user_perms(conn, server_id, user)
+
+        # ---------- 卷配额 ----------
+        vol_quota_gb = float(perms.get("vol_quota_gb", 0))  # 0 = 不限
+        vol_used_self = conn.execute(
+            "SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=? AND owner_user_id=?",
+            (server_id, user.id),
+        ).fetchone()["s"]
+        vol_used_total = conn.execute(
+            "SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=?",
+            (server_id,),
+        ).fetchone()["s"]
+        vol_remaining = max(0.0, vol_quota_gb - vol_used_self) if vol_quota_gb > 0 else None
+
+        # ---------- 挂载路径磁盘空间 ----------
+        path_whitelist: list[str] = perms.get("ctr_path_whitelist", [])
+        paths_info: list[dict[str, Any]] = []
+        if path_whitelist:
+            client = _ssh_connect(srv_row)
+            try:
+                for path in path_whitelist:
+                    safe_path = shlex.quote(path)
+                    # df: total / used / available（1K blocks → GB）
+                    out, _, rc = _ssh_exec(
+                        client,
+                        f"df -k {safe_path} 2>/dev/null | tail -1",
+                        timeout=10,
+                    )
+                    disk_total_gb: float | None = None
+                    disk_avail_gb: float | None = None
+                    disk_used_gb: float | None = None
+                    if rc == 0 and out.strip():
+                        cols = out.strip().split()
+                        if len(cols) >= 5:
+                            try:
+                                disk_total_gb = int(cols[1]) / 1024 / 1024
+                                disk_used_gb = int(cols[2]) / 1024 / 1024
+                                disk_avail_gb = int(cols[3]) / 1024 / 1024
+                            except (ValueError, IndexError):
+                                pass
+                    # 计算当前用户在该路径下的磁盘占用（du -sk）
+                    user_used_gb: float | None = None
+                    du_out, _, du_rc = _ssh_exec(
+                        client,
+                        f"du -sk {safe_path} 2>/dev/null | awk '{{print $1}}'",
+                        timeout=15,
+                    )
+                    if du_rc == 0 and du_out.strip().isdigit():
+                        user_used_gb = int(du_out.strip()) / 1024 / 1024
+                    paths_info.append({
+                        "path": path,
+                        "totalGb": disk_total_gb,
+                        "usedGb": disk_used_gb,
+                        "availGb": disk_avail_gb,
+                        "pathUsedGb": user_used_gb,
+                    })
+            finally:
+                client.close()
+
+        # ---------- CUDA 权限 ----------
+        server_gpu_info: list[dict[str, Any]] = json.loads(srv_row["gpu_info"]) if srv_row["gpu_info"] else []
+        cuda_available = bool(srv_row["cuda_available"])
+        if user.role == "admin":
+            # 管理员拥有所有 GPU
+            allowed_gpu_indices = [g["index"] for g in server_gpu_info]
+        else:
+            allowed_gpu_indices: list[int] = perms.get("cuda_gpu_indices", [])
+
+        # 拼装用户可用的 GPU 详情
+        gpu_index_set = set(allowed_gpu_indices)
+        available_gpus = [g for g in server_gpu_info if g["index"] in gpu_index_set]
+
+    return {
+        "serverId": server_id,
+        "volume": {
+            "quotaGb": vol_quota_gb,
+            "usedSelfGb": vol_used_self,
+            "usedTotalGb": vol_used_total,
+            "remainingGb": vol_remaining,
+        },
+        "paths": paths_info,
+        "cuda": {
+            "serverHasCuda": cuda_available,
+            "allowedGpuIndices": allowed_gpu_indices,
+            "availableGpus": available_gpus,
+        },
     }

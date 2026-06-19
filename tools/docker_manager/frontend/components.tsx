@@ -3,7 +3,7 @@
 // ============================================================
 
 import { useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import {
   AlertCircle,
   CheckCircle,
@@ -146,9 +146,9 @@ export function Modal({ title, onClose, children, foot, wide }: { title: string;
   );
 }
 
-export function Field({ label, children, full }: { label: string; children: ReactNode; full?: boolean }) {
+export function Field({ label, children, full, style }: { label: string; children: ReactNode; full?: boolean; style?: CSSProperties }) {
   return (
-    <div className={`dm-form-field${full ? ' dm-full-col' : ''}`}>
+    <div className={`dm-form-field${full ? ' dm-full-col' : ''}`} style={style}>
       <label>{label}</label>
       {children}
     </div>

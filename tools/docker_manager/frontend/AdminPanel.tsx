@@ -8,6 +8,7 @@ import {
   Box,
   CheckCircle,
   ClipboardList,
+  Cpu,
   Database,
   FileText,
   HardDrive,
@@ -16,12 +17,14 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  ScanLine,
   Server,
   Shield,
   Trash2,
   Users,
 } from 'lucide-react';
 import { apiDelete, apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
+import type { GpuInfo } from './types';
 import { Alert, Field, Modal, ResourceLoadingWrapper, SkeletonRows, Spin, TruncText } from './components';
 import { API, containerStateClass, renderMarkdown, useErrorMsg } from './utils';
 import {
@@ -57,6 +60,8 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [permsForm, setPermsForm] = useState<UserPerms>(DEFAULT_PERMS);
   const [permsPathStr, setPermsPathStr] = useState('');
   const [savingPerms, setSavingPerms] = useState(false);
+  // CUDA 重新扫描
+  const [scanningCuda, setScanningCuda] = useState<string | null>(null); // 当前正在扫描的 server_id
   // 资源多角色分配面板
   const [resourceServer, setResourceServer] = useState<DmServer | null>(null);
   const [resources, setResources] = useState<ServerResources | null>(null);
@@ -180,6 +185,20 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     }
   }
 
+  async function doRescanCuda(id: string) {
+    setScanningCuda(id);
+    clearError();
+    try {
+      const r = await apiPost<{ server: DmServer }>(`${API}/servers/${id}/rescan-cuda`, {});
+      setServers((prev) => prev.map((s) => s.id === id ? { ...s, ...r.server } : s));
+      onRefresh();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setScanningCuda(null);
+    }
+  }
+
   async function openPerms(s: DmServer) {
     setPermServer(s);
     setPermsLoading(true);
@@ -290,17 +309,26 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
       {loading ? <div className="dm-empty"><Spin /> 加载中…</div> :
        servers.length === 0 ? <div className="dm-empty"><Server size={32} /> 暂无服务器</div> : (
         <div className="dm-table">
-          <div className="dm-table-header" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr auto' }}>
-            <span>服务器</span><span>地址</span><span>添加时间</span><span>操作</span>
+          <div className="dm-table-header" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr 1fr auto' }}>
+            <span>服务器</span><span>地址</span><span>GPU</span><span>添加时间</span><span>操作</span>
           </div>
           {servers.map((s) => (
-            <div key={s.id} className="dm-table-row" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr auto' }}>
+            <div key={s.id} className="dm-table-row" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr 1fr auto' }}>
               <span style={{ fontWeight: 600 }}>{s.name}</span>
               <span style={{ color: '#526071', fontFamily: 'monospace', fontSize: 13 }}>{s.host}:{s.port}</span>
+              <span>
+                {s.cudaAvailable
+                  ? <span className="dm-cuda-badge"><Cpu size={11} /> {s.gpuCount ?? 0} GPU</span>
+                  : <span style={{ color: '#94a3b8', fontSize: 12 }}>无</span>
+                }
+              </span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>{s.createdAt.slice(0, 10)}</span>
               <span style={{ display: 'flex', gap: 4 }}>
                 <button className="dm-btn-icon" title="权限管理" onClick={() => openPerms(s)}><Users size={13} /></button>
                 <button className="dm-btn-icon" title="资源分配" onClick={() => openResourcePanel(s)}><Database size={13} /></button>
+                <button className="dm-btn-icon" title="重新扫描 CUDA" onClick={() => void doRescanCuda(s.id)} disabled={scanningCuda === s.id}>
+                  {scanningCuda === s.id ? <Spin /> : <ScanLine size={13} />}
+                </button>
                 <button className="dm-btn-icon danger" title="删除" onClick={() => doDelete(s.id, s.name)}><Trash2 size={13} /></button>
               </span>
             </div>
@@ -778,6 +806,64 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
               </label>
             </div>
           </div>
+
+          {/* CUDA / GPU 权限 */}
+          {permServer?.cudaAvailable && (permServer.gpuInfo ?? []).length > 0 ? (
+            <div className="dm-perm-section">
+              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 权限</div>
+              <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
+                选择该用户可挂载的显卡序号（未选中则不允许使用 CUDA）：
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {/* 全选 / 全不选快捷按钮 */}
+                <button
+                  className="btn"
+                  style={{ fontSize: 11 }}
+                  onClick={() => setPermsForm((p) => ({ ...p, cuda_gpu_indices: (permServer.gpuInfo ?? []).map((g) => g.index) }))}
+                >
+                  全选
+                </button>
+                <button
+                  className="btn"
+                  style={{ fontSize: 11 }}
+                  onClick={() => setPermsForm((p) => ({ ...p, cuda_gpu_indices: [] }))}
+                >
+                  全不选
+                </button>
+              </div>
+              <div className="dm-roles-checklist" style={{ marginTop: 8 }}>
+                {(permServer.gpuInfo ?? []).map((gpu) => {
+                  const checked = (permsForm.cuda_gpu_indices ?? []).includes(gpu.index);
+                  return (
+                    <label key={gpu.index} className="dm-form-check">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          setPermsForm((p) => ({
+                            ...p,
+                            cuda_gpu_indices: e.target.checked
+                              ? [...(p.cuda_gpu_indices ?? []), gpu.index].sort((a, b) => a - b)
+                              : (p.cuda_gpu_indices ?? []).filter((i) => i !== gpu.index),
+                          }));
+                        }}
+                      />
+                      <span className="dm-cuda-gpu-label">
+                        <strong>GPU {gpu.index}</strong>
+                        <span style={{ color: '#64748b', marginLeft: 4 }}>{gpu.name}</span>
+                        <span style={{ color: '#94a3b8', fontSize: 11, marginLeft: 4 }}>{gpu.memoryTotal}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ) : permServer && !permServer.cudaAvailable ? (
+            <div className="dm-perm-section">
+              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 权限</div>
+              <div style={{ fontSize: 12, color: '#94a3b8' }}>该服务器未检测到 CUDA / GPU，无需配置。</div>
+            </div>
+          ) : null}
         </Modal>
       )}
 

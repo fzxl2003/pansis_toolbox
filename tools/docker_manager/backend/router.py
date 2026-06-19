@@ -19,6 +19,7 @@ from tools.docker_manager.backend.service import (
     copy_volume,
     create_container_compose,
     create_container_run,
+    create_container_run_raw,
     create_from_template,
     create_template,
     create_volume,
@@ -42,6 +43,8 @@ from tools.docker_manager.backend.service import (
     list_templates,
     list_volumes,
     pull_image,
+    rescan_server_cuda,
+    get_server_resource_overview,
     set_resource_viewers,
     set_user_permission,
     set_user_perms,
@@ -104,6 +107,8 @@ class SetUserPermsPayload(BaseModel):
     tpl_use: bool = False
     tpl_create: bool = False
     tpl_edit: bool = False
+    # CUDA 权限（允许使用的显卡序号列表）
+    cuda_gpu_indices: list[int] = Field(default_factory=list)
 
 
 class PullImagePayload(BaseModel):
@@ -127,6 +132,10 @@ class CreateContainerRunPayload(BaseModel):
     restart: str = ""
     gpus: str = ""
     extra_args: str = ""
+
+
+class RunRawPayload(BaseModel):
+    command: str  # 完整的 docker run ... 命令
 
 
 class CreateContainerComposePayload(BaseModel):
@@ -171,6 +180,7 @@ class UpdateTemplatePayload(BaseModel):
 class CreateFromTemplatePayload(BaseModel):
     templateId: str
     overrides: dict[str, Any] = Field(default_factory=dict)
+    gpus: str = ""  # GPU 挂载参数，e.g. "all" or "\"device=0,1\""
 
 
 # ==============================================================
@@ -291,6 +301,13 @@ def create_run_route(request: Request, server_id: str, payload: CreateContainerR
     return create_container_run(server_id, payload.model_dump(), user)
 
 
+@router.post("/servers/{server_id}/containers/run-raw")
+def create_run_raw_route(request: Request, server_id: str, payload: RunRawPayload) -> dict:
+    """直接执行用户提供的完整 docker run 命令（命令行模式）"""
+    user = require_user(request)
+    return create_container_run_raw(server_id, payload.command, user)
+
+
 @router.post("/servers/{server_id}/containers/compose")
 def create_compose_route(request: Request, server_id: str, payload: CreateContainerComposePayload) -> dict:
     user = require_user(request)
@@ -300,7 +317,7 @@ def create_compose_route(request: Request, server_id: str, payload: CreateContai
 @router.post("/servers/{server_id}/containers/from-template")
 def create_from_template_route(request: Request, server_id: str, payload: CreateFromTemplatePayload) -> dict:
     user = require_user(request)
-    return create_from_template(server_id, payload.templateId, payload.overrides, user)
+    return create_from_template(server_id, payload.templateId, payload.overrides, user, gpus=payload.gpus)
 
 
 @router.post("/servers/{server_id}/containers/{container_id}/action")
@@ -491,3 +508,25 @@ def set_resource_viewers_route(request: Request, server_id: str, payload: SetRes
         payload.viewerUserIds,
         user,
     )
+
+
+# ==============================================================
+# CUDA 扫描路由
+# ==============================================================
+
+@router.post("/servers/{server_id}/rescan-cuda")
+def rescan_cuda_route(request: Request, server_id: str) -> dict:
+    """重新扫描服务器的 CUDA/GPU 状态（管理员专用）"""
+    user = require_user(request)
+    return {"server": rescan_server_cuda(server_id, user)}
+
+
+# ==============================================================
+# 服务器资源概览路由（用户侧）
+# ==============================================================
+
+@router.get("/servers/{server_id}/resource-overview")
+def resource_overview_route(request: Request, server_id: str) -> dict:
+    """获取当前用户在服务器上的资源概览（卷配额、路径磁盘、CUDA 权限）"""
+    user = require_user(request)
+    return get_server_resource_overview(server_id, user)

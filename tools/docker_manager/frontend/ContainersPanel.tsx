@@ -2,12 +2,14 @@
 // Containers Panel — Docker Manager
 // ============================================================
 
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Box,
   CheckCircle,
   ClipboardList,
   Copy,
+  Cpu,
+  Database,
   FileText,
   Globe,
   HardDrive,
@@ -27,12 +29,15 @@ import {
 import { apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
 import { Alert, Field, Modal, ServerSelector, Spin, TruncText } from './components';
-import { API, containerStateClass, parseContainerStatus, renderMarkdown, useErrorMsg } from './utils';
+import { API, containerStateClass, formatSize, parseContainerStatus, renderMarkdown, useErrorMsg } from './utils';
 import type {
   ContainerDetail,
   CreateMode,
   DmServer,
   DockerContainer,
+  DockerImage,
+  DockerVolume,
+  ServerResourceOverview,
   Template,
   TemplateDetail,
   UserQuota,
@@ -107,82 +112,571 @@ function parseSshPort(ports: string | undefined): string | null {
   return match ? match[1] : null;
 }
 
+// ---- ResourceOverviewStrip（在创建容器弹窗顶部显示用户当前额度）----
+
+function ResourceOverviewStrip({ overview }: { overview: ServerResourceOverview }) {
+  const vol = overview.volume;
+  const cuda = overview.cuda;
+  const unlimitedVol = vol.quotaGb === 0;
+
+  return (
+    <div className="dm-resource-strip">
+      {/* 卷配额 */}
+      <div className="dm-resource-chip">
+        <Database size={11} />
+        <span>卷</span>
+        {unlimitedVol
+          ? <span style={{ color: '#22c55e', fontWeight: 600 }}>不限</span>
+          : (
+            <>
+              <span style={{ color: (vol.remainingGb ?? 0) < vol.quotaGb * 0.1 ? '#ef4444' : '#1e293b', fontWeight: 600 }}>
+                {vol.remainingGb !== null ? formatSize(vol.remainingGb) : '不限'}
+              </span>
+              <span style={{ color: '#94a3b8' }}>剩余</span>
+            </>
+          )
+        }
+      </div>
+      {/* 路径磁盘 */}
+      {overview.paths.map((p) => (
+        p.availGb !== null && (
+          <div key={p.path} className="dm-resource-chip">
+            <HardDrive size={11} />
+            <span style={{ maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.path}>
+              {p.path.split('/').pop() || p.path}
+            </span>
+            <span style={{ fontWeight: 600 }}>{formatSize(p.availGb)}</span>
+            <span style={{ color: '#94a3b8' }}>可用</span>
+          </div>
+        )
+      ))}
+      {/* CUDA */}
+      {cuda.serverHasCuda && (
+        cuda.availableGpus.length > 0 ? (
+          <div className="dm-resource-chip" style={{ gap: 4 }}>
+            <Cpu size={11} />
+            <span>GPU</span>
+            {cuda.availableGpus.map((gpu) => (
+              <span key={gpu.index} style={{
+                background: '#ede9fe', color: '#5b21b6', border: '1px solid #c4b5fd',
+                borderRadius: 999, padding: '0 5px', fontSize: 11, fontWeight: 700,
+                lineHeight: '16px',
+              }}>#{gpu.index}</span>
+            ))}
+            <span style={{ color: '#94a3b8' }}>可用</span>
+          </div>
+        ) : (
+          <div className="dm-resource-chip">
+            <Cpu size={11} />
+            <span style={{ color: '#94a3b8' }}>无 GPU 权限</span>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+// ---- RunCreateModal 相关子类型 ----
+
+type PortEntry  = { id: number; host: string; container: string; proto: 'tcp' | 'udp' };
+type MountEntry = { id: number; type: 'bind' | 'volume'; source: string; target: string; ro: boolean; newVolName: string };
+type EnvEntry   = { id: number; key: string; value: string };
+
+let _uid = 0;
+const uid = () => ++_uid;
+
+function mkPort(): PortEntry  { return { id: uid(), host: '', container: '', proto: 'tcp' }; }
+function mkMount(): MountEntry { return { id: uid(), type: 'bind', source: '', target: '', ro: false, newVolName: '' }; }
+function mkEnv(): EnvEntry    { return { id: uid(), key: '', value: '' }; }
+
+// 将界面表单组装成 docker run 命令字符串（单向，仅用于预览/命令行模式）
+function buildDockerCmd(p: {
+  image: string; name: string; restart: string; network: string; command: string;
+  ports: PortEntry[]; mounts: MountEntry[]; envs: EnvEntry[];
+  gpus: string; extra_args: string;
+}): string {
+  const parts: string[] = ['docker', 'run', '-d'];
+  if (p.name)    parts.push('--name', p.name);
+  if (p.restart) parts.push('--restart', p.restart);
+  if (p.network) parts.push('--network', p.network);
+  for (const pt of p.ports) {
+    if (pt.host || pt.container) {
+      const mapping = pt.host
+        ? `${pt.host}:${pt.container}/${pt.proto}`
+        : `${pt.container}/${pt.proto}`;
+      parts.push('-p', mapping);
+    }
+  }
+  for (const m of p.mounts) {
+    if (m.type === 'bind') {
+      if (m.source && m.target) parts.push('-v', `${m.source}:${m.target}${m.ro ? ':ro' : ''}`);
+    } else {
+      const volName = m.source || m.newVolName;
+      if (volName && m.target) parts.push('-v', `${volName}:${m.target}${m.ro ? ':ro' : ''}`);
+    }
+  }
+  for (const e of p.envs) {
+    if (e.key) parts.push('-e', `${e.key}=${e.value}`);
+  }
+  if (p.gpus) parts.push('--gpus', p.gpus);
+  if (p.extra_args) parts.push(...p.extra_args.trim().split(/\s+/));
+  if (p.image) parts.push(p.image);
+  if (p.command) parts.push(...p.command.trim().split(/\s+/));
+  return parts.join(' ');
+}
+
 // ---- RunCreateModal ----
 
-export function RunCreateModal({ serverId, quota, onClose, onSuccess }: { serverId: string; quota: UserQuota | null; onClose: () => void; onSuccess: () => void }) {
-  const [form, setForm] = useState({
-    name: '', image: '', command: '', ports: '', volumes: '', envs: '',
-    network: '', restart: 'unless-stopped', gpus: '', extra_args: '',
-  });
+export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuccess }: {
+  serverId: string;
+  quota: UserQuota | null;
+  serverOverview: ServerResourceOverview | null;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  // ---------- 模式切换 ----------
+  const [mode, setMode] = useState<'gui' | 'cli'>('gui');
+
+  // ---------- 界面模式表单 ----------
+  const [name, setName]       = useState('');
+  const [image, setImage]     = useState('');
+  const [imageInput, setImageInput] = useState(''); // 手动输入部分
+  const [imageMode, setImageMode] = useState<'select' | 'input'>('select');
+  const [availImages, setAvailImages] = useState<DockerImage[]>([]);
+  const [imagesLoaded, setImagesLoaded] = useState(false);
+  const [restart, setRestart] = useState('unless-stopped');
+  const [network, setNetwork] = useState('');
+  const [command, setCommand] = useState('');
+  const [extraArgs, setExtraArgs] = useState('');
+  const [ports, setPorts]   = useState<PortEntry[]>([mkPort()]);
+  const [mounts, setMounts] = useState<MountEntry[]>([mkMount()]);
+  const [envs, setEnvs]     = useState<EnvEntry[]>([mkEnv()]);
+  const [availVolumes, setAvailVolumes] = useState<DockerVolume[]>([]);
+
+  // ---------- CUDA ----------
+  const [selectedGpuIndices, setSelectedGpuIndices] = useState<number[]>([]);
+  const [cudaMode, setCudaMode] = useState<'none' | 'all' | 'custom'>('none');
+
+  // ---------- CLI 模式 ----------
+  const [cliCmd, setCliCmd] = useState('docker run -d ');
+
+  // ---------- 公共 ----------
   const [loading, setLoading] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
 
-  const f = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
-    setForm((p) => ({ ...p, [k]: e.target.value }));
+  const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
+  const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
 
-  async function submit(ev: FormEvent) {
-    ev.preventDefault();
-    if (!form.image.trim()) return;
-    setLoading(true);
-    clearError();
-    try {
-      await apiPost(`${API}/servers/${serverId}/containers/run`, {
-        ...form,
-        ports: form.ports.split('\n').map(s => s.trim()).filter(Boolean),
-        volumes: form.volumes.split('\n').map(s => s.trim()).filter(Boolean),
-        envs: form.envs.split('\n').map(s => s.trim()).filter(Boolean),
-      });
-      onSuccess();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setLoading(false);
-    }
+  function buildGpusArg(): string {
+    if (cudaMode === 'none') return '';
+    if (cudaMode === 'all') return 'all';
+    if (selectedGpuIndices.length === 0) return '';
+    return `device=${selectedGpuIndices.join(',')}`;
   }
 
+  // 加载镜像和卷列表（懒加载）
+  useEffect(() => {
+    if (imagesLoaded) return;
+    setImagesLoaded(true);
+    apiGet<{ images: DockerImage[] }>(`${API}/servers/${serverId}/images`)
+      .then(r => setAvailImages(r.images))
+      .catch(() => {/* 静默 */});
+    apiGet<{ volumes: DockerVolume[] }>(`${API}/servers/${serverId}/volumes`)
+      .then(r => setAvailVolumes(r.volumes ?? []))
+      .catch(() => {/* 静默 */});
+  }, [serverId, imagesLoaded]);
+
+  // 当切换到 CLI 模式时，将界面表单同步为命令字符串
+  function switchToCli() {
+    const gpus = buildGpusArg();
+    const cmd = buildDockerCmd({
+      image: imageMode === 'input' ? imageInput : image,
+      name, restart, network, command,
+      ports, mounts, envs, gpus, extra_args: extraArgs,
+    });
+    setCliCmd(cmd);
+    setMode('cli');
+  }
+
+  // ---------- 提交 ----------
+  async function submitGui() {
+    const finalImage = imageMode === 'input' ? imageInput.trim() : image;
+    if (!finalImage) return;
+    clearError();
+    setLoading(true);
+    try {
+      const portList = ports
+        .filter(p => p.container)
+        .map(p => p.host ? `${p.host}:${p.container}/${p.proto}` : `${p.container}/${p.proto}`);
+      const volList = mounts.flatMap(m => {
+        if (m.type === 'bind') {
+          return m.source && m.target ? [`${m.source}:${m.target}${m.ro ? ':ro' : ''}`] : [];
+        } else {
+          const v = m.source || m.newVolName;
+          return v && m.target ? [`${v}:${m.target}${m.ro ? ':ro' : ''}`] : [];
+        }
+      });
+      const envList = envs.filter(e => e.key).map(e => `${e.key}=${e.value}`);
+      await apiPost(`${API}/servers/${serverId}/containers/run`, {
+        name, image: finalImage, command, network, restart,
+        ports: portList, volumes: volList, envs: envList,
+        gpus: buildGpusArg(), extra_args: extraArgs,
+      });
+      onSuccess();
+    } catch (e) { setError(e); }
+    finally { setLoading(false); }
+  }
+
+  async function submitCli() {
+    clearError();
+    setLoading(true);
+    try {
+      await apiPost(`${API}/servers/${serverId}/containers/run-raw`, { command: cliCmd });
+      onSuccess();
+    } catch (e) { setError(e); }
+    finally { setLoading(false); }
+  }
+
+  const canSubmitGui = imageMode === 'input' ? !!imageInput.trim() : !!image;
+
+  // ---------- 渲染 ----------
   return (
     <Modal title="docker run 创建容器" onClose={onClose} wide
       foot={
         <>
+          {/* 模式切换 */}
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <button
+              type="button"
+              className={`btn${mode === 'gui' ? ' btn-primary' : ''}`}
+              style={{ fontSize: 12 }}
+              onClick={() => setMode('gui')}
+            >界面参数</button>
+            <button
+              type="button"
+              className={`btn${mode === 'cli' ? ' btn-primary' : ''}`}
+              style={{ fontSize: 12 }}
+              onClick={switchToCli}
+            >命令行</button>
+          </div>
           <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn btn-primary" onClick={submit} disabled={loading || !form.image.trim()}>
+          <button
+            className="btn btn-primary"
+            onClick={mode === 'gui' ? submitGui : submitCli}
+            disabled={loading || (mode === 'gui' && !canSubmitGui)}
+          >
             {loading ? <Spin /> : <Play size={14} />} 创建
           </button>
         </>
       }>
       {error && <Alert type="error">{error}</Alert>}
+      {serverOverview && <ResourceOverviewStrip overview={serverOverview} />}
       {quota?.pathWhitelist && quota.pathWhitelist.length > 0 && (
         <Alert type="info">挂载路径白名单：{quota.pathWhitelist.join('、')}</Alert>
       )}
-      <form onSubmit={submit}>
-        <div className="dm-form-grid">
-          <Field label="镜像 *"><input value={form.image} onChange={f('image')} placeholder="nginx:latest" required /></Field>
-          <Field label="容器名称"><input value={form.name} onChange={f('name')} placeholder="my-nginx（可选）" /></Field>
-          <Field label="重启策略">
-            <select value={form.restart} onChange={f('restart')}>
-              <option value="">不重启</option>
-              <option value="always">always</option>
-              <option value="unless-stopped">unless-stopped</option>
-              <option value="on-failure">on-failure</option>
-            </select>
-          </Field>
-          <Field label="GPU（如：all）"><input value={form.gpus} onChange={f('gpus')} placeholder="all（可选）" /></Field>
-          <Field label="网络"><input value={form.network} onChange={f('network')} placeholder="bridge（可选）" /></Field>
-          <Field label="启动命令"><input value={form.command} onChange={f('command')} placeholder="可选，覆盖默认 CMD" /></Field>
-          <Field label="端口映射（每行一条）" full>
-            <textarea className="mono" value={form.ports} onChange={f('ports')} placeholder={"8080:80\n443:443"} style={{ minHeight: 80 }} />
-          </Field>
-          <Field label="卷挂载（每行一条）" full>
-            <textarea className="mono" value={form.volumes} onChange={f('volumes')} placeholder={"/data/myapp:/app/data"} style={{ minHeight: 80 }} />
-          </Field>
-          <Field label="环境变量（每行一条 KEY=VAL）" full>
-            <textarea className="mono" value={form.envs} onChange={f('envs')} placeholder={"ENV=prod\nDEBUG=0"} style={{ minHeight: 80 }} />
-          </Field>
-          <Field label="额外参数" full>
-            <input value={form.extra_args} onChange={f('extra_args')} placeholder="--memory=2g --cpus=2（可选）" />
-          </Field>
+
+      {/* ===== CLI 模式 ===== */}
+      {mode === 'cli' && (
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={{ fontSize: 12, color: '#64748b' }}>
+            直接输入完整 <code>docker run</code> 命令（从界面模式同步而来，可手动修改）：
+          </div>
+          <textarea
+            className="mono"
+            value={cliCmd}
+            onChange={e => setCliCmd(e.target.value)}
+            style={{ minHeight: 120, fontSize: 13 }}
+          />
         </div>
-      </form>
+      )}
+
+      {/* ===== 界面模式 ===== */}
+      {mode === 'gui' && (
+        <div style={{ display: 'grid', gap: 16 }}>
+
+          {/* ── 基本信息 ── */}
+          <div className="dm-run-section">
+            <div className="dm-run-section-title">基本信息</div>
+            <div className="dm-form-grid">
+              {/* 镜像 */}
+              <Field label="镜像 *" full>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {imageMode === 'select' ? (
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <select
+                          value={image}
+                          onChange={e => setImage(e.target.value)}
+                          style={{ flex: 1 }}
+                        >
+                          <option value="">— 选择已有镜像 —</option>
+                          {availImages.map(img => (
+                            <option key={`${img.repo}:${img.tag}`} value={`${img.repo}:${img.tag}`}>
+                              {img.repo}:{img.tag}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <input
+                        value={imageInput}
+                        onChange={e => setImageInput(e.target.value)}
+                        placeholder="nginx:latest（不存在则自动拉取）"
+                      />
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ flexShrink: 0, fontSize: 12 }}
+                    onClick={() => { setImageMode(m => m === 'select' ? 'input' : 'select'); }}
+                  >
+                    {imageMode === 'select' ? '手动输入' : '选择已有'}
+                  </button>
+                </div>
+              </Field>
+              <Field label="容器名称">
+                <input value={name} onChange={e => setName(e.target.value)} placeholder="my-nginx（可选）" />
+              </Field>
+              <Field label="重启策略">
+                <select value={restart} onChange={e => setRestart(e.target.value)}>
+                  <option value="">不重启</option>
+                  <option value="always">always</option>
+                  <option value="unless-stopped">unless-stopped</option>
+                  <option value="on-failure">on-failure</option>
+                </select>
+              </Field>
+              <Field label="网络">
+                <input value={network} onChange={e => setNetwork(e.target.value)} placeholder="bridge（可选）" />
+              </Field>
+              <Field label="启动命令">
+                <input value={command} onChange={e => setCommand(e.target.value)} placeholder="可选，覆盖默认 CMD" />
+              </Field>
+            </div>
+          </div>
+
+          {/* ── 端口映射 ── */}
+          <div className="dm-run-section">
+            <div className="dm-run-section-title" style={{ justifyContent: 'space-between' }}>
+              <span><Globe size={13} /> 端口映射</span>
+              <button type="button" className="btn" style={{ fontSize: 12 }} onClick={() => setPorts(p => [...p, mkPort()])}>
+                <Plus size={12} /> 添加
+              </button>
+            </div>
+            {ports.length === 0 && (
+              <div style={{ fontSize: 12, color: '#94a3b8', padding: '4px 0' }}>暂无端口映射</div>
+            )}
+            {ports.map((pt, i) => (
+              <div key={pt.id} className="dm-run-list-row">
+                <div className="dm-run-list-row-inputs">
+                  <Field label="宿主机端口">
+                    <input
+                      type="number" min={1} max={65535}
+                      value={pt.host} placeholder="8080（可选）"
+                      onChange={e => setPorts(prev => prev.map((p, j) => j === i ? { ...p, host: e.target.value } : p))}
+                    />
+                  </Field>
+                  <span style={{ alignSelf: 'flex-end', paddingBottom: 10, color: '#94a3b8', flexShrink: 0 }}>→</span>
+                  <Field label="容器端口 *">
+                    <input
+                      type="number" min={1} max={65535}
+                      value={pt.container} placeholder="80"
+                      onChange={e => setPorts(prev => prev.map((p, j) => j === i ? { ...p, container: e.target.value } : p))}
+                    />
+                  </Field>
+                  <Field label="协议">
+                    <select
+                      value={pt.proto}
+                      onChange={e => setPorts(prev => prev.map((p, j) => j === i ? { ...p, proto: e.target.value as 'tcp' | 'udp' } : p))}
+                    >
+                      <option value="tcp">TCP</option>
+                      <option value="udp">UDP</option>
+                    </select>
+                  </Field>
+                </div>
+                <button type="button" className="dm-btn-icon danger" title="删除" style={{ flexShrink: 0, alignSelf: 'flex-end', marginBottom: 6 }}
+                  onClick={() => setPorts(prev => prev.filter((_, j) => j !== i))}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* ── 卷 / 路径挂载 ── */}
+          <div className="dm-run-section">
+            <div className="dm-run-section-title" style={{ justifyContent: 'space-between' }}>
+              <span><HardDrive size={13} /> 卷 / 路径挂载</span>
+              <button type="button" className="btn" style={{ fontSize: 12 }} onClick={() => setMounts(m => [...m, mkMount()])}>
+                <Plus size={12} /> 添加
+              </button>
+            </div>
+            {mounts.length === 0 && (
+              <div style={{ fontSize: 12, color: '#94a3b8', padding: '4px 0' }}>暂无挂载</div>
+            )}
+            {mounts.map((m, i) => (
+              <div key={m.id} className="dm-run-list-row">
+                {/* 不换行：类型固定宽，源/目标弹性，只读紧凑 */}
+                <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', gap: 8, flexWrap: 'nowrap', minWidth: 0 }}>
+                  <Field label="类型" style={{ width: 110, flexShrink: 0 }}>
+                    <select
+                      value={m.type}
+                      onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, type: e.target.value as 'bind' | 'volume', source: '', newVolName: '' } : x))}
+                    >
+                      <option value="bind">路径 (bind)</option>
+                      <option value="volume">卷 (volume)</option>
+                    </select>
+                  </Field>
+                  {m.type === 'bind' ? (
+                    <Field label="宿主机路径 *" style={{ flex: 1, minWidth: 0 }}>
+                      <input
+                        value={m.source} placeholder="/data/myapp"
+                        onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value } : x))}
+                      />
+                    </Field>
+                  ) : (
+                    <Field label="卷名称 *" style={{ width: 160, flexShrink: 0 }}>
+                      <select
+                        value={m.source}
+                        onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value, newVolName: '' } : x))}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="">— 选择已有卷 —</option>
+                        {availVolumes.map(v => (
+                          <option key={v.name} value={v.name}>{v.name}</option>
+                        ))}
+                        <option value="__new__">+ 新建卷…</option>
+                      </select>
+                      {m.source === '__new__' && (
+                        <input
+                          style={{ marginTop: 4, width: '100%' }}
+                          value={m.newVolName} placeholder="new-volume-name"
+                          onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, newVolName: e.target.value } : x))}
+                        />
+                      )}
+                    </Field>
+                  )}
+                  <Field label="容器路径 *" style={{ flex: 1, minWidth: 0 }}>
+                    <input
+                      value={m.target} placeholder="/app/data"
+                      onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, target: e.target.value } : x))}
+                    />
+                  </Field>
+                  <Field label="只读" style={{ width: 64, flexShrink: 0 }}>
+                    <div style={{ paddingTop: 8 }}>
+                      <label className="dm-form-check">
+                        <input type="checkbox" checked={m.ro}
+                          onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, ro: e.target.checked } : x))}
+                        />
+                        <span>ro</span>
+                      </label>
+                    </div>
+                  </Field>
+                </div>
+                <button type="button" className="dm-btn-icon danger" title="删除" style={{ flexShrink: 0, alignSelf: 'flex-end', marginBottom: 6 }}
+                  onClick={() => setMounts(prev => prev.filter((_, j) => j !== i))}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* ── 环境变量 ── */}
+          <div className="dm-run-section">
+            <div className="dm-run-section-title" style={{ justifyContent: 'space-between' }}>
+              <span><Settings size={13} /> 环境变量</span>
+              <button type="button" className="btn" style={{ fontSize: 12 }} onClick={() => setEnvs(e => [...e, mkEnv()])}>
+                <Plus size={12} /> 添加
+              </button>
+            </div>
+            {envs.length === 0 && (
+              <div style={{ fontSize: 12, color: '#94a3b8', padding: '4px 0' }}>暂无环境变量</div>
+            )}
+            {envs.map((ev, i) => (
+              <div key={ev.id} className="dm-run-list-row">
+                <div className="dm-run-list-row-inputs">
+                  <Field label="Key">
+                    <input
+                      value={ev.key} placeholder="MY_VAR" className="mono"
+                      onChange={e => setEnvs(prev => prev.map((x, j) => j === i ? { ...x, key: e.target.value } : x))}
+                    />
+                  </Field>
+                  <span style={{ alignSelf: 'flex-end', paddingBottom: 10, color: '#94a3b8', flexShrink: 0 }}>=</span>
+                  <Field label="Value">
+                    <input
+                      value={ev.value} placeholder="value" className="mono"
+                      onChange={e => setEnvs(prev => prev.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
+                    />
+                  </Field>
+                </div>
+                <button type="button" className="dm-btn-icon danger" title="删除" style={{ flexShrink: 0, alignSelf: 'flex-end', marginBottom: 6 }}
+                  onClick={() => setEnvs(prev => prev.filter((_, j) => j !== i))}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* ── CUDA / GPU 挂载 ── */}
+          {hasCuda ? (
+            <div className="dm-run-section">
+              <div className="dm-run-section-title"><Cpu size={13} /> CUDA / GPU 挂载</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                <label className="dm-form-check">
+                  <input type="radio" name="rcudaMode" checked={cudaMode === 'none'} onChange={() => setCudaMode('none')} />
+                  不使用 GPU
+                </label>
+                <label className="dm-form-check">
+                  <input type="radio" name="rcudaMode" checked={cudaMode === 'all'}
+                    onChange={() => { setCudaMode('all'); setSelectedGpuIndices(availableGpus.map(g => g.index)); }} />
+                  使用全部可用 GPU
+                </label>
+                <label className="dm-form-check">
+                  <input type="radio" name="rcudaMode" checked={cudaMode === 'custom'} onChange={() => setCudaMode('custom')} />
+                  自定义选择
+                </label>
+              </div>
+              {cudaMode === 'custom' && (
+                <div className="dm-roles-checklist">
+                  {availableGpus.map((gpu) => (
+                    <label key={gpu.index} className="dm-form-check">
+                      <input type="checkbox"
+                        checked={selectedGpuIndices.includes(gpu.index)}
+                        onChange={(e) => setSelectedGpuIndices(prev =>
+                          e.target.checked ? [...prev, gpu.index].sort((a, b) => a - b) : prev.filter(x => x !== gpu.index)
+                        )}
+                      />
+                      <span className="dm-cuda-gpu-label">
+                        <strong>GPU {gpu.index}</strong>
+                        <span style={{ color: '#64748b', marginLeft: 4 }}>{gpu.name}</span>
+                        <span style={{ color: '#94a3b8', fontSize: 11, marginLeft: 4 }}>{gpu.memoryTotal}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {cudaMode !== 'none' && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#64748b' }}>
+                  将使用参数：<code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 3 }}>--gpus {buildGpusArg() || '（未选择）'}</code>
+                </div>
+              )}
+            </div>
+          ) : serverOverview?.cuda?.serverHasCuda && availableGpus.length === 0 ? (
+            <div className="dm-run-section">
+              <div className="dm-run-section-title"><Cpu size={13} /> CUDA / GPU 挂载</div>
+              <div style={{ fontSize: 12, color: '#94a3b8' }}>您暂无 GPU 使用权限，请联系管理员分配。</div>
+            </div>
+          ) : null}
+
+          {/* ── 额外参数 ── */}
+          <div className="dm-run-section">
+            <div className="dm-run-section-title">额外参数</div>
+            <Field label="--flags（原样追加）" full>
+              <input value={extraArgs} onChange={e => setExtraArgs(e.target.value)} placeholder="--memory=2g --cpus=2（可选）" />
+            </Field>
+          </div>
+
+        </div>
+      )}
     </Modal>
   );
 }
@@ -235,13 +729,31 @@ export function ComposeCreateModal({ serverId, onClose, onSuccess }: { serverId:
 
 // ---- TemplateDeployModal ----
 
-export function TemplateDeployModal({ serverId, onClose, onSuccess }: { serverId: string; onClose: () => void; onSuccess: () => void }) {
+export function TemplateDeployModal({ serverId, serverOverview, onClose, onSuccess }: {
+  serverId: string;
+  serverOverview: ServerResourceOverview | null;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selected, setSelected] = useState<TemplateDetail | null>(null);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
+  // CUDA 挂载选项
+  const [selectedGpuIndices, setSelectedGpuIndices] = useState<number[]>([]);
+  const [cudaMode, setCudaMode] = useState<'none' | 'all' | 'custom'>('none');
+
+  const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
+  const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
+
+  function buildGpusArg(): string {
+    if (cudaMode === 'none') return '';
+    if (cudaMode === 'all') return 'all';
+    if (selectedGpuIndices.length === 0) return '';
+    return `"device=${selectedGpuIndices.join(',')}"`;
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -278,6 +790,7 @@ export function TemplateDeployModal({ serverId, onClose, onSuccess }: { serverId
       await apiPost(`${API}/servers/${serverId}/containers/from-template`, {
         templateId: selected.id,
         overrides,
+        gpus: buildGpusArg(),
       });
       onSuccess();
     } catch (e) {
@@ -301,6 +814,8 @@ export function TemplateDeployModal({ serverId, onClose, onSuccess }: { serverId
         </>
       }>
       {error && <Alert type="error">{error}</Alert>}
+      {/* 资源概览提示条 */}
+      {serverOverview && <ResourceOverviewStrip overview={serverOverview} />}
 
       {!selected ? (
         loading ? <div className="dm-empty"><Spin /> 加载中…</div> :
@@ -339,6 +854,61 @@ export function TemplateDeployModal({ serverId, onClose, onSuccess }: { serverId
               </div>
             </div>
           )}
+
+          {/* CUDA 挂载区域 */}
+          {hasCuda ? (
+            <div className="dm-perm-section">
+              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 挂载</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                <label className="dm-form-check">
+                  <input type="radio" name="tplCudaMode" checked={cudaMode === 'none'} onChange={() => setCudaMode('none')} />
+                  不使用 GPU
+                </label>
+                <label className="dm-form-check">
+                  <input type="radio" name="tplCudaMode" checked={cudaMode === 'all'} onChange={() => { setCudaMode('all'); setSelectedGpuIndices(availableGpus.map(g => g.index)); }} />
+                  使用全部可用 GPU
+                </label>
+                <label className="dm-form-check">
+                  <input type="radio" name="tplCudaMode" checked={cudaMode === 'custom'} onChange={() => setCudaMode('custom')} />
+                  自定义选择
+                </label>
+              </div>
+              {cudaMode === 'custom' && (
+                <div className="dm-roles-checklist">
+                  {availableGpus.map((gpu) => (
+                    <label key={gpu.index} className="dm-form-check">
+                      <input
+                        type="checkbox"
+                        checked={selectedGpuIndices.includes(gpu.index)}
+                        onChange={(e) => {
+                          setSelectedGpuIndices((prev) =>
+                            e.target.checked
+                              ? [...prev, gpu.index].sort((a, b) => a - b)
+                              : prev.filter((i) => i !== gpu.index)
+                          );
+                        }}
+                      />
+                      <span className="dm-cuda-gpu-label">
+                        <strong>GPU {gpu.index}</strong>
+                        <span style={{ color: '#64748b', marginLeft: 4 }}>{gpu.name}</span>
+                        <span style={{ color: '#94a3b8', fontSize: 11, marginLeft: 4 }}>{gpu.memoryTotal}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {cudaMode !== 'none' && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#64748b' }}>
+                  将使用参数：<code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 3 }}>--gpus {buildGpusArg() || '（未选择）'}</code>
+                </div>
+              )}
+            </div>
+          ) : serverOverview?.cuda?.serverHasCuda && availableGpus.length === 0 ? (
+            <div className="dm-perm-section">
+              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 挂载</div>
+              <div style={{ fontSize: 12, color: '#94a3b8' }}>您暂无 GPU 使用权限，请联系管理员分配。</div>
+            </div>
+          ) : null}
         </div>
       )}
     </Modal>
@@ -356,6 +926,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
   const [logsLoading, setLogsLoading] = useState(false);
   const [createMode, setCreateMode] = useState<CreateMode | null>(null);
   const [quota, setQuota] = useState<UserQuota | null>(null);
+  const [serverOverview, setServerOverview] = useState<ServerResourceOverview | null>(null);
   // 容器详情弹窗
   const [detailTarget, setDetailTarget] = useState<DockerContainer | null>(null);
   const [detail, setDetail] = useState<ContainerDetail | null>(null);
@@ -385,12 +956,14 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
     setLoading(true);
     clearError();
     try {
-      const [cr, qr] = await Promise.all([
+      const [cr, qr, ovr] = await Promise.all([
         apiGet<{ containers: DockerContainer[] }>(`${API}/servers/${sid}/containers`),
         apiGet<{ quota: UserQuota }>(`${API}/servers/${sid}/my-quota`),
+        apiGet<ServerResourceOverview>(`${API}/servers/${sid}/resource-overview`).catch(() => null),
       ]);
       setContainers(cr.containers);
       setQuota(qr.quota);
+      setServerOverview(ovr);
     } catch (e) {
       setError(e);
     } finally {
@@ -494,7 +1067,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setContainers([]); setQuota(null); }} />
+      <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setContainers([]); setQuota(null); setServerOverview(null); }} />
       {error && <Alert type="error">{error}</Alert>}
 
       {/* 复制成功浮动提示 */}
@@ -879,13 +1452,13 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
       )}
 
       {createMode === 'run' && serverId && (
-        <RunCreateModal serverId={serverId} quota={quota} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
+        <RunCreateModal serverId={serverId} quota={quota} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
       )}
       {createMode === 'compose' && serverId && (
         <ComposeCreateModal serverId={serverId} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
       )}
       {createMode === 'template' && serverId && (
-        <TemplateDeployModal serverId={serverId} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
+        <TemplateDeployModal serverId={serverId} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
       )}
     </div>
   );

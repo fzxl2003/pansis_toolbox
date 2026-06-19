@@ -4,6 +4,12 @@
 
 export type PermLevel = 'manage' | 'use' | 'view' | 'none';
 
+export type GpuInfo = {
+  index: number;
+  name: string;
+  memoryTotal: string;
+};
+
 export type DmServer = {
   id: string;
   name: string;
@@ -12,6 +18,10 @@ export type DmServer = {
   sshUsername: string;
   permissionLevel: PermLevel;
   createdAt: string;
+  // CUDA 信息
+  cudaAvailable?: boolean;
+  gpuCount?: number;
+  gpuInfo?: GpuInfo[];
 };
 
 // 细粒度权限结构
@@ -40,6 +50,8 @@ export type UserPerms = {
   tpl_use: boolean;
   tpl_create: boolean;
   tpl_edit: boolean;
+  // CUDA 权限（可使用的显卡序号列表）
+  cuda_gpu_indices: number[];
 };
 
 export const DEFAULT_PERMS: UserPerms = {
@@ -50,6 +62,7 @@ export const DEFAULT_PERMS: UserPerms = {
   ctr_manage_own: false, ctr_manage_all: false, ctr_path_whitelist: [],
   vol_create: false, vol_delete_own: false, vol_delete_all: false, vol_copy: false, vol_quota_gb: 0,
   tpl_use: false, tpl_create: false, tpl_edit: false,
+  cuda_gpu_indices: [],
 };
 
 export type ServerPermEntry = {
@@ -247,3 +260,26 @@ export type BasicUser = { id: string; username: string; displayName: string };
 export type CreateMode = 'run' | 'compose' | 'template';
 
 export type TabId = 'servers' | 'images' | 'containers' | 'templates' | 'volumes' | 'my_resources' | 'admin_servers' | 'admin_templates';
+
+// 服务器资源概览（用户侧）
+export type ServerResourceOverview = {
+  serverId: string;
+  volume: {
+    quotaGb: number;      // 0 = 不限
+    usedSelfGb: number;
+    usedTotalGb: number;
+    remainingGb: number | null; // null = 不限
+  };
+  paths: Array<{
+    path: string;
+    totalGb: number | null;
+    usedGb: number | null;
+    availGb: number | null;
+    pathUsedGb: number | null; // 该路径整体占用（非用户个人）
+  }>;
+  cuda: {
+    serverHasCuda: boolean;
+    allowedGpuIndices: number[];
+    availableGpus: GpuInfo[];
+  };
+};

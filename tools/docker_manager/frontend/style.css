@@ -1116,3 +1116,55 @@
 .dm-run-list-row .dm-btn-icon {
   flex-shrink: 0;
 }
+
+/* ── Sub Tabs（面板内二级 Tab）── */
+
+.dm-sub-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: 4px;
+}
+
+.dm-sub-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  margin-bottom: -1px;
+}
+
+.dm-sub-tab:hover {
+  color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-sub-tab.active {
+  color: #0f766e;
+  border-bottom-color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-sub-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: #7c3aed;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}

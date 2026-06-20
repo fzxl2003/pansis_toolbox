@@ -24,6 +24,7 @@ from tools.experiment_monitor.backend.service import (
     list_monitor_tasks,
     list_script_groups,
     list_servers,
+    preview_process_filter,
     refresh_screen_sessions,
     reorder_queue,
     reset_alert_state,
@@ -153,6 +154,30 @@ def reset_alert_route(request: Request, task_id: str) -> dict:
 def check_now_route(request: Request, task_id: str) -> dict:
     user = require_user(request)
     result = run_monitor_check(task_id)
+    return result
+
+
+# ============================================================
+# Process Filter Preview API
+# ============================================================
+
+class PreviewFilterPayload(BaseModel):
+    serverId: str
+    matchMode: str = "simple"
+    matchPattern: str = ""
+    filterUser: str = ""
+
+
+@router.post("/preview-filter")
+def preview_filter_route(request: Request, payload: PreviewFilterPayload) -> dict:
+    user = require_user(request)
+    result = preview_process_filter(
+        server_id=payload.serverId,
+        match_mode=payload.matchMode,
+        match_pattern=payload.matchPattern,
+        filter_user=payload.filterUser,
+        user=user,
+    )
     return result
 
 

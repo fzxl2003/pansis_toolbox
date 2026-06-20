@@ -327,12 +327,12 @@ def list_monitor_tasks(user: User, server_id: str | None = None) -> list[dict[st
     with get_connection() as connection:
         if server_id:
             rows = connection.execute(
-                "SELECT * FROM em_monitor_tasks WHERE owner_user_id = ? AND server_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM em_monitor_tasks WHERE owner_user_id = ? AND server_id = ? AND enabled = 1 ORDER BY created_at DESC",
                 (user.id, server_id),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM em_monitor_tasks WHERE owner_user_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM em_monitor_tasks WHERE owner_user_id = ? AND enabled = 1 ORDER BY created_at DESC",
                 (user.id,),
             ).fetchall()
     return [_public_task(row) for row in rows]
@@ -447,8 +447,84 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
 def delete_monitor_task(task_id: str, user: User) -> None:
     get_monitor_task(task_id, user)
     with get_connection() as connection:
-        connection.execute("UPDATE em_monitor_tasks SET enabled = 0, updated_at = ? WHERE id = ?", (now_iso(), task_id))
+        # Cascade delete: find all actions belonging to this task
+        action_rows = connection.execute(
+            "SELECT id FROM em_alert_actions WHERE task_id = ?", (task_id,)
+        ).fetchall()
+        for action_row in action_rows:
+            action_id = action_row["id"]
+            # Find all groups belonging to this action
+            group_rows = connection.execute(
+                "SELECT id FROM em_script_groups WHERE action_id = ?", (action_id,)
+            ).fetchall()
+            for group_row in group_rows:
+                group_id = group_row["id"]
+                connection.execute("DELETE FROM em_script_queue WHERE group_id = ?", (group_id,))
+                connection.execute("DELETE FROM em_script_history WHERE group_id = ?", (group_id,))
+                connection.execute("DELETE FROM em_screen_sessions WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM em_script_groups WHERE action_id = ?", (action_id,))
+        connection.execute("DELETE FROM em_alert_actions WHERE task_id = ?", (task_id,))
+        connection.execute("DELETE FROM em_alert_events WHERE task_id = ?", (task_id,))
+        connection.execute("DELETE FROM em_alert_states WHERE task_id = ?", (task_id,))
+        connection.execute("DELETE FROM em_samples WHERE task_id = ?", (task_id,))
+        connection.execute("DELETE FROM em_monitor_tasks WHERE id = ?", (task_id,))
         connection.commit()
+
+
+# ============================================================
+# Process Filter Preview
+# ============================================================
+
+def preview_process_filter(server_id: str, match_mode: str, match_pattern: str, filter_user: str, user: User) -> dict[str, Any]:
+    """Preview which processes would be matched by the given filter settings."""
+    server = get_server(server_id, user)
+
+    if match_mode not in ("simple", "regex"):
+        raise ToolboxError("INVALID_MATCH_MODE", "匹配模式必须是 simple 或 regex", status_code=400, tool_id=TOOL_ID)
+
+    # Validate regex pattern upfront
+    if match_mode == "regex" and match_pattern:
+        try:
+            re.compile(match_pattern)
+        except re.error as exc:
+            raise ToolboxError("INVALID_REGEX", f"正则表达式无效: {exc}", status_code=400, tool_id=TOOL_ID) from exc
+
+    # Build ps command
+    if filter_user:
+        ps_cmd = f"ps -u {shlex_quote(filter_user)} -o pid=,user=,args= 2>/dev/null"
+    else:
+        ps_cmd = "ps -eo pid=,user=,args= 2>/dev/null"
+
+    try:
+        output = _run_ssh(server, ps_cmd, timeout=15)
+    except Exception as exc:
+        raise ToolboxError("SSH_ERROR", f"SSH 连接失败: {exc}", status_code=503, tool_id=TOOL_ID) from exc
+
+    all_processes: list[str] = []
+    matched_processes: list[str] = []
+
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        all_processes.append(line)
+        if not match_pattern:
+            continue
+        if match_mode == "simple":
+            if match_pattern.lower() in line.lower():
+                matched_processes.append(line)
+        elif match_mode == "regex":
+            try:
+                if re.search(match_pattern, line):
+                    matched_processes.append(line)
+            except re.error:
+                pass
+
+    return {
+        "totalCount": len(all_processes),
+        "matchedCount": len(matched_processes),
+        "matchedProcesses": matched_processes,
+    }
 
 
 # ============================================================

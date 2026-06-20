@@ -267,7 +267,7 @@ export default function ExperimentMonitorTool() {
   const [logFilter, setLogFilter] = useState<'all' | LogEntry['type']>('all');
 
   // Modal states
-  const [modal, setModal] = useState<'server-create' | 'server-edit' | 'task-create' | 'task-edit'
+  const [modal, setModal] = useState<'server-list' | 'server-create' | 'server-edit' | 'task-create' | 'task-edit'
     | 'action-email'
     | 'script-groups' | 'script-group-create' | null>(null);
   const [editingServerId, setEditingServerId] = useState<string>('');
@@ -796,7 +796,7 @@ export default function ExperimentMonitorTool() {
               <button className="primary-button" type="button" onClick={openCreateTask}>
                 <Plus size={16} />新建监控
               </button>
-              <button className="chip" type="button" onClick={openCreateServer}>
+              <button className="chip" type="button" onClick={() => setModal('server-list')}>
                 <Server size={15} />服务器
               </button>
             </>
@@ -888,6 +888,17 @@ export default function ExperimentMonitorTool() {
       {!me && <LoginPanel onSuccess={() => window.location.reload()} />}
 
       {/* Modals */}
+      {modal === 'server-list' && (
+        <Modal title="服务器管理" onClose={() => setModal(null)}>
+          <ServerListPanel
+            servers={servers}
+            onAdd={() => { openCreateServer(); }}
+            onEdit={(id) => { openEditServer(id); }}
+            onDelete={(id) => { void removeServer(id); }}
+          />
+        </Modal>
+      )}
+
       {modal === 'server-create' && (
         <Modal title="添加服务器" onClose={() => setModal(null)}>
           <ServerForm form={serverForm} testResult={sshTestResult} isLoading={isLoading} onChange={setServerForm} onSubmit={saveServer} onTest={() => { /* test after save */ }} />
@@ -1280,6 +1291,12 @@ function ServerForm(props: {
   );
 }
 
+type FilterPreviewResult = {
+  totalCount: number;
+  matchedCount: number;
+  matchedProcesses: string[];
+};
+
 function TaskForm(props: {
   form: TaskFormState;
   servers: EmServer[];
@@ -1289,11 +1306,52 @@ function TaskForm(props: {
   onSubmit: (event: FormEvent) => void;
 }) {
   const { form } = props;
+  const [previewResult, setPreviewResult] = useState<FilterPreviewResult | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+
+  async function runPreview() {
+    if (!form.serverId) {
+      setPreviewError('请先选择服务器');
+      return;
+    }
+    if (!form.matchPattern.trim()) {
+      setPreviewError('请先填写匹配字符串');
+      return;
+    }
+    setIsPreviewing(true);
+    setPreviewError(null);
+    setPreviewResult(null);
+    try {
+      const result = await apiPost<FilterPreviewResult>(
+        '/api/tools/experiment-monitor/preview-filter',
+        {
+          serverId: form.serverId,
+          matchMode: form.matchMode,
+          matchPattern: form.matchPattern,
+          filterUser: form.filterUser,
+        },
+      );
+      setPreviewResult(result);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : '预览失败');
+    } finally {
+      setIsPreviewing(false);
+    }
+  }
+
+  // Clear preview when filter fields change
+  function handleFilterChange(updated: TaskFormState) {
+    props.onChange(updated);
+    setPreviewResult(null);
+    setPreviewError(null);
+  }
+
   return (
     <form className="em-form" onSubmit={props.onSubmit}>
       <div className="form-group">
         <label>服务器 *</label>
-        <select className="text-input" value={form.serverId} onChange={(e) => props.onChange({ ...form, serverId: e.target.value })}>
+        <select className="text-input" value={form.serverId} onChange={(e) => handleFilterChange({ ...form, serverId: e.target.value })}>
           <option value="">选择服务器...</option>
           {props.servers.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.host})</option>)}
         </select>
@@ -1314,20 +1372,61 @@ function TaskForm(props: {
         <div className="form-group">
           <label>匹配模式</label>
           <div className="segmented-control">
-            <button type="button" className={form.matchMode === 'simple' ? 'active' : ''} onClick={() => props.onChange({ ...form, matchMode: 'simple' })}>简单匹配（子串）</button>
-            <button type="button" className={form.matchMode === 'regex' ? 'active' : ''} onClick={() => props.onChange({ ...form, matchMode: 'regex' })}>正则表达式</button>
+            <button type="button" className={form.matchMode === 'simple' ? 'active' : ''} onClick={() => handleFilterChange({ ...form, matchMode: 'simple' })}>简单匹配（子串）</button>
+            <button type="button" className={form.matchMode === 'regex' ? 'active' : ''} onClick={() => handleFilterChange({ ...form, matchMode: 'regex' })}>正则表达式</button>
           </div>
         </div>
         <div className="form-group">
           <label>匹配字符串 *</label>
-          <input className="text-input" placeholder={form.matchMode === 'simple' ? '如：python train.py' : '如：python.*train'} value={form.matchPattern} onChange={(e) => props.onChange({ ...form, matchPattern: e.target.value })} />
+          <input className="text-input" placeholder={form.matchMode === 'simple' ? '如：python train.py' : '如：python.*train'} value={form.matchPattern} onChange={(e) => handleFilterChange({ ...form, matchPattern: e.target.value })} />
           <small className="form-hint">
             {form.matchMode === 'simple' ? '简单模式：在进程命令行中搜索该子串（不区分大小写）' : '正则模式：使用 Python 正则表达式匹配进程命令行'}
           </small>
         </div>
         <div className="form-group">
           <label>筛选用户（可选）</label>
-          <input className="text-input" placeholder="留空表示监控所有用户的进程" value={form.filterUser} onChange={(e) => props.onChange({ ...form, filterUser: e.target.value })} />
+          <input className="text-input" placeholder="留空表示监控所有用户的进程" value={form.filterUser} onChange={(e) => handleFilterChange({ ...form, filterUser: e.target.value })} />
+        </div>
+
+        {/* Filter Preview */}
+        <div className="em-preview-section">
+          <div className="em-preview-header">
+            <span className="em-preview-title"><Monitor size={13} />筛选预览</span>
+            <button
+              type="button"
+              className="chip"
+              onClick={runPreview}
+              disabled={isPreviewing || !form.serverId || !form.matchPattern.trim()}
+            >
+              {isPreviewing ? <RefreshCw size={13} className="spin" /> : <Play size={13} />}
+              {isPreviewing ? '查询中…' : '预览匹配结果'}
+            </button>
+          </div>
+          {previewError && (
+            <div className="em-preview-error">{previewError}</div>
+          )}
+          {previewResult && (
+            <div className="em-preview-result">
+              <div className="em-preview-summary">
+                <span>共 <strong>{previewResult.totalCount}</strong> 个进程</span>
+                <span className={previewResult.matchedCount > 0 ? 'em-preview-matched' : 'em-preview-unmatched'}>
+                  匹配到 <strong>{previewResult.matchedCount}</strong> 个
+                </span>
+              </div>
+              {previewResult.matchedCount === 0 ? (
+                <p className="em-preview-empty muted">当前筛选条件没有匹配到任何进程</p>
+              ) : (
+                <div className="em-preview-list">
+                  {previewResult.matchedProcesses.map((proc, idx) => (
+                    <code key={idx} className="em-preview-proc">{proc}</code>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {!previewResult && !previewError && !isPreviewing && (
+            <p className="em-preview-hint muted">点击「预览匹配结果」可实时查询服务器上满足当前筛选条件的进程列表</p>
+          )}
         </div>
       </fieldset>
 
@@ -1816,6 +1915,51 @@ function ScriptGroupsPanel(props: {
     </div>
   );
 }
+
+// ============================================================
+// Server List Panel
+// ============================================================
+
+function ServerListPanel(props: {
+  servers: EmServer[];
+  onAdd: () => void;
+  onEdit: (serverId: string) => void;
+  onDelete: (serverId: string) => void;
+}) {
+  return (
+    <div className="em-server-list-panel">
+      <div className="em-server-list-header">
+        <p className="muted">管理 SSH 服务器连接，编辑或删除已有服务器。</p>
+        <button className="chip" type="button" onClick={props.onAdd}>
+          <Plus size={14} />添加服务器
+        </button>
+      </div>
+
+      {props.servers.length === 0 ? (
+        <div className="empty-state">
+          <Server size={28} />
+          <p>暂无服务器，点击「添加服务器」创建第一个连接。</p>
+        </div>
+      ) : (
+        <div className="em-server-list-items">
+          {props.servers.map((server) => (
+            <div className="em-server-item" key={server.id}>
+              <div className="em-server-item-info">
+                <strong>{server.name}</strong>
+                <small className="muted">{server.sshUsername}@{server.host}:{server.port}</small>
+              </div>
+              <div className="em-server-item-actions">
+                <button className="icon-button tiny" type="button" onClick={() => props.onEdit(server.id)} title="编辑"><Settings size={14} /></button>
+                <button className="icon-button tiny danger" type="button" onClick={() => props.onDelete(server.id)} title="删除"><Trash2 size={14} /></button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   return (

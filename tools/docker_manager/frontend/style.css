@@ -1,0 +1,1118 @@
+/* ============================================================
+   Docker Manager Tool — 专属样式
+   ============================================================ */
+
+.dm-tool {
+  max-width: 1440px;
+}
+
+/* ── Top Nav Tabs ── */
+
+.dm-nav {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 0;
+  margin-bottom: 20px;
+}
+
+.dm-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: #526071;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.dm-nav-tab:hover {
+  color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-nav-tab.active {
+  color: #0f766e;
+  border-bottom-color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-nav-tab.admin-tab {
+  color: #7c3aed;
+}
+
+.dm-nav-tab.admin-tab:hover,
+.dm-nav-tab.admin-tab.active {
+  color: #7c3aed;
+  border-bottom-color: #7c3aed;
+  background: #f5f3ff;
+}
+
+/* ── Server Selector ── */
+
+.dm-server-selector {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.dm-server-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid #d7dee8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #17202a;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dm-server-chip:hover {
+  border-color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-server-chip.active {
+  border-color: #0f766e;
+  background: #ecfdf5;
+  color: #0f766e;
+  font-weight: 600;
+}
+
+.dm-perm-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-weight: 700;
+}
+
+.dm-perm-badge.manage { background: #fef3c7; color: #92400e; }
+.dm-perm-badge.use    { background: #dbeafe; color: #1e40af; }
+.dm-perm-badge.view   { background: #f1f5f9; color: #475569; }
+
+/* ── Cards & Grids ── */
+
+.dm-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.dm-card {
+  border: 1px solid #dce3ec;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.dm-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dm-card-title {
+  font-weight: 700;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dm-card-meta {
+  color: #64748b;
+  font-size: 13px;
+  display: grid;
+  gap: 4px;
+}
+
+.dm-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── Table Layout ── */
+
+.dm-table {
+  display: grid;
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.dm-table-header,
+.dm-table-row {
+  display: grid;
+  gap: 12px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.dm-table-header {
+  background: #f8fafc;
+  color: #526071;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #e2e8f0;
+  align-items: center;
+}
+
+.dm-table-row {
+  border-bottom: 1px solid #f1f5f9;
+  align-items: start;
+}
+
+.dm-table-row:last-child {
+  border-bottom: 0;
+}
+
+.dm-table-row:hover {
+  background: #f8fafc;
+}
+
+/* ── Status Badges ── */
+
+.dm-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.dm-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.dm-status.running  { background: #d1fae5; color: #065f46; }
+.dm-status.running .dm-status-dot  { background: #10b981; }
+.dm-status.exited   { background: #fee2e2; color: #991b1b; }
+.dm-status.exited .dm-status-dot   { background: #ef4444; }
+.dm-status.paused   { background: #fef3c7; color: #92400e; }
+.dm-status.paused .dm-status-dot   { background: #f59e0b; }
+.dm-status.created  { background: #e0f2fe; color: #075985; }
+.dm-status.created .dm-status-dot  { background: #0ea5e9; }
+.dm-status.unknown  { background: #f1f5f9; color: #475569; }
+.dm-status.unknown .dm-status-dot  { background: #94a3b8; }
+
+/* ── Modal ── */
+
+.dm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.dm-modal {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+  width: 100%;
+  max-width: 680px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dm-modal.wide {
+  max-width: 900px;
+}
+
+.dm-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.dm-modal-head h3 {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.dm-modal-body {
+  padding: 20px 24px;
+  overflow-y: auto;
+  flex: 1;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.dm-modal-foot {
+  padding: 16px 24px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* ── Forms ── */
+
+.dm-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.dm-form-field {
+  display: grid;
+  gap: 5px;
+}
+
+.dm-form-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #526071;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dm-form-field input,
+.dm-form-field select,
+.dm-form-field textarea {
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 1px solid #d0d9e4;
+  border-radius: 7px;
+  background: #f8fafc;
+  font-size: 14px;
+  color: #17202a;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+
+.dm-form-field input:focus,
+.dm-form-field select:focus,
+.dm-form-field textarea:focus {
+  outline: none;
+  border-color: #0f766e;
+  background: #ffffff;
+}
+
+.dm-form-field textarea {
+  min-height: 120px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.dm-form-field textarea.mono {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.dm-form-field input[type="checkbox"] {
+  width: 16px;
+  min-height: auto;
+  height: 16px;
+}
+
+.dm-form-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #17202a;
+}
+
+.dm-full-col {
+  grid-column: 1 / -1;
+}
+
+/* ── Quota Bar ── */
+
+.dm-quota-bar {
+  display: grid;
+  gap: 6px;
+}
+
+.dm-quota-track {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.dm-quota-fill {
+  height: 100%;
+  background: #0f766e;
+  border-radius: inherit;
+  transition: width 0.3s;
+}
+
+.dm-quota-fill.warn {
+  background: #f59e0b;
+}
+
+.dm-quota-fill.danger {
+  background: #ef4444;
+}
+
+/* ── Logs Box ── */
+
+.dm-logs-box {
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 14px;
+  border-radius: 8px;
+  overflow: auto;
+  max-height: 400px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── MD Preview (template docs) ── */
+
+.dm-md-preview {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 20px 24px;
+  background: #fff;
+  line-height: 1.7;
+  font-size: 14px;
+  color: #17202a;
+  overflow: auto;
+  max-height: 480px;
+}
+
+.dm-md-preview h1,
+.dm-md-preview h2,
+.dm-md-preview h3,
+.dm-md-preview h4 {
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.2em 0 0.5em;
+}
+
+.dm-md-preview h1 { font-size: 1.5em; }
+.dm-md-preview h2 { font-size: 1.25em; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+.dm-md-preview h3 { font-size: 1.1em; }
+
+.dm-md-preview p { margin: 0.6em 0; }
+
+.dm-md-preview code {
+  background: #f1f5f9;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.dm-md-preview pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  overflow: auto;
+  font-size: 0.88em;
+}
+
+.dm-md-preview pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.dm-md-preview ul,
+.dm-md-preview ol {
+  padding-left: 22px;
+  margin: 0.5em 0;
+}
+
+.dm-md-preview li { margin: 3px 0; }
+
+.dm-md-preview blockquote {
+  border-left: 4px solid #0f766e;
+  margin: 0.8em 0;
+  padding: 6px 12px;
+  background: #f0fdf4;
+  color: #374151;
+  border-radius: 0 6px 6px 0;
+}
+
+.dm-md-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 0.8em 0;
+}
+
+.dm-md-preview th,
+.dm-md-preview td {
+  border: 1px solid #e2e8f0;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.dm-md-preview th {
+  background: #f8fafc;
+  font-weight: 700;
+}
+
+/* ── Perm Table ── */
+
+.dm-perm-table {
+  display: grid;
+  gap: 6px;
+}
+
+.dm-perm-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 13px;
+}
+
+/* ── Fine-grained Permission Edit Sections ── */
+
+.dm-perm-section {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: #f8fafc;
+  display: grid;
+  gap: 10px;
+}
+
+.dm-perm-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.dm-perm-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+/* ── Template Category Tag ── */
+
+.dm-category-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
+}
+
+/* ── Action Buttons ── */
+
+.dm-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d7dee8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #526071;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.dm-btn-icon:hover {
+  background: #f0fdf4;
+  border-color: #0f766e;
+  color: #0f766e;
+}
+
+.dm-btn-icon.danger:hover {
+  background: #fef2f2;
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+/* ── Loading / Empty State ── */
+
+.dm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+/* ── Skeleton Screen ── */
+
+@keyframes dm-shimmer {
+  0%   { background-position: -600px 0; }
+  100% { background-position: 600px 0; }
+}
+
+@keyframes dm-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: dm-spin 0.9s linear infinite;
+}
+
+.dm-skeleton-row {
+  display: grid;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.dm-skeleton-cell {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #e8edf2 25%, #f4f7fa 50%, #e8edf2 75%);
+  background-size: 600px 100%;
+  animation: dm-shimmer 1.4s ease-in-out infinite;
+}
+
+.dm-skeleton-cell.short  { width: 55%; }
+.dm-skeleton-cell.medium { width: 75%; }
+.dm-skeleton-cell.long   { width: 100%; }
+
+/* 弹窗加载遮罩 */
+.dm-resource-loading {
+  position: relative;
+  min-height: 220px;
+}
+
+.dm-resource-loading-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(1px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 8px;
+  z-index: 10;
+  color: #526071;
+  font-size: 13px;
+}
+
+.dm-resource-loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #d1fae5;
+  border-top-color: #0f766e;
+  border-radius: 50%;
+  animation: dm-spin 0.8s linear infinite;
+}
+
+/* ── Error Alert ── */
+
+.dm-alert {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.dm-alert.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.dm-alert.success { background: #f0fdf4; color: #065f46; border: 1px solid #bbf7d0; }
+.dm-alert.info    { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+/* ── Permission Color Chips for Select ── */
+
+.dm-level-select {
+  min-width: 110px;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 768px) {
+  .dm-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dm-perm-row {
+    grid-template-columns: 1fr;
+  }
+
+  .dm-table-header,
+  .dm-table-row {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* ── General Buttons ── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 14px;
+  min-height: 32px;
+  border: 1px solid #d7dee8;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  vertical-align: middle;
+}
+
+.btn:hover {
+  background: #f8fafc;
+  border-color: #adb9c8;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn.btn-primary {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ffffff;
+}
+
+.btn.btn-primary:hover:not(:disabled) {
+  background: #0d6b64;
+  border-color: #0d6b64;
+}
+
+.btn.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn.danger {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #ef4444;
+  color: #991b1b;
+}
+
+/* ── Tooltip（省略号文本的鼠标悬停气泡）── */
+
+.dm-tooltip-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.dm-tooltip-wrap[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 12px;
+  font-family: monospace;
+  padding: 5px 10px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 380px;
+  z-index: 9999;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  pointer-events: none;
+  line-height: 1.5;
+}
+
+.dm-tooltip-wrap[data-tip]:hover::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 12px;
+  border: 4px solid transparent;
+  border-top-color: #1e293b;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+/* ── CopyTruncText（省略号 + 悬停气泡 + 点击复制）── */
+
+.dm-copy-trunc-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.dm-copy-trunc-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  /* 悬停时轻微高亮，提示可点击 */
+  border-bottom: 1px dashed transparent;
+  transition: border-color 0.15s;
+}
+
+.dm-copy-trunc-wrap:hover .dm-copy-trunc-text {
+  border-bottom-color: #94a3b8;
+}
+
+/* 气泡本体：fixed 定位，全局置顶，不受父级 overflow 影响 */
+.dm-copy-trunc-tip-fixed {
+  position: fixed;
+  transform: translateY(-100%) translateY(-10px);
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 12px;
+  font-family: monospace;
+  padding: 7px 13px;
+  border-radius: 7px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 420px;
+  min-width: 140px;
+  z-index: 99999;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.32);
+  line-height: 1.7;
+  pointer-events: auto;
+  cursor: default;
+}
+
+/* 气泡小三角（向下） */
+.dm-copy-trunc-tip-fixed::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 16px;
+  border: 5px solid transparent;
+  border-top-color: #1e293b;
+}
+
+/* ── SSH Port Button（容器列表行内 SSH 端口点击按钮）── */
+
+.dm-ssh-port-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.dm-ssh-port-btn:hover {
+  background: #dbeafe;
+  color: #1e3a8a;
+  border-color: #93c5fd;
+}
+
+.dm-ssh-port-btn:active {
+  background: #bfdbfe;
+}
+
+/* ── Resource Role Tags ── */
+
+.dm-role-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.dm-role-tag.creator {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.dm-role-tag.owner {
+  background: #d1fae5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.dm-role-tag.viewer {
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+
+/* ── Roles Checklist (multi-select checkboxes for owners/viewers) ── */
+
+.dm-roles-checklist {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px 12px;
+  margin-top: 8px;
+}
+
+.dm-form-check.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dm-form-check.disabled input {
+  cursor: not-allowed;
+}
+
+/* ── Resource Overview Strip（创建容器弹窗顶部的额度概览条）── */
+
+.dm-resource-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  align-items: center;
+}
+
+.dm-resource-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: #ffffff;
+  border: 1px solid #d1fae5;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #374151;
+  white-space: nowrap;
+}
+
+/* ── Server Overview Cards（服务器 Tab 展开后的额度卡片）── */
+
+.dm-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.dm-overview-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.dm-overview-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dm-overview-card-body {
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.dm-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.dm-overview-label {
+  color: #64748b;
+}
+
+.dm-overview-value {
+  font-weight: 600;
+  color: #1e293b;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.dm-overview-mini-label {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.dm-overview-progress {
+  height: 5px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.dm-overview-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.3s;
+}
+
+/* ── CUDA / GPU Badges ── */
+
+.dm-cuda-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px solid #c4b5fd;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dm-cuda-gpu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.dm-cuda-gpu-row:last-child {
+  border-bottom: none;
+}
+
+.dm-cuda-gpu-label {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  font-size: 13px;
+}
+
+/* ── RunCreateModal 分区样式 ── */
+
+.dm-run-section {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: visible;
+}
+
+.dm-run-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* 每条端口/卷/环境变量的行容器 */
+.dm-run-list-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.dm-run-list-row:last-child {
+  border-bottom: none;
+}
+
+/* 行内输入区域（flex 自动平分宽度） */
+.dm-run-list-row-inputs {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dm-run-list-row-inputs .dm-field {
+  flex: 1;
+  min-width: 80px;
+}
+
+/* dm-btn-icon 已在上方定义，此处为列表行删除按钮额外 flex-shrink */
+.dm-run-list-row .dm-btn-icon {
+  flex-shrink: 0;
+}

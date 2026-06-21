@@ -1168,3 +1168,202 @@
   font-weight: 700;
   line-height: 1;
 }
+
+/* ============================================================
+   Resource Usage Panel — 资源占用面板
+   ============================================================ */
+
+.dm-resource-usage-panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.dm-resource-usage-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: #f1f5f9;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  text-align: left;
+  transition: background 0.15s;
+}
+.dm-resource-usage-toggle:hover {
+  background: #e2e8f0;
+}
+
+.dm-resource-usage-summary {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  align-items: center;
+}
+
+.dm-usage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.dm-usage-chip.gpu {
+  background: #d1fae5;
+  color: #065f46;
+}
+.dm-usage-chip.warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.dm-resource-usage-body {
+  padding: 12px 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.dm-resource-usage-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dm-usage-section {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.dm-usage-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.dm-usage-mode-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #ede9fe;
+  color: #6d28d9;
+  margin-left: 4px;
+}
+
+.dm-usage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: #374151;
+  padding: 2px 0;
+}
+.dm-usage-row.muted {
+  color: #94a3b8;
+}
+.dm-usage-row.accent {
+  color: #d97706;
+  font-weight: 600;
+}
+.dm-usage-quota {
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+/* 进度条 */
+.dm-progress-track {
+  width: 100%;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+}
+.dm-progress-fill {
+  height: 100%;
+  transition: width 0.4s ease;
+  border-radius: 0;
+}
+
+.dm-progress-legend {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #64748b;
+  flex-wrap: wrap;
+}
+.dm-legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+
+/* GPU Chips */
+.dm-gpu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.dm-gpu-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #d1fae5;
+  color: #065f46;
+  font-size: 11px;
+  font-weight: 600;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 路径行 */
+.dm-path-row {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.dm-path-row:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+.dm-path-label {
+  font-size: 11px;
+  color: #6366f1;
+  font-family: monospace;
+  font-weight: 600;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 配额占用者角色标签 */
+.dm-role-tag.quota_holder {
+  background: #fef3c7;
+  color: #92400e;
+}
+

@@ -74,6 +74,8 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [assignRolesTarget, setAssignRolesTarget] = useState<AssignRolesTarget | null>(null);
   const [assignOwnerIds, setAssignOwnerIds] = useState<string[]>([]);
   const [assignViewerIds, setAssignViewerIds] = useState<string[]>([]);
+  const [assignQuotaHolderIds, setAssignQuotaHolderIds] = useState<string[]>([]);
+  const [assignQuotaMode, setAssignQuotaMode] = useState<'shared' | 'exclusive'>('shared');
   const [savingRoles, setSavingRoles] = useState(false);
 
   // 加载服务器资源列表
@@ -112,6 +114,8 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     setAssignRolesTarget({ resourceType, resourceRef, label, currentRoles });
     setAssignOwnerIds(currentRoles.ownerUserIds ?? []);
     setAssignViewerIds(currentRoles.viewerUserIds ?? []);
+    setAssignQuotaHolderIds(currentRoles.quotaHolderUserIds ?? []);
+    setAssignQuotaMode(currentRoles.quotaMode ?? 'shared');
     clearAssignError();
   }
 
@@ -126,6 +130,8 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
         resourceRef: assignRolesTarget.resourceRef,
         ownerUserIds: assignOwnerIds,
         viewerUserIds: assignViewerIds,
+        quotaHolderUserIds: assignQuotaHolderIds,
+        quotaMode: assignQuotaMode,
       });
       setAssignSuccess(`「${assignRolesTarget.label}」角色分配已更新`);
       setAssignRolesTarget(null);
@@ -612,6 +618,9 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                       );
                       if (e.target.checked) {
                         setAssignViewerIds((prev) => prev.filter((id) => id !== u.userId));
+                      } else {
+                        // 取消所有者时同时取消配额占用者
+                        setAssignQuotaHolderIds((prev) => prev.filter((id) => id !== u.userId));
                       }
                     }}
                   />
@@ -622,6 +631,69 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
               {users.filter((u) => u.role !== 'admin').length === 0 && (
                 <div style={{ fontSize: 12, color: '#94a3b8' }}>暂无普通用户</div>
               )}
+            </div>
+          </div>
+
+          {/* 配额占用者（多选，只能从所有者中选） */}
+          <div className="dm-perm-section">
+            <div className="dm-perm-section-title">
+              <Database size={13} /> 配额占用者（独占配额，必须同时是所有者）
+            </div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
+              配额占用者拥有所有者全部权限，在「配额占用者独占」模式下，其卷配额独立计算，不参与共享均分。
+            </div>
+            {assignOwnerIds.length === 0 ? (
+              <div style={{ fontSize: 12, color: '#94a3b8' }}>请先选择所有者</div>
+            ) : (
+              <div className="dm-roles-checklist">
+                {users.filter((u) => assignOwnerIds.includes(u.userId)).map((u) => (
+                  <label key={u.userId} className="dm-form-check">
+                    <input
+                      type="checkbox"
+                      checked={assignQuotaHolderIds.includes(u.userId)}
+                      onChange={(e) => {
+                        setAssignQuotaHolderIds((prev) =>
+                          e.target.checked ? [...prev, u.userId] : prev.filter((id) => id !== u.userId)
+                        );
+                      }}
+                    />
+                    <span>{u.displayName}</span>
+                    <small style={{ color: '#94a3b8' }}>@{u.username}</small>
+                    <span className="dm-role-tag owner" style={{ marginLeft: 4, fontSize: 10, padding: '1px 5px' }}>所有者</span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            {/* 配额模式选择 */}
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid #f1f5f9' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>配额分配模式</div>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <label className="dm-form-check">
+                  <input
+                    type="radio"
+                    name="quotaMode"
+                    checked={assignQuotaMode === 'shared'}
+                    onChange={() => setAssignQuotaMode('shared')}
+                  />
+                  <span>
+                    <strong>所有者均分</strong>
+                    <span style={{ color: '#64748b', fontSize: 11, marginLeft: 4 }}>配额在所有所有者间平均分配</span>
+                  </span>
+                </label>
+                <label className="dm-form-check">
+                  <input
+                    type="radio"
+                    name="quotaMode"
+                    checked={assignQuotaMode === 'exclusive'}
+                    onChange={() => setAssignQuotaMode('exclusive')}
+                  />
+                  <span>
+                    <strong>配额占用者独占</strong>
+                    <span style={{ color: '#64748b', fontSize: 11, marginLeft: 4 }}>配额占用者独享其配额，不参与均分</span>
+                  </span>
+                </label>
+              </div>
             </div>
           </div>
 

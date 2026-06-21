@@ -7,10 +7,16 @@ import type { CSSProperties, ReactNode } from 'react';
 import {
   AlertCircle,
   CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  Database,
+  HardDrive,
   Loader2,
   Server,
   X,
 } from 'lucide-react';
+import type { ServerResourceOverview } from './types';
 import { permColor, permLabel } from './utils';
 import type { DmServer } from './types';
 
@@ -167,6 +173,200 @@ export function ServerSelector({ servers, selected, onSelect }: { servers: DmSer
           <span className={`dm-perm-badge ${permColor(s.permissionLevel)}`}>{permLabel(s.permissionLevel)}</span>
         </button>
       ))}
+    </div>
+  );
+}
+
+// ---- 资源占用进度条组件 ----
+
+function ProgressBar({ segments }: {
+  segments: Array<{ value: number; max: number; color: string; label: string }>;
+}) {
+  const total = segments[0]?.max || 1;
+  return (
+    <div className="dm-progress-track">
+      {segments.map((seg, i) => {
+        const pct = total > 0 ? Math.min(100, (seg.value / total) * 100) : 0;
+        return (
+          <div
+            key={i}
+            className="dm-progress-fill"
+            style={{ width: `${pct}%`, background: seg.color }}
+            title={`${seg.label}: ${seg.value.toFixed(1)} GB`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function fmtGb(v: number | null | undefined, fallback = '–') {
+  if (v == null) return fallback;
+  return v < 1 ? `${(v * 1024).toFixed(0)} MB` : `${v.toFixed(1)} GB`;
+}
+
+/**
+ * ResourceUsagePanel：在服务器选择下方展示可折叠的资源占用情况
+ * @param overview – 后端 /resource-overview 的返回数据
+ * @param resourceType – 当前 tab 类型：'container' | 'image' | 'volume'
+ * @param loading – 是否正在加载
+ */
+export function ResourceUsagePanel({
+  overview,
+  resourceType,
+  loading = false,
+}: {
+  overview: ServerResourceOverview | null;
+  resourceType: 'container' | 'image' | 'volume';
+  loading?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!overview && !loading) return null;
+
+  const vol = overview?.volume;
+  const cuda = overview?.cuda;
+  const quotaMode = overview?.quotaModes?.[resourceType] ?? 'shared';
+
+  const volQuota = vol?.quotaGb ?? 0;
+  const volUsed = vol?.usedSelfGb ?? 0;
+  const volExclusive = vol?.exclusiveUsedGb ?? 0;
+  const volShared = vol?.sharedUsedGb ?? 0;
+  const volTotal = vol?.usedTotalGb ?? 0;
+  const volRemaining = vol?.remainingGb ?? null;
+
+  const gpuTotal = cuda?.totalGpuCount ?? 0;
+  const gpuAllowed = cuda?.allowedGpuIndices?.length ?? 0;
+
+  return (
+    <div className="dm-resource-usage-panel">
+      <button
+        className="dm-resource-usage-toggle"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        <span>资源占用概览</span>
+        {loading && <Loader2 size={12} className="spin" style={{ marginLeft: 4 }} />}
+        {!loading && overview && (
+          <span className="dm-resource-usage-summary">
+            {resourceType === 'container' && cuda?.serverHasCuda && (
+              <span className="dm-usage-chip gpu">
+                <Cpu size={11} /> GPU {gpuAllowed}/{gpuTotal}
+              </span>
+            )}
+            {volQuota > 0 && (
+              <span className={`dm-usage-chip${volRemaining !== null && volRemaining < volQuota * 0.2 ? ' warn' : ''}`}>
+                <HardDrive size={11} /> {fmtGb(volUsed)}/{fmtGb(volQuota)}
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+
+      {expanded && (
+        <div className="dm-resource-usage-body">
+          {loading ? (
+            <div style={{ padding: '12px 0', color: '#94a3b8', fontSize: 12 }}>
+              <Loader2 size={14} className="spin" style={{ marginRight: 6 }} />正在加载资源概览…
+            </div>
+          ) : overview ? (
+            <div className="dm-resource-usage-content">
+              {/* 卷配额区域 */}
+              {volQuota > 0 && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title">
+                    <Database size={13} />
+                    卷配额
+                    <span className="dm-usage-mode-tag">{quotaMode === 'exclusive' ? '独占模式' : '均分模式'}</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>我的占用</span>
+                    <span>{fmtGb(volUsed)}</span>
+                  </div>
+                  {quotaMode === 'exclusive' && volExclusive > 0 && (
+                    <div className="dm-usage-row accent">
+                      <span>独占配额使用</span>
+                      <span>{fmtGb(volExclusive)}</span>
+                    </div>
+                  )}
+                  <div className="dm-usage-row muted">
+                    <span>共享区占用</span>
+                    <span>{fmtGb(volShared)}</span>
+                  </div>
+                  <div className="dm-usage-row muted">
+                    <span>总占用</span>
+                    <span>{fmtGb(volTotal)}</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>配额上限</span>
+                    <span className="dm-usage-quota">{fmtGb(volQuota)}</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <ProgressBar segments={[
+                      { value: volExclusive, max: volQuota, color: '#f59e0b', label: '独占配额' },
+                      { value: volShared, max: volQuota, color: '#6366f1', label: '共享占用' },
+                    ]} />
+                    <div className="dm-progress-legend">
+                      {volExclusive > 0 && (
+                        <span><span className="dm-legend-dot" style={{ background: '#f59e0b' }} />独占</span>
+                      )}
+                      <span><span className="dm-legend-dot" style={{ background: '#6366f1' }} />共享</span>
+                      <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {fmtGb(volRemaining)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* GPU 区域（仅容器 Tab） */}
+              {resourceType === 'container' && cuda?.serverHasCuda && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title"><Cpu size={13} /> 可用 GPU</div>
+                  <div className="dm-usage-row">
+                    <span>有权使用</span>
+                    <span>{gpuAllowed} / {gpuTotal} 张</span>
+                  </div>
+                  {cuda.availableGpus.length > 0 && (
+                    <div className="dm-gpu-chips">
+                      {cuda.availableGpus.map((g) => (
+                        <span key={g.index} className="dm-gpu-chip" title={g.name}>
+                          #{g.index} {g.name?.replace(/NVIDIA/i, '').trim()}
+                          {g.memTotalMb ? ` (${(g.memTotalMb / 1024).toFixed(0)}G)` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 8 }}>
+                    <ProgressBar segments={[
+                      { value: gpuAllowed, max: Math.max(gpuTotal, 1), color: '#10b981', label: '可用 GPU' },
+                    ]} />
+                  </div>
+                </div>
+              )}
+
+              {/* 挂载路径磁盘空间 */}
+              {overview.paths.length > 0 && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title"><HardDrive size={13} /> 路径磁盘空间</div>
+                  {overview.paths.map((p) => (
+                    <div key={p.path} className="dm-path-row">
+                      <div className="dm-path-label" title={p.path}>{p.path}</div>
+                      <div className="dm-usage-row muted">
+                        <span>已用 / 总量</span>
+                        <span>{fmtGb(p.usedGb)} / {fmtGb(p.totalGb)}</span>
+                      </div>
+                      {p.totalGb && p.usedGb != null && (
+                        <ProgressBar segments={[
+                          { value: p.usedGb, max: p.totalGb, color: '#3b82f6', label: '已用' },
+                        ]} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
-import { Alert, Field, Modal, ServerSelector, Spin, TruncText } from './components';
+import { Alert, Field, Modal, ResourceUsagePanel, ServerSelector, Spin, TruncText } from './components';
 import { API, containerStateClass, formatSize, parseContainerStatus, renderMarkdown, useErrorMsg } from './utils';
 import type {
   ContainerDetail,
@@ -1068,6 +1068,9 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setContainers([]); setQuota(null); setServerOverview(null); }} />
+      {serverId && (
+        <ResourceUsagePanel overview={serverOverview} resourceType="container" loading={loading && !serverOverview} />
+      )}
       {error && <Alert type="error">{error}</Alert>}
 
       {/* 复制成功浮动提示 */}

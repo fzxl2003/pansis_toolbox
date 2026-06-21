@@ -443,8 +443,10 @@ class AssignResourceRolesPayload(BaseModel):
     """新接口：多角色分配"""
     resourceType: str                   # container | image | volume
     resourceRef: str                    # 容器名/镜像 repo:tag/卷名
-    ownerUserIds: list[str] = Field(default_factory=list)   # 所有者列表
-    viewerUserIds: list[str] = Field(default_factory=list)  # 查看者列表
+    ownerUserIds: list[str] = Field(default_factory=list)       # 所有者列表
+    viewerUserIds: list[str] = Field(default_factory=list)      # 查看者列表
+    quotaHolderUserIds: list[str] = Field(default_factory=list) # 配额占用者（必须是所有者的子集）
+    quotaMode: str = ""                 # 配额模式：shared（所有者均分）| exclusive（配额占用者独占）
     creatorUserId: str = ""             # 创建者（唯一），传 "" 表示不设置
 
 
@@ -470,7 +472,7 @@ def assign_resource_owner_route(request: Request, server_id: str, payload: Assig
 
 @router.put("/servers/{server_id}/resource-roles")
 def assign_resource_roles_route(request: Request, server_id: str, payload: AssignResourceRolesPayload) -> dict:
-    """为服务器上的资源分配多角色（所有者/查看者/创建者，管理员专用）"""
+    """为服务器上的资源分配多角色（所有者/查看者/创建者/配额占用者，管理员专用）"""
     user = require_user(request)
     return assign_resource_roles(
         server_id,
@@ -480,6 +482,8 @@ def assign_resource_roles_route(request: Request, server_id: str, payload: Assig
         payload.viewerUserIds,
         payload.creatorUserId,
         user,
+        quota_holder_user_ids=payload.quotaHolderUserIds,
+        quota_mode=payload.quotaMode or None,
     )
 
 

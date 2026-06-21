@@ -6,9 +6,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { Box, Copy, Download, Image, RefreshCw, Trash2 } from 'lucide-react';
 import { apiDelete, apiGet, apiPost } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
-import { Alert, Modal, Field, ServerSelector, Spin, TruncText } from './components';
+import { Alert, Modal, Field, ResourceUsagePanel, ServerSelector, Spin, TruncText } from './components';
 import { API, containerStateClass, useErrorMsg } from './utils';
-import type { DmServer, DockerContainer, DockerImage } from './types';
+import type { DmServer, DockerContainer, DockerImage, ServerResourceOverview } from './types';
 
 // ---- 子 Tab 类型 ----
 type ImageSubTab = 'list' | 'containers';
@@ -46,6 +46,7 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
   const [containers, setContainers] = useState<DockerContainer[]>([]);
   const [loading, setLoading] = useState(false);
   const [containersLoading, setContainersLoading] = useState(false);
+  const [serverOverview, setServerOverview] = useState<ServerResourceOverview | null>(null);
   const [error, setError, clearError] = useErrorMsg();
   const [pullRef, setPullRef] = useState('');
   const [pulling, setPulling] = useState(false);
@@ -71,8 +72,12 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
     setLoading(true);
     clearError();
     try {
-      const r = await apiGet<{ images: DockerImage[] }>(`${API}/servers/${sid}/images`);
+      const [r, ovr] = await Promise.all([
+        apiGet<{ images: DockerImage[] }>(`${API}/servers/${sid}/images`),
+        apiGet<ServerResourceOverview>(`${API}/servers/${sid}/resource-overview`).catch(() => null),
+      ]);
       setImages(r.images);
+      setServerOverview(ovr);
     } catch (e) {
       setError(e);
     } finally {
@@ -157,6 +162,7 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
     setServerId(id);
     setImages([]);
     setContainers([]);
+    setServerOverview(null);
   }
 
   function doRefresh() {
@@ -171,6 +177,9 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <ServerSelector servers={servers} selected={serverId} onSelect={handleServerChange} />
+      {serverId && (
+        <ResourceUsagePanel overview={serverOverview} resourceType="image" loading={loading && !serverOverview} />
+      )}
       {error && <Alert type="error">{error}</Alert>}
 
       {/* 工具栏 */}

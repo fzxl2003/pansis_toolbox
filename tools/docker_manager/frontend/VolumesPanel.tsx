@@ -6,15 +6,16 @@ import { useCallback, useEffect, useState } from 'react';
 import { Box, Copy, HardDrive, Info, Plus, RefreshCw, Shield, Trash2 } from 'lucide-react';
 import { apiDelete, apiGet, apiPost } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
-import { Alert, CopyTruncText, Field, Modal, ServerSelector, Spin } from './components';
+import { Alert, CopyTruncText, Field, Modal, ResourceUsagePanel, ServerSelector, Spin } from './components';
 import { API, formatSize, useErrorMsg } from './utils';
-import type { DmServer, DockerVolume, VolumeDetail } from './types';
+import type { DmServer, DockerVolume, ServerResourceOverview, VolumeDetail } from './types';
 
 export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
   const [serverId, setServerId] = useState<string | null>(servers[0]?.id ?? null);
   const [volumes, setVolumes] = useState<DockerVolume[]>([]);
   const [quota, setQuota] = useState<{ volumeTotalGb: number | null; volumeUsedGb: number | null }>({ volumeTotalGb: null, volumeUsedGb: null });
   const [loading, setLoading] = useState(false);
+  const [serverOverview, setServerOverview] = useState<ServerResourceOverview | null>(null);
   const [error, setError, clearError] = useErrorMsg();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
@@ -36,9 +37,13 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
     setLoading(true);
     clearError();
     try {
-      const r = await apiGet<{ volumes: DockerVolume[]; quota: { volumeTotalGb: number | null; volumeUsedGb: number | null } }>(`${API}/servers/${sid}/volumes`);
+      const [r, ovr] = await Promise.all([
+        apiGet<{ volumes: DockerVolume[]; quota: { volumeTotalGb: number | null; volumeUsedGb: number | null } }>(`${API}/servers/${sid}/volumes`),
+        apiGet<ServerResourceOverview>(`${API}/servers/${sid}/resource-overview`).catch(() => null),
+      ]);
       setVolumes(r.volumes);
       setQuota(r.quota);
+      setServerOverview(ovr);
     } catch (e) {
       setError(e);
     } finally {
@@ -136,7 +141,10 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setVolumes([]); }} />
+      <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setVolumes([]); setServerOverview(null); }} />
+      {serverId && (
+        <ResourceUsagePanel overview={serverOverview} resourceType="volume" loading={loading && !serverOverview} />
+      )}
       {error && <Alert type="error">{error}</Alert>}
 
       {quota.volumeTotalGb != null && quota.volumeTotalGb > 0 && (

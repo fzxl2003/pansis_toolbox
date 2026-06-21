@@ -196,7 +196,10 @@ export type VolumeDetail = {
     owners: VolumeDetailUser[];
     viewerUserIds: string[];
     viewers: VolumeDetailUser[];
+    quotaHolderUserIds: string[];
+    quotaHolders: VolumeDetailUser[];
   };
+  quotaMode: 'shared' | 'exclusive';
   mountedContainers: MountedContainer[];
   hiddenContainerCount: number;
 };
@@ -218,11 +221,13 @@ export type TemplateDetail = Template & { docContent: string };
 
 // 资源多角色管理相关类型
 export type ResourceRoles = {
-  ownerUserIds: string[];       // 多所有者
-  viewerUserIds: string[];      // 多查看者
-  creatorUserId: string | null; // 创建者（唯一）
+  ownerUserIds: string[];          // 多所有者
+  viewerUserIds: string[];         // 多查看者
+  quotaHolderUserIds: string[];    // 配额占用者（必须同时是所有者）
+  creatorUserId: string | null;    // 创建者（唯一）
   platformManaged: boolean;
-  ownerUserId?: string | null;  // 兼容旧字段
+  ownerUserId?: string | null;     // 兼容旧字段
+  quotaMode?: 'shared' | 'exclusive'; // 配额模式
 };
 
 export type ResourceItem = ResourceRoles;
@@ -265,10 +270,14 @@ export type TabId = 'servers' | 'images' | 'containers' | 'templates' | 'volumes
 export type ServerResourceOverview = {
   serverId: string;
   volume: {
-    quotaGb: number;      // 0 = 不限
-    usedSelfGb: number;
-    usedTotalGb: number;
-    remainingGb: number | null; // null = 不限
+    quotaGb: number;              // 0 = 不限
+    usedSelfGb: number;           // 当前用户自己的卷使用量
+    usedTotalGb: number;          // 服务器全部卷使用量
+    remainingGb: number | null;   // null = 不限
+    // 配额占用者相关
+    quotaHolderUsedGb: number;    // 本用户作为配额占用者的独占使用量
+    exclusiveUsedGb: number;      // 全服务器 quota_holder 独占总量
+    sharedUsedGb: number;         // 共享区使用量（非独占部分）
   };
   paths: Array<{
     path: string;
@@ -281,5 +290,9 @@ export type ServerResourceOverview = {
     serverHasCuda: boolean;
     allowedGpuIndices: number[];
     availableGpus: GpuInfo[];
+    totalGpuCount: number;        // 服务器总 GPU 数
+    allGpuInfo: GpuInfo[];        // 所有 GPU 详情
   };
+  quotaModes: Record<string, 'shared' | 'exclusive'>; // 各资源类型的配额模式
+  ownerCounts: Record<string, number>;                // 各资源类型的所有者数量
 };

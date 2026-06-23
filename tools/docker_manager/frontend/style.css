@@ -795,6 +795,12 @@
   pointer-events: none;
 }
 
+/* ── PermCheck Tooltip（权限说明气泡）── */
+
+.dm-tooltip-trigger:hover .dm-tooltip-content {
+  display: block !important;
+}
+
 /* ── CopyTruncText（省略号 + 悬停气泡 + 点击复制）── */
 
 .dm-copy-trunc-wrap {

@@ -94,30 +94,36 @@ def init_docker_database() -> None:
                 );
 
                 -- 新的细粒度权限表（替代旧 quotas 表）
+                -- 权限分为两类：
+                --   1. 操作能力（用户在该服务器上是否有权执行某操作）
+                --   2. 资源配额（用户可使用的资源上限）
+                -- 注意：查看/管理「自己」的资源为默认权限，不需要单独配置
+                -- img_use/ctr_use/vol_use 控制「是否能使用（看到+访问）该类资源」
                 CREATE TABLE IF NOT EXISTS docker_user_perms (
                     server_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
-                    -- 服务器可见性
+                    -- 服务器可见性（是否能看到/访问此服务器）
                     server_visible INTEGER NOT NULL DEFAULT 0,
                     -- 镜像权限
-                    img_pull INTEGER NOT NULL DEFAULT 0,
-                    img_delete INTEGER NOT NULL DEFAULT 0,
-                    img_copy INTEGER NOT NULL DEFAULT 0,
+                    img_use INTEGER NOT NULL DEFAULT 0,      -- 是否有权使用（查看/访问）镜像
+                    img_pull INTEGER NOT NULL DEFAULT 0,     -- 拉取新镜像
+                    img_delete INTEGER NOT NULL DEFAULT 0,   -- 删除他人镜像
+                    img_copy INTEGER NOT NULL DEFAULT 0,     -- 跨服务器复制镜像
+                    img_quota_gb REAL NOT NULL DEFAULT 0,    -- 镜像空间配额(GB，0=不限)
                     -- 容器权限
-                    ctr_view_own INTEGER NOT NULL DEFAULT 0,
-                    ctr_view_all INTEGER NOT NULL DEFAULT 0,
-                    ctr_create_run INTEGER NOT NULL DEFAULT 0,
-                    ctr_create_compose INTEGER NOT NULL DEFAULT 0,
+                    ctr_use INTEGER NOT NULL DEFAULT 0,      -- 是否有权使用（查看/访问）容器
+                    ctr_view_all INTEGER NOT NULL DEFAULT 0, -- 查看所有用户的容器
+                    ctr_create INTEGER NOT NULL DEFAULT 0,         -- 创建容器（run/compose 模式均包含）
                     ctr_create_template INTEGER NOT NULL DEFAULT 0,
-                    ctr_manage_own INTEGER NOT NULL DEFAULT 0,
-                    ctr_manage_all INTEGER NOT NULL DEFAULT 0,
+                    ctr_manage_all INTEGER NOT NULL DEFAULT 0,   -- 管理所有用户的容器
                     ctr_path_whitelist TEXT NOT NULL DEFAULT '[]',
+                    ctr_quota_num INTEGER NOT NULL DEFAULT 0,    -- 容器数量配额(0=不限)
                     -- 卷权限
+                    vol_use INTEGER NOT NULL DEFAULT 0,      -- 是否有权使用（查看/访问）卷
                     vol_create INTEGER NOT NULL DEFAULT 0,
-                    vol_delete_own INTEGER NOT NULL DEFAULT 0,
-                    vol_delete_all INTEGER NOT NULL DEFAULT 0,
+                    vol_delete_all INTEGER NOT NULL DEFAULT 0,   -- 删除他人卷
                     vol_copy INTEGER NOT NULL DEFAULT 0,
-                    vol_quota_gb REAL NOT NULL DEFAULT 0,
+                    vol_quota_gb REAL NOT NULL DEFAULT 0,    -- 卷空间配额(GB，0=不限)
                     -- 模板权限
                     tpl_use INTEGER NOT NULL DEFAULT 0,
                     tpl_create INTEGER NOT NULL DEFAULT 0,
@@ -201,6 +207,18 @@ def init_docker_database() -> None:
                     PRIMARY KEY(server_id, resource_type),
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
                 );
+
+                -- 容器资源关联缓存表（缓存容器使用的镜像和挂载的卷，用于角色继承）
+                -- 当容器查看者继承挂载卷/镜像的查看权时，从此表查询关联关系
+                CREATE TABLE IF NOT EXISTS docker_container_resource_cache (
+                    server_id TEXT NOT NULL,
+                    container_ref TEXT NOT NULL,   -- 容器名称或短 ID
+                    resource_type TEXT NOT NULL,   -- image | volume
+                    resource_ref TEXT NOT NULL,    -- 镜像 ref 或 卷名称
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(server_id, container_ref, resource_type, resource_ref),
+                    FOREIGN KEY(server_id) REFERENCES docker_servers(id)
+                );
                 """
             )
             # 兼容迁移：为旧版 docker_user_perms 表添加 vol_copy 列（如果不存在）
@@ -209,6 +227,10 @@ def init_docker_database() -> None:
                 conn.execute("ALTER TABLE docker_user_perms ADD COLUMN vol_copy INTEGER NOT NULL DEFAULT 0")
             if "cuda_gpu_indices" not in cols:
                 conn.execute("ALTER TABLE docker_user_perms ADD COLUMN cuda_gpu_indices TEXT NOT NULL DEFAULT '[]'")
+            # 兼容迁移：合并 ctr_create_run + ctr_create_compose → ctr_create
+            if "ctr_create" not in cols and "ctr_create_run" in cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN ctr_create INTEGER NOT NULL DEFAULT 0")
+                conn.execute("UPDATE docker_user_perms SET ctr_create = CASE WHEN ctr_create_run = 1 OR ctr_create_compose = 1 THEN 1 ELSE 0 END")
             # 兼容迁移：为旧版 docker_servers 表添加 CUDA 字段
             srv_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_servers)").fetchall()}
             if "cuda_available" not in srv_cols:
@@ -253,25 +275,31 @@ def _permission_level(level: str) -> int:
 
 _PERMS_DEFAULTS: dict[str, Any] = {
     "server_visible": False,
-    "img_pull": False,
-    "img_delete": False,
-    "img_copy": False,
-    "ctr_view_own": False,
-    "ctr_view_all": False,
-    "ctr_create_run": False,
-    "ctr_create_compose": False,
+    # 镜像权限
+    "img_use": False,           # 是否有权使用（查看/访问）镜像
+    "img_pull": False,          # 拉取新镜像
+    "img_delete": False,        # 删除他人镜像
+    "img_copy": False,          # 跨服务器复制镜像
+    "img_quota_gb": 0.0,        # 镜像空间配额(GB，0=不限)
+    # 容器权限
+    "ctr_use": False,           # 是否有权使用（查看/访问）容器
+    "ctr_view_all": False,      # 查看所有用户的容器
+    "ctr_create": False,         # 创建容器（run/compose 模式均包含）
     "ctr_create_template": False,
-    "ctr_manage_own": False,
-    "ctr_manage_all": False,
+    "ctr_manage_all": False,    # 管理所有用户的容器
     "ctr_path_whitelist": [],
+    "ctr_quota_num": 0,         # 容器数量配额（0=不限）
+    # 卷权限
+    "vol_use": False,           # 是否有权使用（查看/访问）卷
     "vol_create": False,
-    "vol_delete_own": False,
-    "vol_delete_all": False,
+    "vol_delete_all": False,    # 删除他人卷
     "vol_copy": False,
-    "vol_quota_gb": 0.0,
+    "vol_quota_gb": 0.0,        # 卷空间配额(GB，0=不限)
+    # 模板权限
     "tpl_use": False,
     "tpl_create": False,
     "tpl_edit": False,
+    # CUDA 权限
     "cuda_gpu_indices": [],
 }
 
@@ -279,33 +307,55 @@ _PERMS_DEFAULTS: dict[str, Any] = {
 _ADMIN_PERMS: dict[str, Any] = {k: (True if isinstance(v, bool) else ([] if isinstance(v, list) else 999.0)) for k, v in _PERMS_DEFAULTS.items()}
 _ADMIN_PERMS["ctr_path_whitelist"] = []   # 管理员路径不受限
 _ADMIN_PERMS["vol_quota_gb"] = 0.0        # 管理员配额无限制（0=不限）
+_ADMIN_PERMS["img_quota_gb"] = 0.0        # 管理员配额无限制（0=不限）
+_ADMIN_PERMS["ctr_quota_num"] = 0         # 管理员容器数无限制（0=不限）
 
 
 def _row_to_perms(row: sqlite3.Row) -> dict[str, Any]:
-    """将数据库行转换为权限字典"""
+    """将数据库行转换为权限字典（兼容新旧字段名）"""
     keys = set(row.keys())
+    def _b(k: str, fallback: bool = False) -> bool:
+        return bool(row[k]) if k in keys else fallback
+    def _f(k: str, fallback: float = 0.0) -> float:
+        return float(row[k]) if k in keys else fallback
+    def _j(k: str, fallback: list) -> list:
+        return json.loads(row[k]) if k in keys else fallback
+    def _i(k: str, fallback: int = 0) -> int:
+        return int(row[k]) if k in keys else fallback
+
+    # 兼容旧字段：如果新字段不存在，尝试从旧字段推断
+    img_use = _b("img_use") or _b("ctr_view_own") or _b("ctr_view_all")
+    ctr_use = _b("ctr_use") or _b("ctr_view_own")
+    vol_use = _b("vol_use") or _b("ctr_view_own")
+
     return {
-        "server_visible": bool(row["server_visible"]),
-        "img_pull": bool(row["img_pull"]),
-        "img_delete": bool(row["img_delete"]),
-        "img_copy": bool(row["img_copy"]),
-        "ctr_view_own": bool(row["ctr_view_own"]),
-        "ctr_view_all": bool(row["ctr_view_all"]),
-        "ctr_create_run": bool(row["ctr_create_run"]),
-        "ctr_create_compose": bool(row["ctr_create_compose"]),
-        "ctr_create_template": bool(row["ctr_create_template"]),
-        "ctr_manage_own": bool(row["ctr_manage_own"]),
-        "ctr_manage_all": bool(row["ctr_manage_all"]),
-        "ctr_path_whitelist": json.loads(row["ctr_path_whitelist"]),
-        "vol_create": bool(row["vol_create"]),
-        "vol_delete_own": bool(row["vol_delete_own"]),
-        "vol_delete_all": bool(row["vol_delete_all"]),
-        "vol_copy": bool(row["vol_copy"]) if "vol_copy" in keys else False,
-        "vol_quota_gb": float(row["vol_quota_gb"]),
-        "tpl_use": bool(row["tpl_use"]),
-        "tpl_create": bool(row["tpl_create"]),
-        "tpl_edit": bool(row["tpl_edit"]),
-        "cuda_gpu_indices": json.loads(row["cuda_gpu_indices"]) if "cuda_gpu_indices" in keys else [],
+        "server_visible": _b("server_visible"),
+        # 镜像
+        "img_use": img_use,
+        "img_pull": _b("img_pull"),
+        "img_delete": _b("img_delete"),
+        "img_copy": _b("img_copy"),
+        "img_quota_gb": _f("img_quota_gb"),
+        # 容器
+        "ctr_use": ctr_use,
+        "ctr_view_all": _b("ctr_view_all"),
+        "ctr_create": _b("ctr_create") or _b("ctr_create_run") or _b("ctr_create_compose"),
+        "ctr_create_template": _b("ctr_create_template"),
+        "ctr_manage_all": _b("ctr_manage_all"),
+        "ctr_path_whitelist": _j("ctr_path_whitelist", []),
+        "ctr_quota_num": _i("ctr_quota_num"),
+        # 卷
+        "vol_use": vol_use,
+        "vol_create": _b("vol_create"),
+        "vol_delete_all": _b("vol_delete_all") or _b("vol_delete_own"),
+        "vol_copy": _b("vol_copy"),
+        "vol_quota_gb": _f("vol_quota_gb"),
+        # 模板
+        "tpl_use": _b("tpl_use"),
+        "tpl_create": _b("tpl_create"),
+        "tpl_edit": _b("tpl_edit"),
+        # CUDA
+        "cuda_gpu_indices": _j("cuda_gpu_indices", []),
     }
 
 
@@ -334,8 +384,8 @@ def _get_user_permission(conn: sqlite3.Connection, server_id: str, user: User) -
     if any(perms.get(f) for f in manage_flags):
         return "manage"
     # 判断是否有创建/操作类权限
-    use_flags = ["img_pull", "ctr_create_run", "ctr_create_compose", "ctr_create_template",
-                 "ctr_manage_own", "vol_create", "tpl_use"]
+    use_flags = ["img_pull", "ctr_create", "ctr_create_template",
+                 "vol_create", "tpl_use"]
     if any(perms.get(f) for f in use_flags):
         return "use"
     return "view"
@@ -359,12 +409,12 @@ def _require_perm(conn: sqlite3.Connection, server_id: str, user: User, perm: st
     perms = _get_user_perms(conn, server_id, user)
     if not perms.get(perm, False):
         label_map = {
-            "img_pull": "拉取镜像", "img_delete": "删除镜像", "img_copy": "复制镜像",
-            "ctr_view_own": "查看容器", "ctr_view_all": "查看全部容器",
-            "ctr_create_run": "创建容器(run)", "ctr_create_compose": "创建容器(compose)",
+            "img_use": "使用镜像", "img_pull": "拉取镜像", "img_delete": "删除镜像", "img_copy": "复制镜像",
+            "ctr_use": "使用容器", "ctr_view_all": "查看全部容器",
+            "ctr_create": "创建容器",
             "ctr_create_template": "从模板创建容器",
-            "ctr_manage_own": "管理自己的容器", "ctr_manage_all": "管理全部容器",
-            "vol_create": "创建卷", "vol_delete_own": "删除自己的卷", "vol_delete_all": "删除全部卷", "vol_copy": "复制卷",
+            "ctr_manage_all": "管理全部容器",
+            "vol_use": "使用卷", "vol_create": "创建卷", "vol_delete_all": "删除全部卷", "vol_copy": "复制卷",
             "tpl_use": "使用模板", "tpl_create": "创建模板", "tpl_edit": "编辑模板",
         }
         raise ToolboxError(
@@ -388,8 +438,8 @@ def _get_quota(conn: sqlite3.Connection, server_id: str, user_id: str) -> dict[s
         return {
             "volumeTotalGb": p["vol_quota_gb"],
             "pathWhitelist": p["ctr_path_whitelist"],
-            "canCreateContainer": p["ctr_create_run"] or p["ctr_create_compose"] or p["ctr_create_template"],
-            "canManageContainer": p["ctr_manage_own"] or p["ctr_manage_all"],
+            "canCreateContainer": p["ctr_create"] or p["ctr_create_template"],
+            "canManageContainer": p["ctr_use"] or p["ctr_manage_all"],
         }
     return {"volumeTotalGb": 0.0, "pathWhitelist": [], "canCreateContainer": False, "canManageContainer": False}
 
@@ -639,24 +689,26 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
         now = _now()
         path_whitelist_json = json.dumps(perms.get("ctr_path_whitelist", []))
         vol_quota_gb = float(perms.get("vol_quota_gb", 0))
+        img_quota_gb = float(perms.get("img_quota_gb", 0))
+        ctr_quota_num = int(perms.get("ctr_quota_num", 0))
         cuda_gpu_indices_json = json.dumps(perms.get("cuda_gpu_indices", []))
         conn.execute(
             """
             INSERT INTO docker_user_perms (
                 server_id, user_id, server_visible,
-                img_pull, img_delete, img_copy,
-                ctr_view_own, ctr_view_all,
-                ctr_create_run, ctr_create_compose, ctr_create_template,
-                ctr_manage_own, ctr_manage_all, ctr_path_whitelist,
-                vol_create, vol_delete_own, vol_delete_all, vol_copy, vol_quota_gb,
+                img_use, img_pull, img_delete, img_copy, img_quota_gb,
+                ctr_use, ctr_view_all,
+                ctr_create, ctr_create_template,
+                ctr_manage_all, ctr_path_whitelist, ctr_quota_num,
+                vol_use, vol_create, vol_delete_all, vol_copy, vol_quota_gb,
                 tpl_use, tpl_create, tpl_edit,
                 cuda_gpu_indices,
                 updated_at
             ) VALUES (
                 ?, ?, ?,
-                ?, ?, ?,
+                ?, ?, ?, ?, ?,
                 ?, ?,
-                ?, ?, ?,
+                ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -665,19 +717,20 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
             )
             ON CONFLICT(server_id, user_id) DO UPDATE SET
                 server_visible = excluded.server_visible,
+                img_use = excluded.img_use,
                 img_pull = excluded.img_pull,
                 img_delete = excluded.img_delete,
                 img_copy = excluded.img_copy,
-                ctr_view_own = excluded.ctr_view_own,
+                img_quota_gb = excluded.img_quota_gb,
+                ctr_use = excluded.ctr_use,
                 ctr_view_all = excluded.ctr_view_all,
-                ctr_create_run = excluded.ctr_create_run,
-                ctr_create_compose = excluded.ctr_create_compose,
+                ctr_create = excluded.ctr_create,
                 ctr_create_template = excluded.ctr_create_template,
-                ctr_manage_own = excluded.ctr_manage_own,
                 ctr_manage_all = excluded.ctr_manage_all,
                 ctr_path_whitelist = excluded.ctr_path_whitelist,
+                ctr_quota_num = excluded.ctr_quota_num,
+                vol_use = excluded.vol_use,
                 vol_create = excluded.vol_create,
-                vol_delete_own = excluded.vol_delete_own,
                 vol_delete_all = excluded.vol_delete_all,
                 vol_copy = excluded.vol_copy,
                 vol_quota_gb = excluded.vol_quota_gb,
@@ -689,11 +742,11 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
             """,
             (
                 server_id, target_user_id, b("server_visible"),
-                b("img_pull"), b("img_delete"), b("img_copy"),
-                b("ctr_view_own"), b("ctr_view_all"),
-                b("ctr_create_run"), b("ctr_create_compose"), b("ctr_create_template"),
-                b("ctr_manage_own"), b("ctr_manage_all"), path_whitelist_json,
-                b("vol_create"), b("vol_delete_own"), b("vol_delete_all"), b("vol_copy"), vol_quota_gb,
+                b("img_use"), b("img_pull"), b("img_delete"), b("img_copy"), img_quota_gb,
+                b("ctr_use"), b("ctr_view_all"),
+                b("ctr_create"), b("ctr_create_template"),
+                b("ctr_manage_all"), path_whitelist_json, ctr_quota_num,
+                b("vol_use"), b("vol_create"), b("vol_delete_all"), b("vol_copy"), vol_quota_gb,
                 b("tpl_use"), b("tpl_create"), b("tpl_edit"),
                 cuda_gpu_indices_json,
                 now,
@@ -717,15 +770,16 @@ def set_user_permission(server_id: str, target_user_id: str, level: str, user: U
     if level == "none":
         pass  # all False
     elif level == "view":
-        preset.update({"server_visible": True, "ctr_view_own": True, "tpl_use": False})
+        preset.update({
+            "server_visible": True,
+            "img_use": True, "ctr_use": True, "vol_use": True,
+        })
     elif level == "use":
         preset.update({
             "server_visible": True,
-            "img_pull": True,
-            "ctr_view_own": True,
-            "ctr_create_run": True, "ctr_create_compose": True, "ctr_create_template": True,
-            "ctr_manage_own": True,
-            "vol_create": True, "vol_delete_own": True, "vol_copy": True,
+            "img_use": True, "img_pull": True,
+            "ctr_use": True, "ctr_create": True, "ctr_create_template": True,
+            "vol_use": True, "vol_create": True, "vol_copy": True,
             "tpl_use": True,
         })
     elif level == "manage":
@@ -750,7 +804,7 @@ def set_user_quota(server_id: str, target_user_id: str, quota: dict[str, Any], u
     existing["vol_quota_gb"] = float(quota.get("volumeTotalGb", existing["vol_quota_gb"]))
     existing["ctr_path_whitelist"] = quota.get("pathWhitelist", existing["ctr_path_whitelist"])
     if quota.get("canCreateContainer") is not None:
-        for k in ["ctr_create_run", "ctr_create_compose", "ctr_create_template"]:
+        for k in ["ctr_create", "ctr_create_template"]:
             existing[k] = bool(quota["canCreateContainer"])
     if quota.get("canManageContainer") is not None:
         existing["ctr_manage_own"] = bool(quota["canManageContainer"])
@@ -782,8 +836,8 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
     init_docker_database()
     with get_connection() as conn:
         perms = _get_user_perms(conn, server_id, user)
-        # 至少需要 ctr_view_own 或 ctr_view_all 之一（或管理员）
-        if user.role != "admin" and not perms.get("ctr_view_own") and not perms.get("ctr_view_all"):
+        # 需要 img_use（或 ctr_view_all 向后兼容）或管理员
+        if user.role != "admin" and not perms.get("img_use") and not perms.get("ctr_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看镜像的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
         # 获取镜像所有权元数据（旧表兼容）
@@ -798,6 +852,29 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
             (server_id, user.id),
         ).fetchall():
             user_accessible_refs.add(r["resource_ref"])
+        # 角色继承：查询用户有访问权的容器，通过缓存表找到这些容器使用的镜像
+        # 规则：容器的 viewer/owner/creator 自动继承该容器使用的镜像的查看权
+        if user.role != "admin":
+            accessible_ctrs: set[str] = set()
+            for r in conn.execute(
+                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=?",
+                (server_id, user.id),
+            ).fetchall():
+                accessible_ctrs.add(r["resource_ref"])
+            # 旧 meta 表兼容：作为容器 owner 的也算
+            for r in conn.execute(
+                "SELECT container_ref FROM docker_containers_meta WHERE server_id=? AND owner_user_id=?",
+                (server_id, user.id),
+            ).fetchall():
+                accessible_ctrs.add(r["container_ref"])
+            if accessible_ctrs:
+                # 从缓存表查找这些容器关联的镜像
+                placeholders = ",".join("?" * len(accessible_ctrs))
+                for r in conn.execute(
+                    f"SELECT resource_ref FROM docker_container_resource_cache WHERE server_id=? AND resource_type='image' AND container_ref IN ({placeholders})",
+                    [server_id, *accessible_ctrs],
+                ).fetchall():
+                    user_accessible_refs.add(r["resource_ref"])
         view_all = user.role == "admin" or perms.get("ctr_view_all", False)
 
     client = _ssh_connect(row)
@@ -958,7 +1035,7 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
     init_docker_database()
     with get_connection() as conn:
         perms = _get_user_perms(conn, server_id, user)
-        if user.role != "admin" and not perms.get("ctr_view_own") and not perms.get("ctr_view_all"):
+        if user.role != "admin" and not perms.get("ctr_use") and not perms.get("ctr_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看容器的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
         # 获取容器所有权元数据（旧表兼容）
@@ -986,6 +1063,8 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
         client.close()
 
     containers = []
+    cache_updates: list[tuple[str, str, str, str]] = []  # (container_ref, resource_type, resource_ref, now)
+    now_str = _now()
     for line in stdout.strip().splitlines():
         line = line.strip()
         if not line:
@@ -1003,10 +1082,28 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
         ctr["ownerUserId"] = owner  # 兼容旧字段
         ctr["platformManaged"] = owner is not None or ref in user_accessible_refs
 
+        # 收集容器-镜像/卷关联，用于角色继承缓存
+        img_ref = ctr.get("Image", "")
+        if ref and img_ref:
+            cache_updates.append((ref, "image", img_ref, now_str))
+        # Mounts 字段（docker ps --format 默认不含 Mounts，需要 docker inspect）
+        # 此处仅缓存镜像关联；卷关联在 get_container_detail 中更新
+
         if view_all:
             containers.append(ctr)
         elif ref in user_accessible_refs or owner == user.id:
             containers.append(ctr)
+
+    # 更新容器资源关联缓存（镜像关联）
+    if cache_updates:
+        with get_connection() as conn:
+            for container_ref, rtype, rref, ts in cache_updates:
+                conn.execute(
+                    """INSERT OR REPLACE INTO docker_container_resource_cache
+                       (server_id, container_ref, resource_type, resource_ref, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (server_id, container_ref, rtype, rref, ts),
+                )
 
     return containers
 
@@ -1197,7 +1294,7 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
 def container_action(server_id: str, container_id: str, action: str, user: User) -> dict[str, Any]:
     """
     容器生命周期操作：start/stop/restart/remove
-    需要 ctr_manage_own（自己的容器）或 ctr_manage_all（任意容器）
+    需要是容器的所有者（owner 角色）或拥有 ctr_manage_all 权限
     """
     init_docker_database()
     if action not in {"start", "stop", "restart", "remove"}:
@@ -1207,17 +1304,20 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("ctr_manage_all", False)
-            can_manage_own = perms.get("ctr_manage_own", False)
-            if not can_manage_all and not can_manage_own:
-                raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限", status_code=403, tool_id=TOOL_ID)
-            # 如果只有 manage_own，检查所有权
-            if not can_manage_all:
+            # 新模型：检查用户是否是该容器的 owner/creator
+            is_resource_owner = conn.execute(
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                (server_id, container_id, user.id),
+            ).fetchone() is not None
+            # 兼容旧 meta 表
+            if not is_resource_owner:
                 meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id = ? AND container_ref = ?",
+                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
                     (server_id, container_id),
                 ).fetchone()
-                if meta and meta["owner_user_id"] != user.id:
-                    raise ToolboxError("PERMISSION_DENIED", "您只能管理自己拥有的容器", status_code=403, tool_id=TOOL_ID)
+                is_resource_owner = bool(meta and meta["owner_user_id"] == user.id)
+            if not can_manage_all and not is_resource_owner:
+                raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限（需要是容器所有者或拥有全局管理权限）", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     docker_cmd = "rm -f" if action == "remove" else action
@@ -1243,7 +1343,7 @@ def update_restart_policy(server_id: str, container_id: str, policy: str, user: 
     """
     更新容器重启策略（docker update --restart）。
     支持：no / always / unless-stopped / on-failure / on-failure:N
-    权限：ctr_manage_own（自己的容器）或 ctr_manage_all / admin（任意容器）。
+    权限：容器所有者（owner 角色）或 ctr_manage_all / admin（任意容器）。
     """
     allowed = {"no", "always", "unless-stopped", "on-failure"}
     base = policy.split(":")[0] if ":" in policy else policy
@@ -1255,16 +1355,18 @@ def update_restart_policy(server_id: str, container_id: str, policy: str, user: 
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("ctr_manage_all", False)
-            can_manage_own = perms.get("ctr_manage_own", False)
-            if not can_manage_all and not can_manage_own:
-                raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限", status_code=403, tool_id=TOOL_ID)
-            if not can_manage_all:
+            is_resource_owner = conn.execute(
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                (server_id, container_id, user.id),
+            ).fetchone() is not None
+            if not is_resource_owner:
                 meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id = ? AND container_ref = ?",
+                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
                     (server_id, container_id),
                 ).fetchone()
-                if meta and meta["owner_user_id"] != user.id:
-                    raise ToolboxError("PERMISSION_DENIED", "您只能管理自己拥有的容器", status_code=403, tool_id=TOOL_ID)
+                is_resource_owner = bool(meta and meta["owner_user_id"] == user.id)
+            if not can_manage_all and not is_resource_owner:
+                raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     cmd = f"docker update --restart {shlex.quote(policy)} {shlex.quote(container_id)}"
@@ -1287,25 +1389,26 @@ def update_restart_policy(server_id: str, container_id: str, policy: str, user: 
 def get_container_detail(server_id: str, container_id: str, user: User) -> dict[str, Any]:
     """
     获取容器详情（docker inspect），返回基础信息、环境变量、端口映射、卷挂载、网络等。
-    权限：ctr_view_own（仅自己的）或 ctr_view_all / admin（所有容器）。
+    权限：容器的 owner/viewer/creator 角色，或 ctr_view_all / admin（所有容器）。
     """
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             view_all = perms.get("ctr_view_all", False)
-            view_own = perms.get("ctr_view_own", False)
-            if not view_all and not view_own:
+            ctr_use = perms.get("ctr_use", False)
+            if not view_all and not ctr_use:
                 raise ToolboxError("PERMISSION_DENIED", "您没有查看容器详情的权限", status_code=403, tool_id=TOOL_ID)
             if not view_all:
-                # 检查是否是自己的容器（新角色表或旧 meta 表）
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
-                    (server_id, container_id),
-                ).fetchone()
+                # 检查是否有该容器的角色（owner/viewer/creator）
                 accessible_roles = conn.execute(
                     "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=?",
                     (server_id, container_id, user.id),
+                ).fetchone()
+                # 兼容旧 meta 表
+                meta = conn.execute(
+                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
+                    (server_id, container_id),
                 ).fetchone()
                 if not accessible_roles and (not meta or meta["owner_user_id"] != user.id):
                     raise ToolboxError("PERMISSION_DENIED", "您没有权限查看此容器的详情", status_code=403, tool_id=TOOL_ID)
@@ -1438,22 +1541,26 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
 
 
 def get_container_logs(server_id: str, container_id: str, user: User, tail: int = 200) -> dict[str, Any]:
-    """获取容器日志（需 ctr_view_own 或 ctr_view_all）"""
+    """获取容器日志（需容器 owner/viewer/creator 角色或 ctr_view_all）"""
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             view_all = perms.get("ctr_view_all", False)
-            view_own = perms.get("ctr_view_own", False)
-            if not view_all and not view_own:
+            ctr_use = perms.get("ctr_use", False)
+            if not view_all and not ctr_use:
                 raise ToolboxError("PERMISSION_DENIED", "您没有查看容器日志的权限", status_code=403, tool_id=TOOL_ID)
             if not view_all:
+                accessible = conn.execute(
+                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=?",
+                    (server_id, container_id, user.id),
+                ).fetchone()
                 meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id = ? AND container_ref = ?",
+                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
                     (server_id, container_id),
                 ).fetchone()
-                if meta and meta["owner_user_id"] != user.id:
-                    raise ToolboxError("PERMISSION_DENIED", "您只能查看自己容器的日志", status_code=403, tool_id=TOOL_ID)
+                if not accessible and (not meta or meta["owner_user_id"] != user.id):
+                    raise ToolboxError("PERMISSION_DENIED", "您只能查看自己有权限的容器日志", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     client = _ssh_connect(row)
@@ -1704,6 +1811,26 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
                 (server_id, user.id),
             ).fetchall():
                 user_accessible_vols.add(r["resource_ref"])
+            # 角色继承：查询用户有访问权的容器，通过缓存表找到这些容器挂载的卷
+            # 规则：容器的 viewer/owner/creator 自动继承该容器挂载的卷的查看权
+            accessible_ctrs: set[str] = set()
+            for r in conn.execute(
+                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=?",
+                (server_id, user.id),
+            ).fetchall():
+                accessible_ctrs.add(r["resource_ref"])
+            for r in conn.execute(
+                "SELECT container_ref FROM docker_containers_meta WHERE server_id=? AND owner_user_id=?",
+                (server_id, user.id),
+            ).fetchall():
+                accessible_ctrs.add(r["container_ref"])
+            if accessible_ctrs:
+                placeholders = ",".join("?" * len(accessible_ctrs))
+                for r in conn.execute(
+                    f"SELECT resource_ref FROM docker_container_resource_cache WHERE server_id=? AND resource_type='volume' AND container_ref IN ({placeholders})",
+                    [server_id, *accessible_ctrs],
+                ).fetchall():
+                    user_accessible_vols.add(r["resource_ref"])
 
     # 从服务器获取实际卷列表
     client = _ssh_connect(row)
@@ -1901,22 +2028,25 @@ def create_volume(server_id: str, name: str, size_gb: float, user: User) -> dict
 
 
 def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any]:
-    """删除 Docker 卷（需 vol_delete_own 或 vol_delete_all 权限）"""
+    """删除 Docker 卷（需是卷的 owner 角色或拥有 vol_delete_all 权限）"""
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_delete_all = perms.get("vol_delete_all", False)
-            can_delete_own = perms.get("vol_delete_own", False)
-            if not can_delete_all and not can_delete_own:
-                raise ToolboxError("PERMISSION_DENIED", "您没有删除卷的权限", status_code=403, tool_id=TOOL_ID)
-            if not can_delete_all:
+            # 检查是否是该卷的 owner/creator
+            is_owner = conn.execute(
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                (server_id, volume_name, user.id),
+            ).fetchone() is not None
+            if not is_owner:
                 meta = conn.execute(
-                    "SELECT * FROM docker_volumes_meta WHERE server_id = ? AND volume_name = ?",
+                    "SELECT owner_user_id FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
                     (server_id, volume_name),
                 ).fetchone()
-                if meta and meta["owner_user_id"] != user.id:
-                    raise ToolboxError("PERMISSION_DENIED", "您只能删除自己创建的卷", status_code=403, tool_id=TOOL_ID)
+                is_owner = bool(meta and meta["owner_user_id"] == user.id)
+            if not can_delete_all and not is_owner:
+                raise ToolboxError("PERMISSION_DENIED", "您没有删除此卷的权限（需要是卷的所有者或拥有全局删除权限）", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     client = _ssh_connect(row)

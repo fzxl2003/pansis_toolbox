@@ -218,3 +218,8 @@ data_dir = require_user_tool_data_dir(request, "tool_id")
 - `cd frontend && npm run build`
 
 如果通过 Codex 或受限 shell 启动本地服务时遇到 `listen EPERM`，需要允许本地进程监听 `127.0.0.1:8000` 和 `127.0.0.1:5173`。
+
+
+
+1、docker pull 下来的镜像没有创建者和管理者
+2、镜像部分的资源占用概览为空

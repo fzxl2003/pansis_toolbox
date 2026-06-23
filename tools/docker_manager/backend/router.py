@@ -85,24 +85,25 @@ class SetUserPermsPayload(BaseModel):
     # 服务器可见性
     server_visible: bool = False
     # 镜像权限
+    img_use: bool = False           # 是否有权使用（查看/访问）镜像（资源角色查看者的前提条件）
     img_pull: bool = False
     img_delete: bool = False
     img_copy: bool = False
+    img_quota_gb: float = 0.0       # 镜像空间配额(GB，0=不限)
     # 容器权限
-    ctr_view_own: bool = False
+    ctr_use: bool = False           # 是否有权使用（查看/访问）容器（资源角色查看者的前提条件）
     ctr_view_all: bool = False
-    ctr_create_run: bool = False
-    ctr_create_compose: bool = False
+    ctr_manage_all: bool = False    # 管理所有用户的容器（自动成为所有容器的所有者角色）
+    ctr_create: bool = False        # 创建容器（run/compose 模式均包含）
     ctr_create_template: bool = False
-    ctr_manage_own: bool = False
-    ctr_manage_all: bool = False
     ctr_path_whitelist: list[str] = Field(default_factory=list)
+    ctr_quota_num: int = 0          # 容器数量配额（0=不限）
     # 卷权限
+    vol_use: bool = False           # 是否有权使用（查看/访问）卷（资源角色查看者的前提条件）
     vol_create: bool = False
-    vol_delete_own: bool = False
-    vol_delete_all: bool = False
+    vol_delete_all: bool = False    # 删除他人卷（自身创建的卷及所有者角色的卷默认可删）
     vol_copy: bool = False
-    vol_quota_gb: float = 0.0
+    vol_quota_gb: float = 0.0       # 卷空间配额(GB，0=不限)
     # 模板权限
     tpl_use: bool = False
     tpl_create: bool = False

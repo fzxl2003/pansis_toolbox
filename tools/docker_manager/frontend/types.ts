@@ -25,28 +25,31 @@ export type DmServer = {
 };
 
 // 细粒度权限结构
+// 注意：查看/管理"自己的"资源为默认权限，不在此配置
+// img_use/ctr_use/vol_use 控制「是否能使用（看到+访问）该类资源」
 export type UserPerms = {
   server_visible: boolean;
-  // 镜像
-  img_pull: boolean;
-  img_delete: boolean;
-  img_copy: boolean;
-  // 容器
-  ctr_view_own: boolean;
-  ctr_view_all: boolean;
-  ctr_create_run: boolean;
-  ctr_create_compose: boolean;
+  // 镜像权限
+  img_use: boolean;         // 是否有权使用（查看/访问）镜像
+  img_pull: boolean;        // 拉取新镜像
+  img_delete: boolean;      // 删除他人镜像
+  img_copy: boolean;        // 跨服务器复制镜像
+  img_quota_gb: number;     // 镜像空间配额(GB，0=不限)
+  // 容器权限
+  ctr_use: boolean;         // 是否有权使用（查看/访问）容器
+  ctr_view_all: boolean;    // 查看所有用户的容器
+  ctr_manage_all: boolean;  // 管理所有用户的容器
+  ctr_create: boolean;      // 创建容器（run/compose 模式均包含）
   ctr_create_template: boolean;
-  ctr_manage_own: boolean;
-  ctr_manage_all: boolean;
   ctr_path_whitelist: string[];
-  // 卷
+  ctr_quota_num: number;    // 容器数量配额（0=不限）
+  // 卷权限
+  vol_use: boolean;         // 是否有权使用（查看/访问）卷
   vol_create: boolean;
-  vol_delete_own: boolean;
-  vol_delete_all: boolean;
+  vol_delete_all: boolean;  // 删除他人卷
   vol_copy: boolean;
-  vol_quota_gb: number;
-  // 模板
+  vol_quota_gb: number;     // 卷空间配额(GB，0=不限)
+  // 模板权限
   tpl_use: boolean;
   tpl_create: boolean;
   tpl_edit: boolean;
@@ -56,11 +59,12 @@ export type UserPerms = {
 
 export const DEFAULT_PERMS: UserPerms = {
   server_visible: false,
-  img_pull: false, img_delete: false, img_copy: false,
-  ctr_view_own: false, ctr_view_all: false,
-  ctr_create_run: false, ctr_create_compose: false, ctr_create_template: false,
-  ctr_manage_own: false, ctr_manage_all: false, ctr_path_whitelist: [],
-  vol_create: false, vol_delete_own: false, vol_delete_all: false, vol_copy: false, vol_quota_gb: 0,
+  img_use: false, img_pull: false, img_delete: false, img_copy: false, img_quota_gb: 0,
+  ctr_use: false, ctr_view_all: false,
+  ctr_manage_all: false,
+  ctr_create: false, ctr_create_template: false,
+  ctr_path_whitelist: [], ctr_quota_num: 0,
+  vol_use: false, vol_create: false, vol_delete_all: false, vol_copy: false, vol_quota_gb: 0,
   tpl_use: false, tpl_create: false, tpl_edit: false,
   cuda_gpu_indices: [],
 };

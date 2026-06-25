@@ -14,6 +14,7 @@ from tools.docker_manager.backend.service import (
     add_server,
     assign_resource_owner,
     assign_resource_roles,
+    check_servers_status,
     container_action,
     copy_image,
     copy_volume,
@@ -192,6 +193,13 @@ class CreateFromTemplatePayload(BaseModel):
 def list_servers_route(request: Request) -> dict:
     user = require_user(request)
     return {"servers": list_servers(user)}
+
+
+@router.get("/servers/status")
+def servers_status_route(request: Request) -> dict:
+    """检测所有可见服务器的连接状态（在线/离线）"""
+    user = require_user(request)
+    return {"statuses": check_servers_status(user)}
 
 
 @router.post("/servers")
@@ -446,8 +454,7 @@ class AssignResourceRolesPayload(BaseModel):
     resourceRef: str                    # 容器名/镜像 repo:tag/卷名
     ownerUserIds: list[str] = Field(default_factory=list)       # 所有者列表
     viewerUserIds: list[str] = Field(default_factory=list)      # 查看者列表
-    quotaHolderUserIds: list[str] = Field(default_factory=list) # 配额占用者（必须是所有者的子集）
-    quotaMode: str = ""                 # 配额模式：shared（所有者均分）| exclusive（配额占用者独占）
+    quotaHolderUserIds: list[str] = Field(default_factory=list) # 配额占用者（可多人，无需是所有者）
     creatorUserId: str = ""             # 创建者（唯一），传 "" 表示不设置
 
 
@@ -484,7 +491,6 @@ def assign_resource_roles_route(request: Request, server_id: str, payload: Assig
         payload.creatorUserId,
         user,
         quota_holder_user_ids=payload.quotaHolderUserIds,
-        quota_mode=payload.quotaMode or None,
     )
 
 

@@ -203,6 +203,10 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [adding, setAdding] = useState(false);
   const [addMsg, setAddMsg] = useState('');
 
+  // ─── 服务器连接状态 ──────────────────────────────────
+  const [serverStatuses, setServerStatuses] = useState<Record<string, 'online' | 'offline'>>({});
+  const [statusLoading, setStatusLoading] = useState(false);
+
   // ─── 合并管理面板 ────────────────────────────────────────
   // panelServer: 当前打开了合并管理面板的服务器
   // panelTab: 当前面板显示哪个视图 'perms'=权限配置  'resources'=资源角色管理
@@ -231,7 +235,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [assignOwnerIds, setAssignOwnerIds] = useState<string[]>([]);
   const [assignViewerIds, setAssignViewerIds] = useState<string[]>([]);
   const [assignQuotaHolderIds, setAssignQuotaHolderIds] = useState<string[]>([]);
-  const [assignQuotaMode, setAssignQuotaMode] = useState<'shared' | 'exclusive'>('shared');
   const [savingRoles, setSavingRoles] = useState(false);
 
   // CUDA 重新扫描
@@ -309,7 +312,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     setAssignOwnerIds(currentRoles.ownerUserIds ?? []);
     setAssignViewerIds(currentRoles.viewerUserIds ?? []);
     setAssignQuotaHolderIds(currentRoles.quotaHolderUserIds ?? []);
-    setAssignQuotaMode(currentRoles.quotaMode ?? 'shared');
     clearAssignError();
   }
 
@@ -325,7 +327,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
         ownerUserIds: assignOwnerIds,
         viewerUserIds: assignViewerIds,
         quotaHolderUserIds: assignQuotaHolderIds,
-        quotaMode: assignQuotaMode,
       });
       setAssignSuccess(`「${assignRolesTarget.label}」角色分配已更新`);
       setAssignRolesTarget(null);
@@ -352,6 +353,21 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   }, [clearError, setError]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // 加载服务器连接状态
+  const loadStatuses = useCallback(async () => {
+    setStatusLoading(true);
+    try {
+      const r = await apiGet<{ statuses: Record<string, 'online' | 'offline'> }>(`${API}/servers/status`);
+      setServerStatuses(r.statuses);
+    } catch {
+      // 静默失败
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadStatuses(); }, [loadStatuses]);
 
   const af = (k: keyof typeof addForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setAddForm((p) => ({ ...p, [k]: e.target.value }));
@@ -517,19 +533,31 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
         <button className="btn" onClick={() => void load()} disabled={loading}>
           <RefreshCw size={14} /> 刷新
         </button>
+        <button className="btn" onClick={() => void loadStatuses()} disabled={statusLoading} style={{ marginLeft: 'auto' }}>
+          {statusLoading ? <Spin /> : <RefreshCw size={14} />} 刷新连接状态
+        </button>
       </div>
 
       {/* Server List */}
       {loading ? <div className="dm-empty"><Spin /> 加载中…</div> :
        servers.length === 0 ? <div className="dm-empty"><Server size={32} /> 暂无服务器</div> : (
         <div className="dm-table">
-          <div className="dm-table-header" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr 1fr auto' }}>
-            <span>服务器</span><span>地址</span><span>GPU</span><span>添加时间</span><span>操作</span>
+          <div className="dm-table-header" style={{ gridTemplateColumns: '1.5fr 1.5fr 0.8fr 1fr 0.8fr auto' }}>
+            <span>服务器</span><span>地址</span><span>状态</span><span>GPU</span><span>添加时间</span><span>操作</span>
           </div>
           {servers.map((s) => (
-            <div key={s.id} className="dm-table-row" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr 1fr auto' }}>
+            <div key={s.id} className="dm-table-row" style={{ gridTemplateColumns: '1.5fr 1.5fr 0.8fr 1fr 0.8fr auto' }}>
               <span style={{ fontWeight: 600 }}>{s.name}</span>
               <span style={{ color: '#526071', fontFamily: 'monospace', fontSize: 13 }}>{s.host}:{s.port}</span>
+              <span>
+                {statusLoading && !serverStatuses[s.id] ? (
+                  <span className="dm-status-badge checking"><span className="dm-status-dot" />检测中</span>
+                ) : serverStatuses[s.id] === 'online' ? (
+                  <span className="dm-status-badge online"><span className="dm-status-dot" />在线</span>
+                ) : (
+                  <span className="dm-status-badge offline"><span className="dm-status-dot" />离线</span>
+                )}
+              </span>
               <span>
                 {s.cudaAvailable
                   ? <span className="dm-cuda-badge"><Cpu size={11} /> {s.gpuCount ?? 0} GPU</span>
@@ -906,9 +934,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                         if (e.target.checked) {
                           // 成为所有者时从查看者移除（互斥）
                           setAssignViewerIds((prev) => prev.filter((id) => id !== u.userId));
-                        } else {
-                          // 取消所有者时同时取消配额占用者
-                          setAssignQuotaHolderIds((prev) => prev.filter((id) => id !== u.userId));
                         }
                       }}
                     />
@@ -926,26 +951,37 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
             </div>
           </div>
 
-          {/* 配额占用者（多选，只能从所有者中选） */}
+          {/* 配额占用者（多选，无需是所有者） */}
           <div className="dm-perm-section">
             <div className="dm-perm-section-title">
               <Database size={13} /> 配额占用者
               <span style={{ fontSize: 11, color: '#64748b', fontWeight: 400, marginLeft: 6 }}>
-                必须同时是所有者，多人时独占配额
+                资源大小在所有配额占用者间均分
               </span>
             </div>
             <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
-              在「配额占用者独占」模式下，配额占用者的资源配额独立计算，不参与均分。
+              配额占用者无需是所有者。资源大小将被所有配额占用者平均分配占用。例如 100MB 镜像、5 个配额占用者，每人占用 20MB。
             </div>
-            {assignOwnerIds.length === 0 ? (
-              <div style={{ fontSize: 12, color: '#94a3b8' }}>请先选择所有者</div>
-            ) : (
-              <div className="dm-roles-checklist">
-                {users.filter((u) => assignOwnerIds.includes(u.userId)).map((u) => (
-                  <label key={u.userId} className="dm-form-check">
+            <div className="dm-roles-checklist">
+              {users.filter((u) => u.role !== 'admin').map((u) => {
+                const hasUsePerms = (() => {
+                  const rtype = assignRolesTarget.resourceType;
+                  const p = u.perms;
+                  if (rtype === 'container') return p?.ctr_use ?? false;
+                  if (rtype === 'image') return p?.img_use ?? false;
+                  if (rtype === 'volume') return p?.vol_use ?? false;
+                  return true;
+                })();
+                return (
+                  <label
+                    key={u.userId}
+                    className={`dm-form-check${!hasUsePerms ? ' disabled' : ''}`}
+                    title={!hasUsePerms ? `${u.displayName} 没有该资源类型的使用权限` : ''}
+                  >
                     <input
                       type="checkbox"
                       checked={assignQuotaHolderIds.includes(u.userId)}
+                      disabled={!hasUsePerms}
                       onChange={(e) => {
                         setAssignQuotaHolderIds((prev) =>
                           e.target.checked ? [...prev, u.userId] : prev.filter((id) => id !== u.userId)
@@ -954,41 +990,15 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                     />
                     <span>{u.displayName}</span>
                     <small style={{ color: '#94a3b8' }}>@{u.username}</small>
-                    <span className="dm-role-tag owner" style={{ marginLeft: 4, fontSize: 10, padding: '1px 5px' }}>所有者</span>
+                    {!hasUsePerms && (
+                      <span style={{ fontSize: 11, color: '#ef4444', marginLeft: 4 }}>(无使用权)</span>
+                    )}
                   </label>
-                ))}
-              </div>
-            )}
-
-            {/* 配额模式选择 */}
-            <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid #f1f5f9' }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>配额分配模式</div>
-              <div style={{ display: 'flex', gap: 16 }}>
-                <label className="dm-form-check">
-                  <input
-                    type="radio"
-                    name="quotaMode"
-                    checked={assignQuotaMode === 'shared'}
-                    onChange={() => setAssignQuotaMode('shared')}
-                  />
-                  <span>
-                    <strong>所有者均分</strong>
-                    <span style={{ color: '#64748b', fontSize: 11, marginLeft: 4 }}>配额在所有所有者间平均分配</span>
-                  </span>
-                </label>
-                <label className="dm-form-check">
-                  <input
-                    type="radio"
-                    name="quotaMode"
-                    checked={assignQuotaMode === 'exclusive'}
-                    onChange={() => setAssignQuotaMode('exclusive')}
-                  />
-                  <span>
-                    <strong>配额占用者独占</strong>
-                    <span style={{ color: '#64748b', fontSize: 11, marginLeft: 4 }}>配额占用者独享其配额，不参与均分</span>
-                  </span>
-                </label>
-              </div>
+                );
+              })}
+              {users.filter((u) => u.role !== 'admin').length === 0 && (
+                <div style={{ fontSize: 12, color: '#94a3b8' }}>暂无普通用户</div>
+              )}
             </div>
           </div>
 

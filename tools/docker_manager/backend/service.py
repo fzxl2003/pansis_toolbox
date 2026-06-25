@@ -184,7 +184,7 @@ def init_docker_database() -> None:
                 -- 资源多角色关系表（多所有者、查看者、创建者、配额占用者）
                 -- resource_type: container | image | volume
                 -- role: owner | viewer | creator | quota_holder
-                -- quota_holder: 配额占用者，必须同时具备 owner 角色
+                -- quota_holder: 配额占用者，资源大小在所有 quota_holder 间均分
                 CREATE TABLE IF NOT EXISTS docker_resource_roles (
                     id TEXT PRIMARY KEY,
                     server_id TEXT NOT NULL,
@@ -197,8 +197,8 @@ def init_docker_database() -> None:
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
                 );
 
-                -- 资源配额模式表（记录每个服务器每种资源类型的默认配额模式）
-                -- quota_mode: shared（所有者均分）| exclusive（配额占用者独占）
+                -- 资源配额模式表（已弃用：配额占用者统一均分，不再有模式区分）
+                -- 保留表结构以兼容旧数据库，不再读写
                 CREATE TABLE IF NOT EXISTS docker_server_quota_mode (
                     server_id TEXT NOT NULL,
                     resource_type TEXT NOT NULL,   -- container | image | volume
@@ -264,6 +264,81 @@ def _now() -> str:
 
 def _new_id() -> str:
     return secrets.token_hex(12)
+
+
+def _parse_size_to_gb(size_str: str) -> float:
+    """将 Docker 输出的人类可读大小（如 '1.23GB', '456MB', '100kB'）转为 GB 浮点数。"""
+    s = size_str.strip().upper()
+    if not s:
+        return 0.0
+    # 处理 "1.23GB" / "456MB" / "100KB" / "1.5B" 等格式
+    # 注意：必须按单位长度从长到短匹配，否则 "B" 会先匹配到 "1.23GB"
+    units = {
+        "TB": 1024.0,
+        "GB": 1.0,
+        "MB": 1.0 / 1024,
+        "KB": 1.0 / (1024 ** 2),
+        "B": 1.0 / (1024 ** 3),
+    }
+    for unit, factor in units.items():
+        if s.endswith(unit):
+            try:
+                return float(s[:-len(unit)].strip()) * factor
+            except ValueError:
+                continue  # 解析失败则继续尝试其他单位
+    # 无单位时尝试直接解析为字节
+    try:
+        return float(s) / (1024 ** 3)
+    except ValueError:
+        return 0.0
+
+
+def _record_resource_creator(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_ref: str,
+    user_id: str,
+) -> None:
+    """记录资源的创建者+所有者角色（创建资源时自动调用）。
+
+    - 写入 docker_resource_roles: creator 和 owner 角色
+    - 同步旧 _meta 表（兼容旧查询逻辑）
+    - 若已有 creator 记录则保留旧的（不覆盖）
+    """
+    now = _now()
+    # 写入 creator 角色（若已存在则跳过）
+    existing_creator = conn.execute(
+        "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type=? AND resource_ref=? AND role='creator'",
+        (server_id, resource_type, resource_ref),
+    ).fetchone()
+    if not existing_creator:
+        conn.execute(
+            "INSERT OR IGNORE INTO docker_resource_roles (id, server_id, resource_type, resource_ref, user_id, role, assigned_at) VALUES (?,?,?,?,?,?,?)",
+            (_new_id(), server_id, resource_type, resource_ref, user_id, "creator", now),
+        )
+    # 写入 owner 角色（若已存在则跳过）
+    existing_owner = conn.execute(
+        "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type=? AND resource_ref=? AND user_id=? AND role='owner'",
+        (server_id, resource_type, resource_ref, user_id),
+    ).fetchone()
+    if not existing_owner:
+        conn.execute(
+            "INSERT OR IGNORE INTO docker_resource_roles (id, server_id, resource_type, resource_ref, user_id, role, assigned_at) VALUES (?,?,?,?,?,?,?)",
+            (_new_id(), server_id, resource_type, resource_ref, user_id, "owner", now),
+        )
+    # 写入 quota_holder 角色（创建时默认创建者为配额占用者，若已存在则跳过）
+    existing_qh = conn.execute(
+        "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type=? AND resource_ref=? AND role='quota_holder'",
+        (server_id, resource_type, resource_ref),
+    ).fetchone()
+    if not existing_qh:
+        conn.execute(
+            "INSERT OR IGNORE INTO docker_resource_roles (id, server_id, resource_type, resource_ref, user_id, role, assigned_at) VALUES (?,?,?,?,?,?,?)",
+            (_new_id(), server_id, resource_type, resource_ref, user_id, "quota_holder", now),
+        )
+    # 同步旧 _meta 表
+    _sync_legacy_meta(conn, server_id, resource_type, resource_ref, user_id, now)
 
 
 def _permission_level(level: str) -> int:
@@ -605,6 +680,53 @@ def list_servers(user: User) -> list[dict[str, Any]]:
     return result
 
 
+def check_servers_status(user: User) -> dict[str, str]:
+    """检测所有可见服务器的 SSH 连接状态（在线/离线）。
+
+    使用短超时（5 秒）做快速连接测试，返回 {server_id: "online"|"offline"} 映射。
+    """
+    init_docker_database()
+    try:
+        import paramiko
+    except ImportError:
+        return {}
+
+    # 获取用户可见的服务器列表
+    with get_connection() as conn:
+        all_rows = conn.execute("SELECT * FROM docker_servers ORDER BY name").fetchall()
+        visible_rows = []
+        for row in all_rows:
+            level = _get_user_permission(conn, row["id"], user)
+            if _permission_level(level) >= _permission_level("view"):
+                visible_rows.append(row)
+
+    statuses: dict[str, str] = {}
+    for row in visible_rows:
+        srv_id = row["id"]
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        password = _decrypt(row["ssh_password_encrypted"])
+        try:
+            client.connect(
+                hostname=row["host"],
+                port=row["port"],
+                username=row["ssh_username"],
+                password=password,
+                timeout=5,
+                banner_timeout=5,
+                auth_timeout=5,
+            )
+            statuses[srv_id] = "online"
+            client.close()
+        except Exception:
+            statuses[srv_id] = "offline"
+            try:
+                client.close()
+            except Exception:
+                pass
+    return statuses
+
+
 def get_server(server_id: str, user: User, min_level: str = "view") -> dict[str, Any]:
     """获取单个服务器信息（含权限校验）"""
     init_docker_database()
@@ -926,6 +1048,15 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
 
     if code != 0:
         raise ToolboxError("PULL_FAILED", f"镜像拉取失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
+
+    # 记录创建者+所有者（image_ref 使用 repo:tag 格式）
+    image_ref = image_ref.strip()
+    # 兼容不带 tag 的写法：docker pull nginx → nginx:latest
+    if ":" not in image_ref.split("/")[-1]:
+        image_ref = f"{image_ref}:latest"
+    with get_connection() as conn:
+        _record_resource_creator(conn, server_id, "image", image_ref, user.id)
+
     return {"success": True, "output": stdout + stderr}
 
 
@@ -2296,13 +2427,6 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
             elif r["role"] == "quota_holder":
                 roles_map[key]["quotaHolderUserIds"].append(r["user_id"])
 
-        # 读取各资源类型的配额模式
-        quota_mode_rows = conn.execute(
-            "SELECT resource_type, quota_mode FROM docker_server_quota_mode WHERE server_id=?",
-            (server_id,),
-        ).fetchall()
-        quota_mode_map: dict[str, str] = {r["resource_type"]: r["quota_mode"] for r in quota_mode_rows}
-
         # 兼容旧数据：从旧 _meta 表读取 owner（迁移显示）
         img_meta = {r["image_ref"]: r["owner_user_id"] for r in
                     conn.execute("SELECT image_ref, owner_user_id FROM docker_images_meta WHERE server_id=?", (server_id,)).fetchall()}
@@ -2318,8 +2442,7 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
         if legacy_owner and legacy_owner not in base["ownerUserIds"]:
             base["ownerUserIds"] = [legacy_owner] + base["ownerUserIds"]
         platform_managed = bool(base["ownerUserIds"] or base["viewerUserIds"] or base["creatorUserId"] or legacy_owner)
-        quota_mode = quota_mode_map.get(rtype, "shared")
-        return {**base, "platformManaged": platform_managed, "quotaMode": quota_mode}
+        return {**base, "platformManaged": platform_managed}
 
     client = _ssh_connect(row)
     try:
@@ -2381,21 +2504,19 @@ def assign_resource_roles(
     creator_user_id: str,
     user: User,
     quota_holder_user_ids: list[str] | None = None,
-    quota_mode: str | None = None,
 ) -> dict[str, Any]:
     """
     设置服务器资源的多角色绑定（管理员专用）。
     - owner_user_ids: 所有者列表（可多人）
     - viewer_user_ids: 查看者列表（可多人）
     - creator_user_id: 创建者（唯一，传 "" 表示不设置）
-    - quota_holder_user_ids: 配额占用者（必须是 owner 的子集，exclusive 模式下独占配额）
-    - quota_mode: 配额模式，'shared'（所有者均分）或 'exclusive'（配额占用者独占）
+    - quota_holder_user_ids: 配额占用者（可多人，无需是所有者）
 
     逻辑：
     - 创建者默认拥有所有者权限（即同时出现在 owner 角色中）
     - 如果管理员从 owner_user_ids 中移除创建者，创建者失去所有者权限（但 creator 角色保留）
     - viewer 不需要额外 owner 权限
-    - quota_holder 必须在 owner_user_ids 中
+    - quota_holder 不需要是 owner（配额占用者独立于所有者）
     """
     init_docker_database()
     if user.role != "admin":
@@ -2405,18 +2526,6 @@ def assign_resource_roles(
 
     if quota_holder_user_ids is None:
         quota_holder_user_ids = []
-    # 校验：quota_holder 必须是 owner 的子集
-    owner_set = set(owner_user_ids)
-    for qh in quota_holder_user_ids:
-        if qh and qh not in owner_set:
-            raise ToolboxError(
-                "INVALID_QUOTA_HOLDER",
-                f"配额占用者 {qh} 必须同时是所有者",
-                status_code=400,
-                tool_id=TOOL_ID,
-            )
-    if quota_mode and quota_mode not in {"shared", "exclusive"}:
-        raise ToolboxError("INVALID_QUOTA_MODE", "配额模式必须为 shared 或 exclusive", status_code=400, tool_id=TOOL_ID)
 
     now = _now()
 
@@ -2473,27 +2582,9 @@ def assign_resource_roles(
         # 合并：使用已有 creator（如果本次未传）
         effective_creator = creator_user_id or (existing_creator["user_id"] if existing_creator else "")
 
-        # 更新配额模式（若传入）
-        if quota_mode:
-            conn.execute(
-                """INSERT INTO docker_server_quota_mode (server_id, resource_type, quota_mode, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(server_id, resource_type) DO UPDATE SET
-                       quota_mode = excluded.quota_mode,
-                       updated_at = excluded.updated_at""",
-                (server_id, resource_type, quota_mode, now),
-            )
-
         # 同步旧 _meta 表（使用第一个 owner 兼容旧查询逻辑）
         first_owner = owner_user_ids[0] if owner_user_ids else ""
         _sync_legacy_meta(conn, server_id, resource_type, resource_ref, first_owner, now)
-
-        # 读取当前配额模式
-        qm_row = conn.execute(
-            "SELECT quota_mode FROM docker_server_quota_mode WHERE server_id=? AND resource_type=?",
-            (server_id, resource_type),
-        ).fetchone()
-        effective_quota_mode = qm_row["quota_mode"] if qm_row else "shared"
 
     return {
         "success": True,
@@ -2503,7 +2594,6 @@ def assign_resource_roles(
         "ownerUserIds": owner_user_ids,
         "viewerUserIds": viewer_user_ids,
         "quotaHolderUserIds": quota_holder_user_ids,
-        "quotaMode": effective_quota_mode,
         "creatorUserId": effective_creator or None,
         "assignedAt": now,
     }
@@ -2750,10 +2840,10 @@ def rescan_server_cuda(server_id: str, user: User) -> dict[str, Any]:
 def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
     """
     获取当前用户在指定服务器上的资源使用概览：
-    - 卷配额（总量 / 已用 / 剩余；含配额占用者独占部分 vs 共享部分）
+    - 卷配额（总量 / 已用 / 剩余；按配额占用者均分计算）
     - 挂载路径的磁盘空间（总量 / 剩余 / 自己已用 / 他人已用）
     - 用户可用的 CUDA GPU 列表
-    - 各资源类型配额模式
+    - 镜像配额（总量 / 已用 / 剩余；按配额占用者均分计算）
     """
     init_docker_database()
     with get_connection() as conn:
@@ -2761,75 +2851,39 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
         srv_row = _get_server_row(conn, server_id)
         perms = _get_user_perms(conn, server_id, user)
 
-        # ---------- 卷配额 ----------
+        # ---------- 卷配额（配额占用者均分） ----------
         vol_quota_gb = float(perms.get("vol_quota_gb", 0))  # 0 = 不限
-        vol_used_self = conn.execute(
-            "SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=? AND owner_user_id=?",
-            (server_id, user.id),
-        ).fetchone()["s"]
         vol_used_total = conn.execute(
             "SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=?",
             (server_id,),
         ).fetchone()["s"]
-        vol_remaining = max(0.0, vol_quota_gb - vol_used_self) if vol_quota_gb > 0 else None
 
-        # ---------- 配额占用者统计 ----------
-        # 找出当前用户是哪些资源的 quota_holder
-        quota_holder_refs = conn.execute(
-            """SELECT resource_ref FROM docker_resource_roles
-               WHERE server_id=? AND resource_type='volume' AND user_id=? AND role='quota_holder'""",
+        # 新均分逻辑：对于用户是 quota_holder 的每个卷，按该卷的 quota_holder 数量均分
+        # vol_used_self = Σ (volume_size / num_quota_holders)
+        user_qh_volumes = conn.execute(
+            """SELECT r.resource_ref FROM docker_resource_roles r
+               WHERE r.server_id=? AND r.resource_type='volume' AND r.user_id=? AND r.role='quota_holder'""",
             (server_id, user.id),
         ).fetchall()
-        quota_holder_ref_set = {r["resource_ref"] for r in quota_holder_refs}
-
-        # 计算以配额占用者身份的卷使用量（仅该用户持有 quota_holder 的卷）
-        vol_quota_holder_used_gb: float = 0.0
-        if quota_holder_ref_set:
-            # 通过 owner 关联统计 quota_holder 持有卷的大小
-            placeholders = ",".join("?" * len(quota_holder_ref_set))
-            qh_row = conn.execute(
-                f"SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=? AND volume_name IN ({placeholders})",
-                [server_id, *quota_holder_ref_set],
+        vol_used_self: float = 0.0
+        for row in user_qh_volumes:
+            vol_name = row["resource_ref"]
+            # 该卷的 quota_holder 数量
+            qh_count_row = conn.execute(
+                """SELECT COUNT(DISTINCT user_id) as cnt FROM docker_resource_roles
+                   WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND role='quota_holder'""",
+                (server_id, vol_name),
             ).fetchone()
-            vol_quota_holder_used_gb = float(qh_row["s"])
-
-        # 所有服务器上被标记为 quota_holder 的卷（被别人独占）
-        all_quota_holder_refs = conn.execute(
-            """SELECT resource_ref FROM docker_resource_roles
-               WHERE server_id=? AND resource_type='volume' AND role='quota_holder'""",
-            (server_id,),
-        ).fetchall()
-        all_quota_holder_ref_set = {r["resource_ref"] for r in all_quota_holder_refs}
-
-        # 被 quota_holder 独占的总卷大小
-        vol_exclusive_used_gb: float = 0.0
-        if all_quota_holder_ref_set:
-            placeholders2 = ",".join("?" * len(all_quota_holder_ref_set))
-            exc_row = conn.execute(
-                f"SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=? AND volume_name IN ({placeholders2})",
-                [server_id, *all_quota_holder_ref_set],
+            qh_count = max(1, qh_count_row["cnt"])
+            # 该卷的大小
+            vol_size_row = conn.execute(
+                "SELECT COALESCE(size_gb, 0) as s FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
+                (server_id, vol_name),
             ).fetchone()
-            vol_exclusive_used_gb = float(exc_row["s"])
+            if vol_size_row:
+                vol_used_self += vol_size_row["s"] / qh_count
 
-        # 共享配额部分（非 quota_holder 独占的部分）
-        vol_shared_used_gb = vol_used_total - vol_exclusive_used_gb
-
-        # ---------- 配额模式 ----------
-        quota_mode_rows = conn.execute(
-            "SELECT resource_type, quota_mode FROM docker_server_quota_mode WHERE server_id=?",
-            (server_id,),
-        ).fetchall()
-        quota_mode_map: dict[str, str] = {r["resource_type"]: r["quota_mode"] for r in quota_mode_rows}
-
-        # 统计当前服务器各资源类型的所有者数量（用于 shared 模式均分）
-        owner_count_rows = conn.execute(
-            """SELECT resource_type, COUNT(DISTINCT user_id) as cnt
-               FROM docker_resource_roles
-               WHERE server_id=? AND role='owner'
-               GROUP BY resource_type""",
-            (server_id,),
-        ).fetchall()
-        owner_count_map: dict[str, int] = {r["resource_type"]: r["cnt"] for r in owner_count_rows}
+        vol_remaining = max(0.0, vol_quota_gb - vol_used_self) if vol_quota_gb > 0 else None
 
         # ---------- 挂载路径磁盘空间 ----------
         path_whitelist: list[str] = perms.get("ctr_path_whitelist", [])
@@ -2876,6 +2930,61 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
             finally:
                 client.close()
 
+        # ---------- 镜像配额（配额占用者均分） ----------
+        img_quota_gb = float(perms.get("img_quota_gb", 0))  # 0 = 不限
+        # 获取用户作为 quota_holder 的镜像 ref 集合
+        user_qh_img_refs: set[str] = set()
+        for r in conn.execute(
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role='quota_holder'",
+            (server_id, user.id),
+        ).fetchall():
+            user_qh_img_refs.add(r["resource_ref"])
+        # 构建镜像 ref → quota_holder 数量的映射（仅用户是 quota_holder 的镜像）
+        img_qh_counts: dict[str, int] = {}
+        for ref in user_qh_img_refs:
+            cnt_row = conn.execute(
+                """SELECT COUNT(DISTINCT user_id) as cnt FROM docker_resource_roles
+                   WHERE server_id=? AND resource_type='image' AND resource_ref=? AND role='quota_holder'""",
+                (server_id, ref),
+            ).fetchone()
+            img_qh_counts[ref] = max(1, cnt_row["cnt"])
+
+        # SSH 获取镜像列表及大小
+        img_used_self_gb = 0.0
+        img_used_total_gb = 0.0
+        img_count_self = 0
+        img_count_total = 0
+        try:
+            img_client = _ssh_connect(srv_row)
+            try:
+                img_out, _, img_rc = _ssh_exec(
+                    img_client,
+                    'docker images --format \'{{.Repository}}:{{.Tag}}\t{{.Size}}\'',
+                    timeout=15,
+                )
+            finally:
+                img_client.close()
+            if img_rc == 0:
+                for line in img_out.strip().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 2:
+                        continue
+                    ref, size_str = parts[0], parts[1]
+                    size_gb = _parse_size_to_gb(size_str)
+                    img_used_total_gb += size_gb
+                    img_count_total += 1
+                    # 新均分逻辑：用户是 quota_holder 时按配额占用者数量均分
+                    if ref in user_qh_img_refs:
+                        img_used_self_gb += size_gb / img_qh_counts[ref]
+                        img_count_self += 1
+        except ToolboxError:
+            pass  # SSH 连接失败时静默，不影响其他概览数据
+
+        img_remaining_gb = max(0.0, img_quota_gb - img_used_self_gb) if img_quota_gb > 0 else None
+
         # ---------- CUDA 权限 ----------
         server_gpu_info: list[dict[str, Any]] = json.loads(srv_row["gpu_info"]) if srv_row["gpu_info"] else []
         cuda_available = bool(srv_row["cuda_available"])
@@ -2900,12 +3009,14 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
             "usedSelfGb": vol_used_self,
             "usedTotalGb": vol_used_total,
             "remainingGb": vol_remaining,
-            # 配额占用者独占使用量（本用户作为 quota_holder）
-            "quotaHolderUsedGb": vol_quota_holder_used_gb,
-            # 全服务器 quota_holder 独占总量
-            "exclusiveUsedGb": vol_exclusive_used_gb,
-            # 共享区使用量
-            "sharedUsedGb": max(0.0, vol_shared_used_gb),
+        },
+        "image": {
+            "quotaGb": img_quota_gb,
+            "usedSelfGb": img_used_self_gb,
+            "usedTotalGb": img_used_total_gb,
+            "remainingGb": img_remaining_gb,
+            "countSelf": img_count_self,
+            "countTotal": img_count_total,
         },
         "paths": paths_info,
         "cuda": {
@@ -2915,6 +3026,4 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
             "totalGpuCount": gpu_total_count,
             "allGpuInfo": server_gpu_info,
         },
-        "quotaModes": quota_mode_map,
-        "ownerCounts": owner_count_map,
     }

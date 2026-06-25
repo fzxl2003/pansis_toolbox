@@ -219,6 +219,59 @@
 .dm-status.unknown  { background: #f1f5f9; color: #475569; }
 .dm-status.unknown .dm-status-dot  { background: #94a3b8; }
 
+/* ── Server Status Badges（服务器连接状态）── */
+
+.dm-status-badge {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+font-size: 11px;
+font-weight: 600;
+padding: 2px 8px;
+border-radius: 999px;
+white-space: nowrap;
+}
+
+.dm-status-badge .dm-status-dot {
+width: 6px;
+height: 6px;
+border-radius: 50%;
+}
+
+.dm-status-badge.online {
+background: #d1fae5;
+color: #065f46;
+}
+
+.dm-status-badge.online .dm-status-dot {
+background: #10b981;
+animation: dm-pulse 2s ease-in-out infinite;
+}
+
+.dm-status-badge.offline {
+background: #fee2e2;
+color: #991b1b;
+}
+
+.dm-status-badge.offline .dm-status-dot {
+background: #ef4444;
+}
+
+.dm-status-badge.checking {
+background: #f1f5f9;
+color: #475569;
+}
+
+.dm-status-badge.checking .dm-status-dot {
+background: #94a3b8;
+animation: dm-pulse 1s ease-in-out infinite;
+}
+
+@keyframes dm-pulse {
+0%, 100% { opacity: 1; }
+50% { opacity: 0.4; }
+}
+
 /* ── Modal ── */
 
 .dm-modal-backdrop {

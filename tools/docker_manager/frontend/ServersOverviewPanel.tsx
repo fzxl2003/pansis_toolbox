@@ -3,7 +3,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState } from 'react';
-import { ChevronRight, Cpu, Database, HardDrive, Server } from 'lucide-react';
+import { ChevronRight, Cpu, Database, HardDrive, Image as ImageIcon, Server } from 'lucide-react';
 import { apiGet } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
 import { permColor, permLabel, formatSize, API } from './utils';
@@ -141,9 +141,78 @@ function CudaCard({ cuda }: { cuda: ServerResourceOverview['cuda'] }) {
   );
 }
 
+function ImageQuotaCard({ img }: { img: ServerResourceOverview['image'] }) {
+  const unlimited = img.quotaGb === 0;
+  const usedPct = unlimited || img.quotaGb === 0
+    ? null
+    : Math.min(100, (img.usedSelfGb / img.quotaGb) * 100);
+
+  return (
+    <div className="dm-overview-card">
+      <div className="dm-overview-card-header">
+        <ImageIcon size={13} /> 镜像配额
+      </div>
+      <div className="dm-overview-card-body">
+        {unlimited ? (
+          <div className="dm-overview-row">
+            <span className="dm-overview-label">已用（我）</span>
+            <span className="dm-overview-value">{img.countSelf} 个 / {formatSize(img.usedSelfGb)}</span>
+          </div>
+        ) : (
+          <>
+            <div className="dm-overview-row">
+              <span className="dm-overview-label">配额</span>
+              <span className="dm-overview-value">{formatSize(img.quotaGb)}</span>
+            </div>
+            <div className="dm-overview-row">
+              <span className="dm-overview-label">已用</span>
+              <span className="dm-overview-value">{img.countSelf} 个 / {formatSize(img.usedSelfGb)}</span>
+            </div>
+            <div className="dm-overview-row">
+              <span className="dm-overview-label">剩余</span>
+              <span className="dm-overview-value" style={{ color: (img.remainingGb ?? 0) < img.quotaGb * 0.2 ? '#ef4444' : '#22c55e' }}>
+                {img.remainingGb !== null ? formatSize(img.remainingGb) : '不限'}
+              </span>
+            </div>
+            {usedPct !== null && (
+              <div className="dm-overview-progress">
+                <div
+                  className="dm-overview-progress-bar"
+                  style={{
+                    width: `${usedPct}%`,
+                    background: usedPct > 80 ? '#ef4444' : usedPct > 50 ? '#f59e0b' : '#22c55e',
+                  }}
+                />
+              </div>
+            )}
+          </>
+        )}
+        <div className="dm-overview-row" style={{ marginTop: 4 }}>
+          <span className="dm-overview-label" style={{ color: '#94a3b8' }}>全服务器</span>
+          <span className="dm-overview-value" style={{ color: '#94a3b8' }}>{img.countTotal} 个 / {formatSize(img.usedTotalGb)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- 服务器状态徽标 ----
+function ServerStatusBadge({ status }: { status: 'online' | 'offline' | 'checking' | undefined }) {
+  if (status === 'checking') {
+    return <span className="dm-status-badge checking"><span className="dm-status-dot" />检测中</span>;
+  }
+  if (status === 'online') {
+    return <span className="dm-status-badge online"><span className="dm-status-dot" />在线</span>;
+  }
+  if (status === 'offline') {
+    return <span className="dm-status-badge offline"><span className="dm-status-dot" />离线</span>;
+  }
+  return null;
+}
+
 // ---- 单台服务器的资源概览行 ----
 
-function ServerOverviewRow({ server }: { server: DmServer }) {
+function ServerOverviewRow({ server, status }: { server: DmServer; status: 'online' | 'offline' | 'checking' | undefined }) {
   const [overview, setOverview] = useState<ServerResourceOverview | null>(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -177,6 +246,7 @@ function ServerOverviewRow({ server }: { server: DmServer }) {
         <span className="dm-card-title">
           <Server size={15} style={{ display: 'inline', marginRight: 6, verticalAlign: 'middle' }} />
           {server.name}
+          <ServerStatusBadge status={status} />
           {server.cudaAvailable && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
               {(server.gpuInfo && server.gpuInfo.length > 0)
@@ -224,6 +294,7 @@ function ServerOverviewRow({ server }: { server: DmServer }) {
           ) : overview ? (
             <div className="dm-overview-grid">
               <VolumeQuotaCard vol={overview.volume} />
+              <ImageQuotaCard img={overview.image} />
               <PathDiskCard paths={overview.paths} />
               {overview.cuda.serverHasCuda && <CudaCard cuda={overview.cuda} />}
             </div>
@@ -239,12 +310,40 @@ function ServerOverviewRow({ server }: { server: DmServer }) {
 // ---- 主面板 ----
 
 export function ServersOverviewPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
+  const [statuses, setStatuses] = useState<Record<string, 'online' | 'offline'>>({});
+  const [statusLoading, setStatusLoading] = useState(false);
+
+  const loadStatuses = useCallback(async () => {
+    setStatusLoading(true);
+    try {
+      const r = await apiGet<{ statuses: Record<string, 'online' | 'offline'> }>(`${API}/servers/status`);
+      setStatuses(r.statuses);
+    } catch {
+      // 静默失败
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadStatuses(); }, [loadStatuses]);
+
   return (
     <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button className="btn" style={{ fontSize: 12 }} onClick={() => void loadStatuses()} disabled={statusLoading}>
+          {statusLoading ? <Spin /> : null} 刷新连接状态
+        </button>
+      </div>
       {servers.length === 0 ? (
         <div className="dm-empty"><Server size={32} /> 暂无可访问的服务器</div>
       ) : (
-        servers.map((s) => <ServerOverviewRow key={s.id} server={s} />)
+        servers.map((s) => (
+          <ServerOverviewRow
+            key={s.id}
+            server={s}
+            status={statusLoading && !statuses[s.id] ? 'checking' : statuses[s.id]}
+          />
+        ))
       )}
     </div>
   );

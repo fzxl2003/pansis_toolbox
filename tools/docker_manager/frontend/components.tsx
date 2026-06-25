@@ -12,6 +12,7 @@ import {
   Cpu,
   Database,
   HardDrive,
+  Image as ImageIcon,
   Loader2,
   Server,
   X,
@@ -225,15 +226,20 @@ export function ResourceUsagePanel({
   if (!overview && !loading) return null;
 
   const vol = overview?.volume;
+  const img = overview?.image;
   const cuda = overview?.cuda;
-  const quotaMode = overview?.quotaModes?.[resourceType] ?? 'shared';
 
   const volQuota = vol?.quotaGb ?? 0;
   const volUsed = vol?.usedSelfGb ?? 0;
-  const volExclusive = vol?.exclusiveUsedGb ?? 0;
-  const volShared = vol?.sharedUsedGb ?? 0;
   const volTotal = vol?.usedTotalGb ?? 0;
   const volRemaining = vol?.remainingGb ?? null;
+
+  const imgQuota = img?.quotaGb ?? 0;
+  const imgUsed = img?.usedSelfGb ?? 0;
+  const imgTotal = img?.usedTotalGb ?? 0;
+  const imgRemaining = img?.remainingGb ?? null;
+  const imgCountSelf = img?.countSelf ?? 0;
+  const imgCountTotal = img?.countTotal ?? 0;
 
   const gpuTotal = cuda?.totalGpuCount ?? 0;
   const gpuAllowed = cuda?.allowedGpuIndices?.length ?? 0;
@@ -254,6 +260,11 @@ export function ResourceUsagePanel({
                 <Cpu size={11} /> GPU {gpuAllowed}/{gpuTotal}
               </span>
             )}
+            {resourceType === 'image' && (
+              <span className={`dm-usage-chip${imgQuota > 0 && imgRemaining !== null && imgRemaining < imgQuota * 0.2 ? ' warn' : ''}`}>
+                <ImageIcon size={11} /> {imgCountSelf} 个 / {fmtGb(imgUsed)}{imgQuota > 0 ? `/${fmtGb(imgQuota)}` : ''}
+              </span>
+            )}
             {volQuota > 0 && (
               <span className={`dm-usage-chip${volRemaining !== null && volRemaining < volQuota * 0.2 ? ' warn' : ''}`}>
                 <HardDrive size={11} /> {fmtGb(volUsed)}/{fmtGb(volQuota)}
@@ -271,27 +282,55 @@ export function ResourceUsagePanel({
             </div>
           ) : overview ? (
             <div className="dm-resource-usage-content">
+              {/* 镜像配额区域（镜像 Tab 或有镜像配额时显示） */}
+              {resourceType === 'image' && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title">
+                    <ImageIcon size={13} />
+                    镜像配额
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>我的镜像</span>
+                    <span>{imgCountSelf} 个 / {fmtGb(imgUsed)}</span>
+                  </div>
+                  <div className="dm-usage-row muted">
+                    <span>全服务器</span>
+                    <span>{imgCountTotal} 个 / {fmtGb(imgTotal)}</span>
+                  </div>
+                  {imgQuota > 0 && (
+                    <>
+                      <div className="dm-usage-row">
+                        <span>配额上限</span>
+                        <span className="dm-usage-quota">{fmtGb(imgQuota)}</span>
+                      </div>
+                      <div className="dm-usage-row">
+                        <span>剩余</span>
+                        <span style={{ color: (imgRemaining ?? 0) < imgQuota * 0.2 ? '#ef4444' : '#22c55e' }}>{fmtGb(imgRemaining)}</span>
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <ProgressBar segments={[
+                          { value: imgUsed, max: imgQuota, color: '#7c3aed', label: '我的镜像' },
+                        ]} />
+                        <div className="dm-progress-legend">
+                          <span><span className="dm-legend-dot" style={{ background: '#7c3aed' }} />已用</span>
+                          <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {fmtGb(imgRemaining)}</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
               {/* 卷配额区域 */}
               {volQuota > 0 && (
                 <div className="dm-usage-section">
                   <div className="dm-usage-section-title">
                     <Database size={13} />
                     卷配额
-                    <span className="dm-usage-mode-tag">{quotaMode === 'exclusive' ? '独占模式' : '均分模式'}</span>
                   </div>
                   <div className="dm-usage-row">
                     <span>我的占用</span>
                     <span>{fmtGb(volUsed)}</span>
-                  </div>
-                  {quotaMode === 'exclusive' && volExclusive > 0 && (
-                    <div className="dm-usage-row accent">
-                      <span>独占配额使用</span>
-                      <span>{fmtGb(volExclusive)}</span>
-                    </div>
-                  )}
-                  <div className="dm-usage-row muted">
-                    <span>共享区占用</span>
-                    <span>{fmtGb(volShared)}</span>
                   </div>
                   <div className="dm-usage-row muted">
                     <span>总占用</span>
@@ -303,14 +342,10 @@ export function ResourceUsagePanel({
                   </div>
                   <div style={{ marginTop: 8 }}>
                     <ProgressBar segments={[
-                      { value: volExclusive, max: volQuota, color: '#f59e0b', label: '独占配额' },
-                      { value: volShared, max: volQuota, color: '#6366f1', label: '共享占用' },
+                      { value: volUsed, max: volQuota, color: '#6366f1', label: '我的占用' },
                     ]} />
                     <div className="dm-progress-legend">
-                      {volExclusive > 0 && (
-                        <span><span className="dm-legend-dot" style={{ background: '#f59e0b' }} />独占</span>
-                      )}
-                      <span><span className="dm-legend-dot" style={{ background: '#6366f1' }} />共享</span>
+                      <span><span className="dm-legend-dot" style={{ background: '#6366f1' }} />已用</span>
                       <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {fmtGb(volRemaining)}</span>
                     </div>
                   </div>

@@ -22,6 +22,14 @@ export type DmServer = {
   cudaAvailable?: boolean;
   gpuCount?: number;
   gpuInfo?: GpuInfo[];
+  // 当前用户在该服务器上的细粒度权限标志（由后端 list_servers 附带）
+  perms?: {
+    img_manage_all?: boolean;
+    img_copy?: boolean;
+    img_use?: boolean;
+    ctr_manage_all?: boolean;
+    vol_delete_all?: boolean;
+  };
 };
 
 // 细粒度权限结构
@@ -32,7 +40,8 @@ export type UserPerms = {
   // 镜像权限
   img_use: boolean;         // 是否有权使用（查看/访问）镜像
   img_pull: boolean;        // 拉取新镜像
-  img_delete: boolean;      // 删除他人镜像
+  img_view_all: boolean;    // 查看所有用户的镜像
+  img_manage_all: boolean;  // 管理所有用户的镜像（删除权）
   img_copy: boolean;        // 跨服务器复制镜像
   img_quota_gb: number;     // 镜像空间配额(GB，0=不限)
   // 容器权限
@@ -59,7 +68,7 @@ export type UserPerms = {
 
 export const DEFAULT_PERMS: UserPerms = {
   server_visible: false,
-  img_use: false, img_pull: false, img_delete: false, img_copy: false, img_quota_gb: 0,
+  img_use: false, img_pull: false, img_view_all: false, img_manage_all: false, img_copy: false, img_quota_gb: 0,
   ctr_use: false, ctr_view_all: false,
   ctr_manage_all: false,
   ctr_create: false, ctr_create_template: false,
@@ -93,6 +102,7 @@ export type DockerImage = {
   tag: string;
   size: string;
   created: string;
+  canManage?: boolean;  // 当前用户是否可管理该镜像（删除/复制）
 };
 
 export type DockerContainer = {

@@ -949,7 +949,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
   const canManage = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
-    return me.role === 'admin' || s?.permissionLevel === 'manage' || quota?.canManageContainer;
+    return me.role === 'admin' || s?.permissionLevel === 'manage' || !!s?.perms?.ctr_manage_all || !!quota?.canManageContainer;
   };
 
   const load = useCallback(async (sid: string) => {

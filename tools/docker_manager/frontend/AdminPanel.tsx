@@ -491,7 +491,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
       setPermsForm({
         server_visible: true,
         // 镜像：全权限
-        img_use: true, img_pull: true, img_delete: true, img_copy: true, img_quota_gb: 0,
+        img_use: true, img_pull: true, img_view_all: true, img_manage_all: true, img_copy: true, img_quota_gb: 0,
         // 容器：全权限
         ctr_use: true, ctr_view_all: true,
         ctr_manage_all: true,
@@ -1145,11 +1145,29 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="执行 docker pull 从远程仓库拉取新镜像到此服务器"
               />
               <PermCheck
-                checked={permsForm.img_delete}
-                onChange={pf('img_delete')}
+                checked={permsForm.img_manage_all}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setPermsForm((prev) => ({
+                    ...prev,
+                    img_manage_all: checked,
+                    // 勾选「管理所有」时自动勾选「查看所有」
+                    img_view_all: checked ? true : prev.img_view_all,
+                  }));
+                }}
                 disabled={!permsForm.img_use}
-                label="删除他人镜像"
-                tooltip="可删除非自己创建的镜像（执行 docker rmi）；自己创建的镜像默认可删"
+                label={<strong>管理所有用户的镜像</strong>}
+                tooltip="可删除任意用户的镜像（执行 docker rmi）；勾选后「查看所有用户的镜像」将自动开启"
+              />
+              <PermCheck
+                checked={permsForm.img_view_all || permsForm.img_manage_all}
+                onChange={(e) => {
+                  if (permsForm.img_manage_all) return; // 管理所有时不可单独关闭
+                  setPermsForm((prev) => ({ ...prev, img_view_all: e.target.checked }));
+                }}
+                disabled={!permsForm.img_use || permsForm.img_manage_all}
+                label="查看所有用户的镜像"
+                tooltip="可看到所有用户的镜像（不受资源角色分配限制）；开启「管理所有用户的镜像」时此项自动开启且不可单独关闭"
               />
               <PermCheck
                 checked={permsForm.img_copy}

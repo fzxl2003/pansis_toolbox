@@ -59,7 +59,7 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
   const canManage = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
-    return me.role === 'admin' || s?.permissionLevel === 'manage';
+    return me.role === 'admin' || s?.permissionLevel === 'manage' || !!s?.perms?.img_manage_all;
   };
 
   const canUse = (sid: string | null) => {
@@ -193,9 +193,6 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
           <button className="btn btn-primary" onClick={doPull} disabled={pulling || !pullRef.trim()}>
             {pulling ? <Spin /> : <Download size={14} />} 拉取
           </button>
-          {canManage(serverId) && servers.length > 1 && (
-            <button className="btn" onClick={() => setShowCopy(true)}><Copy size={14} /> 跨服务器复制</button>
-          )}
           <button className="btn" onClick={doRefresh} disabled={loading || containersLoading}>
             <RefreshCw size={14} /> 刷新
           </button>
@@ -270,12 +267,17 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
                     )}
                   </span>
                   <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    {canManage(serverId) && !hasContainers && (
+                    {img.canManage && servers.length > 1 && (
+                      <button className="dm-btn-icon" title="跨服务器复制" onClick={() => { setCopyRef(`${img.repo}:${img.tag}`); setCopyDst(''); setShowCopy(true); }}>
+                        <Copy size={13} />
+                      </button>
+                    )}
+                    {img.canManage && !hasContainers && (
                       <button className="dm-btn-icon danger" title="删除" onClick={() => doDelete(`${img.repo}:${img.tag}`, img)}>
                         <Trash2 size={13} />
                       </button>
                     )}
-                    {canManage(serverId) && hasContainers && (
+                    {img.canManage && hasContainers && (
                       <span
                         title="该镜像正被容器使用，无法删除"
                         style={{ display: 'flex', alignItems: 'center', padding: '3px 4px', color: '#94a3b8', cursor: 'not-allowed' }}
@@ -355,7 +357,7 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
           <Alert type="info">将从当前服务器（{servers.find(s => s.id === serverId)?.name}）通过 SSH 管道传输到目标服务器，大镜像可能耗时较长。</Alert>
           <div className="dm-form-grid">
             <Field label="源镜像（repo:tag）">
-              <input value={copyRef} onChange={(e) => setCopyRef(e.target.value)} placeholder="nginx:latest" />
+              <input value={copyRef} readOnly placeholder="nginx:latest" style={{ background: '#f1f5f9', cursor: 'not-allowed' }} />
             </Field>
             <Field label="目标服务器">
               <select value={copyDst} onChange={(e) => setCopyDst(e.target.value)}>

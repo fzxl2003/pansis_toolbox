@@ -88,7 +88,8 @@ class SetUserPermsPayload(BaseModel):
     # 镜像权限
     img_use: bool = False           # 是否有权使用（查看/访问）镜像（资源角色查看者的前提条件）
     img_pull: bool = False
-    img_delete: bool = False
+    img_view_all: bool = False      # 查看所有用户的镜像
+    img_manage_all: bool = False    # 管理所有用户的镜像（删除权）
     img_copy: bool = False
     img_quota_gb: float = 0.0       # 镜像空间配额(GB，0=不限)
     # 容器权限

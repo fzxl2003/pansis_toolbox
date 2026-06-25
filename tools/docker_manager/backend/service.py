@@ -107,7 +107,8 @@ def init_docker_database() -> None:
                     -- 镜像权限
                     img_use INTEGER NOT NULL DEFAULT 0,      -- 是否有权使用（查看/访问）镜像
                     img_pull INTEGER NOT NULL DEFAULT 0,     -- 拉取新镜像
-                    img_delete INTEGER NOT NULL DEFAULT 0,   -- 删除他人镜像
+                    img_view_all INTEGER NOT NULL DEFAULT 0,  -- 查看所有用户的镜像
+                    img_manage_all INTEGER NOT NULL DEFAULT 0, -- 管理所有用户的镜像（删除权）
                     img_copy INTEGER NOT NULL DEFAULT 0,     -- 跨服务器复制镜像
                     img_quota_gb REAL NOT NULL DEFAULT 0,    -- 镜像空间配额(GB，0=不限)
                     -- 容器权限
@@ -221,8 +222,14 @@ def init_docker_database() -> None:
                 );
                 """
             )
-            # 兼容迁移：为旧版 docker_user_perms 表添加 vol_copy 列（如果不存在）
+            # 兼容迁移：img_delete → img_manage_all + img_view_all
             cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_user_perms)").fetchall()}
+            if "img_manage_all" not in cols and "img_delete" in cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN img_manage_all INTEGER NOT NULL DEFAULT 0")
+                conn.execute("UPDATE docker_user_perms SET img_manage_all = img_delete")
+            if "img_view_all" not in cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN img_view_all INTEGER NOT NULL DEFAULT 0")
+            # 兼容迁移：为旧版 docker_user_perms 表添加 vol_copy 列（如果不存在）
             if "vol_copy" not in cols:
                 conn.execute("ALTER TABLE docker_user_perms ADD COLUMN vol_copy INTEGER NOT NULL DEFAULT 0")
             if "cuda_gpu_indices" not in cols:
@@ -353,7 +360,8 @@ _PERMS_DEFAULTS: dict[str, Any] = {
     # 镜像权限
     "img_use": False,           # 是否有权使用（查看/访问）镜像
     "img_pull": False,          # 拉取新镜像
-    "img_delete": False,        # 删除他人镜像
+    "img_view_all": False,      # 查看所有用户的镜像
+    "img_manage_all": False,    # 管理所有用户的镜像（删除权）
     "img_copy": False,          # 跨服务器复制镜像
     "img_quota_gb": 0.0,        # 镜像空间配额(GB，0=不限)
     # 容器权限
@@ -408,7 +416,8 @@ def _row_to_perms(row: sqlite3.Row) -> dict[str, Any]:
         # 镜像
         "img_use": img_use,
         "img_pull": _b("img_pull"),
-        "img_delete": _b("img_delete"),
+        "img_view_all": _b("img_view_all"),
+        "img_manage_all": _b("img_manage_all") or _b("img_delete"),  # 兼容旧字段 img_delete
         "img_copy": _b("img_copy"),
         "img_quota_gb": _f("img_quota_gb"),
         # 容器
@@ -484,7 +493,7 @@ def _require_perm(conn: sqlite3.Connection, server_id: str, user: User, perm: st
     perms = _get_user_perms(conn, server_id, user)
     if not perms.get(perm, False):
         label_map = {
-            "img_use": "使用镜像", "img_pull": "拉取镜像", "img_delete": "删除镜像", "img_copy": "复制镜像",
+            "img_use": "使用镜像", "img_pull": "拉取镜像", "img_view_all": "查看全部镜像", "img_manage_all": "管理全部镜像", "img_copy": "复制镜像",
             "ctr_use": "使用容器", "ctr_view_all": "查看全部容器",
             "ctr_create": "创建容器",
             "ctr_create_template": "从模板创建容器",
@@ -676,6 +685,21 @@ def list_servers(user: User) -> list[dict[str, Any]]:
             if _permission_level(level) >= _permission_level("view"):
                 srv = _public_server(row)
                 srv["permissionLevel"] = level
+                # 附带当前用户的细粒度权限标志，供前端精确判断各类资源的管理权限
+                if user.role == "admin":
+                    srv["perms"] = {
+                        "img_manage_all": True, "img_copy": True, "img_use": True,
+                        "ctr_manage_all": True, "vol_delete_all": True,
+                    }
+                else:
+                    perms = _get_user_perms(conn, row["id"], user)
+                    srv["perms"] = {
+                        "img_manage_all": bool(perms.get("img_manage_all")),
+                        "img_copy": bool(perms.get("img_copy")),
+                        "img_use": bool(perms.get("img_use")),
+                        "ctr_manage_all": bool(perms.get("ctr_manage_all")),
+                        "vol_delete_all": bool(perms.get("vol_delete_all")),
+                    }
                 result.append(srv)
     return result
 
@@ -818,7 +842,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
             """
             INSERT INTO docker_user_perms (
                 server_id, user_id, server_visible,
-                img_use, img_pull, img_delete, img_copy, img_quota_gb,
+                img_use, img_pull, img_view_all, img_manage_all, img_copy, img_quota_gb,
                 ctr_use, ctr_view_all,
                 ctr_create, ctr_create_template,
                 ctr_manage_all, ctr_path_whitelist, ctr_quota_num,
@@ -828,7 +852,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 updated_at
             ) VALUES (
                 ?, ?, ?,
-                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
@@ -841,7 +865,8 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 server_visible = excluded.server_visible,
                 img_use = excluded.img_use,
                 img_pull = excluded.img_pull,
-                img_delete = excluded.img_delete,
+                img_view_all = excluded.img_view_all,
+                img_manage_all = excluded.img_manage_all,
                 img_copy = excluded.img_copy,
                 img_quota_gb = excluded.img_quota_gb,
                 ctr_use = excluded.ctr_use,
@@ -864,7 +889,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
             """,
             (
                 server_id, target_user_id, b("server_visible"),
-                b("img_use"), b("img_pull"), b("img_delete"), b("img_copy"), img_quota_gb,
+                b("img_use"), b("img_pull"), b("img_view_all"), b("img_manage_all"), b("img_copy"), img_quota_gb,
                 b("ctr_use"), b("ctr_view_all"),
                 b("ctr_create"), b("ctr_create_template"),
                 b("ctr_manage_all"), path_whitelist_json, ctr_quota_num,
@@ -958,8 +983,8 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
     init_docker_database()
     with get_connection() as conn:
         perms = _get_user_perms(conn, server_id, user)
-        # 需要 img_use（或 ctr_view_all 向后兼容）或管理员
-        if user.role != "admin" and not perms.get("img_use") and not perms.get("ctr_view_all"):
+        # 需要 img_use（或 img_view_all / ctr_view_all 向后兼容）或管理员
+        if user.role != "admin" and not perms.get("img_use") and not perms.get("img_view_all") and not perms.get("ctr_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看镜像的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
         # 获取镜像所有权元数据（旧表兼容）
@@ -974,6 +999,15 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
             (server_id, user.id),
         ).fetchall():
             user_accessible_refs.add(r["resource_ref"])
+        # 查询当前用户拥有 owner/creator 角色的镜像 ref（可管理=可删除/复制）
+        user_managed_refs: set[str] = set()
+        for r in conn.execute(
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role IN ('owner','creator')",
+            (server_id, user.id),
+        ).fetchall():
+            user_managed_refs.add(r["resource_ref"])
+        # 是否有全局镜像管理权限
+        has_img_manage_all = user.role == "admin" or bool(perms.get("img_manage_all"))
         # 角色继承：查询用户有访问权的容器，通过缓存表找到这些容器使用的镜像
         # 规则：容器的 viewer/owner/creator 自动继承该容器使用的镜像的查看权
         if user.role != "admin":
@@ -997,7 +1031,7 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
                     [server_id, *accessible_ctrs],
                 ).fetchall():
                     user_accessible_refs.add(r["resource_ref"])
-        view_all = user.role == "admin" or perms.get("ctr_view_all", False)
+        view_all = user.role == "admin" or perms.get("img_view_all", False) or perms.get("ctr_view_all", False)
 
     client = _ssh_connect(row)
     try:
@@ -1023,6 +1057,8 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
         owner = meta_map.get(ref_full) or meta_map.get(img.get("id", ""))
         img["ownerUserId"] = owner  # 兼容旧字段（第一个所有者）
         img["platformManaged"] = owner is not None or ref_full in user_accessible_refs
+        # 当前用户是否可管理该镜像（删除/复制）：全局管理权 或 所有者/创建者
+        img["canManage"] = has_img_manage_all or ref_full in user_managed_refs or owner == user.id
 
         # 访问过滤：view_all 看全部；否则看有角色关联的（owner/viewer/creator 皆可）
         if view_all:
@@ -1061,20 +1097,32 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
 
 
 def delete_image(server_id: str, image_ref: str, user: User, force: bool = False) -> dict[str, Any]:
-    """删除服务器上的 Docker 镜像（需 img_delete 权限，且须是所有者或 ctr_manage_all）"""
+    """删除服务器上的 Docker 镜像（需 img_use 权限，且须是所有者或 img_manage_all）"""
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
-            _require_perm(conn, server_id, user, "img_delete")
             perms = _get_user_perms(conn, server_id, user)
-            # 检查所有权（非 manage_all 时只能删自己的）
-            if not perms.get("ctr_manage_all"):
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_images_meta WHERE server_id = ? AND image_ref = ?",
-                    (server_id, image_ref),
+            # 有 img_manage_all 权限的可删除任意镜像
+            if not perms.get("img_manage_all"):
+                # 没有 img_manage_all 的需要 img_use 权限
+                if not perms.get("img_use"):
+                    raise ToolboxError(
+                        "PERMISSION_DENIED",
+                        "您没有使用镜像的权限，无法删除镜像",
+                        status_code=403, tool_id=TOOL_ID,
+                    )
+                # 且只能删除自己拥有/创建的镜像
+                role_row = conn.execute(
+                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                    (server_id, image_ref, user.id),
                 ).fetchone()
-                if meta and meta["owner_user_id"] != user.id:
-                    raise ToolboxError("PERMISSION_DENIED", "您只能删除自己拥有的镜像", status_code=403, tool_id=TOOL_ID)
+                if not role_row:
+                    meta = conn.execute(
+                        "SELECT owner_user_id FROM docker_images_meta WHERE server_id = ? AND image_ref = ?",
+                        (server_id, image_ref),
+                    ).fetchone()
+                    if not meta or meta["owner_user_id"] != user.id:
+                        raise ToolboxError("PERMISSION_DENIED", "您只能删除自己拥有的镜像，如需删除他人镜像请申请「管理所有用户的镜像」权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     client = _ssh_connect(row)
@@ -1104,7 +1152,38 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
     init_docker_database()
     with get_connection() as conn:
         _require_permission(conn, src_server_id, user, "view")
-        _require_permission(conn, dst_server_id, user, "use")
+        if user.role != "admin":
+            # 目标服务器需要 img_copy 权限（跨服务器复制镜像）
+            dst_perms = _get_user_perms(conn, dst_server_id, user)
+            if not dst_perms.get("img_copy"):
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您在目标服务器没有「跨服务器复制镜像」权限",
+                    status_code=403, tool_id=TOOL_ID,
+                )
+            # 源服务器镜像管理权限：img_manage_all / img_copy / 镜像所有者 任一即可
+            perms = _get_user_perms(conn, src_server_id, user)
+            has_manage_all = bool(perms.get("img_manage_all"))
+            has_copy = bool(perms.get("img_copy"))
+            is_owner = bool(conn.execute(
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                (src_server_id, image_ref, user.id),
+            ).fetchone())
+            if not is_owner:
+                meta = conn.execute(
+                    "SELECT owner_user_id FROM docker_images_meta WHERE server_id = ? AND image_ref = ?",
+                    (src_server_id, image_ref),
+                ).fetchone()
+                if not meta or meta["owner_user_id"] != user.id:
+                    is_owner = False
+                else:
+                    is_owner = True
+            if not has_manage_all and not has_copy and not is_owner:
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您没有复制该镜像的权限，需要「跨服务器复制镜像」权限或为该镜像的所有者",
+                    status_code=403, tool_id=TOOL_ID,
+                )
         src_row = _get_server_row(conn, src_server_id)
         dst_row = _get_server_row(conn, dst_server_id)
 
@@ -1146,6 +1225,13 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
         if dst_exit != 0:
             dst_err = dst_chan.recv_stderr(4096).decode("utf-8", errors="replace")
             raise ToolboxError("COPY_DST_FAILED", f"目标端加载镜像失败: {dst_err}", status_code=502, tool_id=TOOL_ID)
+
+        # 在目标服务器记录创建者+所有者（默认为复制者）
+        image_ref_norm = image_ref.strip()
+        if ":" not in image_ref_norm.split("/")[-1]:
+            image_ref_norm = f"{image_ref_norm}:latest"
+        with get_connection() as conn:
+            _record_resource_creator(conn, dst_server_id, "image", image_ref_norm, user.id)
 
         return {
             "success": True,

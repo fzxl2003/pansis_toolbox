@@ -49,19 +49,16 @@ function PermCheck({
   label,
   tooltip,
   disabled = false,
-  indent = false,
 }: {
   checked: boolean;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   label: React.ReactNode;
   tooltip: string;
   disabled?: boolean;
-  indent?: boolean;
 }) {
   return (
     <label
       className={`dm-form-check${disabled ? ' disabled' : ''}`}
-      style={indent ? { marginLeft: 16 } : undefined}
     >
       <input type="checkbox" checked={checked} onChange={onChange} disabled={disabled} />
       <span style={{ color: disabled ? '#94a3b8' : undefined, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -110,6 +107,83 @@ function PermCheck({
             />
           </span>
         </span>
+      </span>
+    </label>
+  );
+}
+
+// ============================================================
+// CapsuleSwitch — 胶囊开关（权限区块主开关）
+// ============================================================
+
+function CapsuleSwitch({
+  checked,
+  onChange,
+  label,
+  tooltip,
+  disabled = false,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: React.ReactNode;
+  tooltip?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={`dm-capsule-switch${disabled ? ' disabled' : ''}`}>
+      <span className="dm-capsule-switch-label">
+        {label}
+        {tooltip && (
+          <span
+            className="dm-tooltip-trigger"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            style={{ position: 'relative', display: 'inline-flex', cursor: 'help', marginLeft: 4 }}
+          >
+            <Info size={13} style={{ color: '#94a3b8', flexShrink: 0 }} />
+            <span
+              className="dm-tooltip-content"
+              style={{
+                display: 'none',
+                position: 'absolute',
+                bottom: 'calc(100% + 6px)',
+                right: 0,
+                background: '#1e293b',
+                color: '#f1f5f9',
+                padding: '6px 10px',
+                borderRadius: 6,
+                fontSize: 12,
+                lineHeight: 1.5,
+                whiteSpace: 'normal',
+                width: 260,
+                textAlign: 'left',
+                zIndex: 9999,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                pointerEvents: 'none',
+              }}
+            >
+              {tooltip}
+              <span
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 12,
+                  border: '5px solid transparent',
+                  borderTopColor: '#1e293b',
+                }}
+              />
+            </span>
+          </span>
+        )}
+      </span>
+      <input
+        type="checkbox"
+        className="dm-capsule-switch-input"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className={`dm-capsule-switch-track${checked ? ' on' : ''}`}>
+        <span className="dm-capsule-switch-knob" />
       </span>
     </label>
   );
@@ -1030,27 +1104,30 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
 
           {/* 服务器可见性 */}
           <div className="dm-perm-section">
-            <div className="dm-perm-section-title"><Server size={13} /> 服务器访问</div>
-            <PermCheck
-              checked={permsForm.server_visible}
-              onChange={pf('server_visible')}
-              label="可见该服务器"
-              tooltip="用户能在服务器列表中看到此服务器，是所有功能的前提"
-            />
+            <div className="dm-perm-section-title">
+              <Server size={13} /> 服务器访问
+              <CapsuleSwitch
+                checked={permsForm.server_visible}
+                onChange={(v) => setPermsForm((p) => ({ ...p, server_visible: v }))}
+                label="可见该服务器"
+                tooltip="用户能在服务器列表中看到此服务器，是所有功能的前提"
+              />
+            </div>
           </div>
 
           {/* 镜像权限 */}
           <div className="dm-perm-section">
-            <div className="dm-perm-section-title"><Image size={13} /> 镜像权限</div>
-            <div className="dm-perm-checks">
-              <PermCheck
+            <div className="dm-perm-section-title">
+              <Image size={13} /> 镜像权限
+              <CapsuleSwitch
                 checked={permsForm.img_use}
-                onChange={pf('img_use')}
-                label={<strong>使用镜像</strong>}
+                onChange={(v) => setPermsForm((p) => ({ ...p, img_use: v }))}
+                label="使用镜像"
                 tooltip="可查看和访问镜像列表；是资源角色「查看者」的前提条件"
               />
+            </div>
+            <div className="dm-perm-checks">
               <PermCheck
-                indent
                 checked={permsForm.img_pull}
                 onChange={pf('img_pull')}
                 disabled={!permsForm.img_use}
@@ -1058,7 +1135,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="执行 docker pull 从远程仓库拉取新镜像到此服务器"
               />
               <PermCheck
-                indent
                 checked={permsForm.img_delete}
                 onChange={pf('img_delete')}
                 disabled={!permsForm.img_use}
@@ -1066,7 +1142,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="可删除非自己创建的镜像（执行 docker rmi）；自己创建的镜像默认可删"
               />
               <PermCheck
-                indent
                 checked={permsForm.img_copy}
                 onChange={pf('img_copy')}
                 disabled={!permsForm.img_use}
@@ -1086,16 +1161,17 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
 
           {/* 容器权限 */}
           <div className="dm-perm-section">
-            <div className="dm-perm-section-title"><Box size={13} /> 容器权限</div>
-            <div className="dm-perm-checks">
-              <PermCheck
+            <div className="dm-perm-section-title">
+              <Box size={13} /> 容器权限
+              <CapsuleSwitch
                 checked={permsForm.ctr_use}
-                onChange={pf('ctr_use')}
-                label={<strong>使用容器</strong>}
+                onChange={(v) => setPermsForm((p) => ({ ...p, ctr_use: v }))}
+                label="使用容器"
                 tooltip="可查看和访问容器列表；是资源角色「查看者」的前提条件"
               />
+            </div>
+            <div className="dm-perm-checks">
               <PermCheck
-                indent
                 checked={permsForm.ctr_manage_all}
                 onChange={(e) => {
                   const checked = e.target.checked;
@@ -1111,7 +1187,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="自动成为所有容器的所有者角色，可对任意容器进行启停、删除、配置等全部操作；勾选后「查看所有用户的容器」将自动开启"
               />
               <PermCheck
-                indent
                 checked={permsForm.ctr_view_all || permsForm.ctr_manage_all}
                 onChange={(e) => {
                   if (permsForm.ctr_manage_all) return; // 管理所有时不可单独关闭
@@ -1122,7 +1197,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="可看到所有用户的容器（不受资源角色分配限制）；开启「管理所有用户的容器」时此项自动开启且不可单独关闭"
               />
               <PermCheck
-                indent
                 checked={permsForm.ctr_create}
                 onChange={pf('ctr_create')}
                 disabled={!permsForm.ctr_use}
@@ -1130,7 +1204,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="可通过 docker run 命令行模式或 docker compose 文件模式创建新容器"
               />
               <PermCheck
-                indent
                 checked={permsForm.ctr_create_template}
                 onChange={pf('ctr_create_template')}
                 disabled={!permsForm.ctr_use}
@@ -1159,16 +1232,17 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
 
           {/* 卷权限 */}
           <div className="dm-perm-section">
-            <div className="dm-perm-section-title"><HardDrive size={13} /> 卷权限</div>
-            <div className="dm-perm-checks">
-              <PermCheck
+            <div className="dm-perm-section-title">
+              <HardDrive size={13} /> 卷权限
+              <CapsuleSwitch
                 checked={permsForm.vol_use}
-                onChange={pf('vol_use')}
-                label={<strong>使用卷</strong>}
+                onChange={(v) => setPermsForm((p) => ({ ...p, vol_use: v }))}
+                label="使用卷"
                 tooltip="可查看和访问卷列表；是资源角色「查看者」的前提条件"
               />
+            </div>
+            <div className="dm-perm-checks">
               <PermCheck
-                indent
                 checked={permsForm.vol_create}
                 onChange={pf('vol_create')}
                 disabled={!permsForm.vol_use}
@@ -1176,7 +1250,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="可执行 docker volume create 新建数据卷"
               />
               <PermCheck
-                indent
                 checked={permsForm.vol_delete_all}
                 onChange={pf('vol_delete_all')}
                 disabled={!permsForm.vol_use}
@@ -1184,7 +1257,6 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="可删除非自己创建的卷；自身创建的卷及拥有所有者角色的卷默认可删"
               />
               <PermCheck
-                indent
                 checked={permsForm.vol_copy}
                 onChange={pf('vol_copy')}
                 disabled={!permsForm.vol_use}
@@ -1230,7 +1302,15 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
           {/* CUDA / GPU 权限 */}
           {panelServer?.cudaAvailable && (panelServer.gpuInfo ?? []).length > 0 ? (
             <div className="dm-perm-section">
-              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 权限</div>
+              <div className="dm-perm-section-title">
+                <Cpu size={13} /> CUDA / GPU 权限
+                <CapsuleSwitch
+                  checked={(permsForm.cuda_gpu_indices ?? []).length > 0}
+                  onChange={(v) => setPermsForm((p) => ({ ...p, cuda_gpu_indices: v ? (panelServer.gpuInfo ?? []).map((g) => g.index) : [] }))}
+                  label="允许使用 CUDA"
+                  tooltip="开启后可选择该用户可挂载的显卡；关闭则不允许使用任何 CUDA 资源"
+                />
+              </div>
               <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
                 选择该用户可挂载的显卡序号（未选中则不允许使用 CUDA）：
               </div>

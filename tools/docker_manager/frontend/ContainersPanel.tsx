@@ -118,7 +118,9 @@ function parseSshPort(ports: string | undefined): string | null {
 function ResourceOverviewStrip({ overview }: { overview: ServerResourceOverview }) {
   const vol = overview.volume;
   const cuda = overview.cuda;
+  const ctr = overview.container;
   const unlimitedVol = vol.quotaGb === 0;
+  const unlimitedCtr = ctr.quotaNum === 0;
 
   return (
     <div className="dm-resource-strip">
@@ -138,6 +140,17 @@ function ResourceOverviewStrip({ overview }: { overview: ServerResourceOverview 
           )
         }
       </div>
+      {/* 容器配额 */}
+      {!unlimitedCtr && (
+        <div className="dm-resource-chip">
+          <Box size={11} />
+          <span>容器</span>
+          <span style={{ color: (ctr.remaining ?? 0) <= 0 ? '#ef4444' : '#1e293b', fontWeight: 600 }}>
+            {ctr.remaining ?? '不限'}
+          </span>
+          <span style={{ color: '#94a3b8' }}>剩余</span>
+        </div>
+      )}
       {/* 路径磁盘 */}
       {overview.paths.map((p) => (
         p.availGb !== null && (
@@ -425,6 +438,10 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
   const imgQuotaExhausted =
     serverOverview?.image?.remainingGb != null && serverOverview.image.remainingGb <= 0;
 
+  // 容器配额是否已用满（remaining=null 表示不限）
+  const ctrQuotaExhausted =
+    serverOverview?.container?.remaining != null && serverOverview.container.remaining <= 0;
+
   const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
   const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
 
@@ -538,13 +555,16 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
           <button
             className="btn btn-primary"
             onClick={mode === 'gui' ? submitGui : submitCli}
-            disabled={loading || (mode === 'gui' && !canSubmitGui)}
+            disabled={loading || ctrQuotaExhausted || (mode === 'gui' && !canSubmitGui)}
           >
             {loading ? <Spin /> : <Play size={14} />} 创建
           </button>
         </>
       }>
       {error && <Alert type="error">{error}</Alert>}
+      {ctrQuotaExhausted && (
+        <Alert type="error">容器数量配额已用满，无法创建新容器。请删除不再使用的容器或联系管理员调整配额。</Alert>
+      )}
       {serverOverview && <ResourceOverviewStrip overview={serverOverview} />}
 {quota?.ctr_path_whitelist && quota.ctr_path_whitelist.length > 0 && (
 <Alert type="info">挂载路径白名单：{quota.ctr_path_whitelist.join('、')}</Alert>
@@ -885,11 +905,15 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
 
 // ---- ComposeCreateModal ----
 
-export function ComposeCreateModal({ serverId, onClose, onSuccess }: { serverId: string; onClose: () => void; onSuccess: () => void }) {
+export function ComposeCreateModal({ serverId, serverOverview, onClose, onSuccess }: { serverId: string; serverOverview: ServerResourceOverview | null; onClose: () => void; onSuccess: () => void }) {
   const [yaml, setYaml] = useState('');
   const [project, setProject] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
+
+  // 容器配额是否已用满
+  const ctrQuotaExhausted =
+    serverOverview?.container?.remaining != null && serverOverview.container.remaining <= 0;
 
   async function submit() {
     if (!yaml.trim()) return;
@@ -910,12 +934,15 @@ export function ComposeCreateModal({ serverId, onClose, onSuccess }: { serverId:
       foot={
         <>
           <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn btn-primary" onClick={submit} disabled={loading || !yaml.trim()}>
+          <button className="btn btn-primary" onClick={submit} disabled={loading || ctrQuotaExhausted || !yaml.trim()}>
             {loading ? <Spin /> : <Layers size={14} />} 部署
           </button>
         </>
       }>
       {error && <Alert type="error">{error}</Alert>}
+      {ctrQuotaExhausted && (
+        <Alert type="error">容器数量配额已用满，无法创建新容器。请删除不再使用的容器或联系管理员调整配额。</Alert>
+      )}
       <div className="dm-form-grid">
         <Field label="项目名称（可选）">
           <input value={project} onChange={(e) => setProject(e.target.value)} placeholder="自动生成" />
@@ -949,6 +976,10 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
 
   const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
   const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
+
+  // 容器配额是否已用满
+  const ctrQuotaExhausted =
+    serverOverview?.container?.remaining != null && serverOverview.container.remaining <= 0;
 
   function buildGpusArg(): string {
     if (cudaMode === 'none') return '';
@@ -1009,13 +1040,16 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
           {selected && <button className="btn" onClick={() => setSelected(null)}>← 返回列表</button>}
           <button className="btn" onClick={onClose}>取消</button>
           {selected && (
-            <button className="btn btn-primary" onClick={deploy} disabled={deploying}>
+            <button className="btn btn-primary" onClick={deploy} disabled={deploying || ctrQuotaExhausted}>
               {deploying ? <Spin /> : <Play size={14} />} 部署
             </button>
           )}
         </>
       }>
       {error && <Alert type="error">{error}</Alert>}
+      {ctrQuotaExhausted && (
+        <Alert type="error">容器数量配额已用满，无法创建新容器。请删除不再使用的容器或联系管理员调整配额。</Alert>
+      )}
       {/* 资源概览提示条 */}
       {serverOverview && <ResourceOverviewStrip overview={serverOverview} />}
 
@@ -1148,10 +1182,19 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
     return me.role === 'admin' || !!s?.perms?.ctr_create || !!quota?.ctr_create;
   };
 
-  const canManage = (sid: string | null) => {
+  // 服务器级别的全局管理权限（ctr_manage_all）
+  const canManageAll = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
     return me.role === 'admin' || !!s?.perms?.ctr_manage_all || !!quota?.ctr_manage_all;
+  };
+
+  // 容器级别的管理权限：ctr_manage_all 或该容器的所有者
+  const canManageContainer = (sid: string | null, c: DockerContainer) => {
+    if (!sid) return false;
+    if (canManageAll(sid)) return true;
+    // 检查当前用户是否是该容器的所有者
+    return !!c.ownerUserId && c.ownerUserId === me.id;
   };
 
   const load = useCallback(async (sid: string) => {
@@ -1357,7 +1400,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
                   <button className="dm-btn-icon" title="日志" onClick={() => void showLogs(cid(c), cname(c))}>
                     <FileText size={13} />
                   </button>
-                  {canManage(serverId) && (
+                  {canManageContainer(serverId, c) && (
                     <>
                       {!isRunning && <button className="dm-btn-icon" title="启动" onClick={() => void doAction(cid(c), cname(c), 'start')}><Play size={13} /></button>}
                       {isRunning && <button className="dm-btn-icon" title="停止" onClick={() => void doAction(cid(c), cname(c), 'stop')}><Square size={13} /></button>}
@@ -1382,7 +1425,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
             detail ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
                 <div style={{ display: 'flex', gap: 6, flex: 1 }}>
-                  {canManage(serverId) && (
+                  {(canManageAll(serverId) || (detail.platformMeta.ownerUserId && detail.platformMeta.ownerUserId === me.id)) && (
                     <>
                       {!detail.running && (
                         <button className="btn btn-primary" onClick={() => void doAction(detail.shortId, detail.name, 'start')}>
@@ -1470,7 +1513,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
                     ) : (
                       <>
                         <span>{detail.restartPolicy || '不重启'}</span>
-                        {canManage(serverId) && (
+                        {(canManageAll(serverId) || (detail.platformMeta.ownerUserId && detail.platformMeta.ownerUserId === me.id)) && (
                           <button
                             className="dm-btn-icon"
                             style={{ width: 22, height: 22 }}
@@ -1660,7 +1703,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
         <RunCreateModal serverId={serverId} servers={servers} me={me} quota={quota} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
       )}
       {createMode === 'compose' && serverId && (
-        <ComposeCreateModal serverId={serverId} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
+        <ComposeCreateModal serverId={serverId} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
       )}
       {createMode === 'template' && serverId && (
         <TemplateDeployModal serverId={serverId} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />

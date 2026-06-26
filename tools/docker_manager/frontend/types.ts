@@ -96,6 +96,8 @@ export type DockerContainer = {
   State?: string;
   Ports?: string;
   CreatedAt?: string;
+  ownerUserId?: string | null;    // 容器所有者用户 ID（来自后端平台元数据）
+  platformManaged?: boolean;     // 是否由平台管理（有所有权记录或用户有查看角色）
 };
 
 // 容器详情类型（来自 docker inspect）
@@ -276,6 +278,12 @@ export type ServerResourceOverview = {
     remainingGb: number | null;   // null = 不限
     countSelf: number;            // 当前用户作为配额占用者的镜像数量
     countTotal: number;           // 服务器全部镜像数量
+  };
+  container: {
+    quotaNum: number;             // 0 = 不限
+    usedSelf: number;             // 当前用户作为配额占用者的容器数量
+    usedTotal: number;            // 服务器全部容器数量
+    remaining: number | null;     // null = 不限
   };
   paths: Array<{
     path: string;

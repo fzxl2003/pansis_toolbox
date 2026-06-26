@@ -1185,6 +1185,225 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
 # 容器管理
 # ==============================================================
 
+def _calc_user_container_usage(
+    conn: sqlite3.Connection, server_row: sqlite3.Row, user: User
+) -> dict[str, Any]:
+    """计算用户在指定服务器上的容器使用情况与配额。
+
+    配额占用者均分逻辑：用户作为 quota_holder 的容器计入自身用量。
+    SSH 连接失败时各项用量按 0 处理（不阻塞调用方）。
+
+    返回:
+        quotaNum     配额上限（0=不限）
+        usedSelf     当前用户作为 quota_holder 的容器数
+        usedTotal    服务器全部容器数
+        remaining    剩余配额（None=不限）
+    """
+    perms = _get_user_perms(conn, server_row["id"], user)
+    ctr_quota_num = int(perms.get("ctr_quota_num", 0))  # 0 = 不限
+    # 获取用户作为 quota_holder 的容器 ref 集合
+    user_qh_ctr_refs: set[str] = set()
+    for r in conn.execute(
+        "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=? AND role='quota_holder'",
+        (server_row["id"], user.id),
+    ).fetchall():
+        user_qh_ctr_refs.add(r["resource_ref"])
+
+    # SSH 获取服务器上全部容器数量
+    ctr_used_total = 0
+    ctr_used_self = len(user_qh_ctr_refs)
+    try:
+        ctr_client = _ssh_connect(server_row)
+        try:
+            ctr_out, _, ctr_rc = _ssh_exec(
+                ctr_client,
+                "docker ps -a --format '{{.ID}}'",
+                timeout=15,
+            )
+        finally:
+            ctr_client.close()
+        if ctr_rc == 0:
+            ctr_used_total = len([l for l in ctr_out.strip().splitlines() if l.strip()])
+    except ToolboxError:
+        pass  # SSH 连接失败时静默，不影响其他概览数据
+
+    ctr_remaining = max(0, ctr_quota_num - ctr_used_self) if ctr_quota_num > 0 else None
+    return {
+        "quotaNum": ctr_quota_num,
+        "usedSelf": ctr_used_self,
+        "usedTotal": ctr_used_total,
+        "remaining": ctr_remaining,
+    }
+
+
+def _enforce_container_quota(
+    conn: sqlite3.Connection, server_row: sqlite3.Row, user: User
+) -> None:
+    """若用户在指定服务器上的容器数量配额已超出上限，抛出 QUOTA_EXCEEDED 异常。
+
+    用于创建容器前的配额校验。管理员不受限（quota_num=0 表示不限）。
+    """
+    usage = _calc_user_container_usage(conn, server_row, user)
+    quota_num = int(usage["quotaNum"])
+    used_self = int(usage["usedSelf"])
+    if quota_num > 0 and used_self >= quota_num:
+        raise ToolboxError(
+            "QUOTA_EXCEEDED",
+            f"容器数量配额不足，已有 {used_self} 个容器，配额 {quota_num} 个",
+            status_code=403,
+            tool_id=TOOL_ID,
+        )
+
+
+def _validate_gpus_permission(gpus_arg: str, allowed_gpu_indices: list[int]) -> None:
+    """校验 --gpus 参数是否在用户允许的 GPU 序号范围内。
+
+    支持格式：'all' / 'device=0,1' / 'device=0' / '"device=0,1"'
+    """
+    if not gpus_arg:
+        return
+    gpus_arg = gpus_arg.strip().strip('"').strip("'")
+    if gpus_arg.lower() == "all":
+        # all 表示使用全部 GPU，需要用户拥有全部 GPU 权限
+        # 如果 allowed_gpu_indices 为空列表则拒绝（无 GPU 权限）
+        if not allowed_gpu_indices:
+            raise ToolboxError(
+                "GPU_PERMISSION_DENIED",
+                "您没有 GPU 使用权限",
+                status_code=403,
+                tool_id=TOOL_ID,
+            )
+        return
+    # 解析 device=0,1 格式
+    if gpus_arg.startswith("device="):
+        indices_str = gpus_arg[len("device="):]
+        try:
+            indices = [int(x.strip()) for x in indices_str.split(",") if x.strip()]
+        except ValueError:
+            raise ToolboxError(
+                "INVALID_GPU_ARG",
+                f"无效的 GPU 参数: {gpus_arg}",
+                status_code=400,
+                tool_id=TOOL_ID,
+            ) from None
+        allowed_set = set(allowed_gpu_indices)
+        for idx in indices:
+            if idx not in allowed_set:
+                raise ToolboxError(
+                    "GPU_PERMISSION_DENIED",
+                    f"您没有使用 GPU {idx} 的权限，可用 GPU: {allowed_gpu_indices}",
+                    status_code=403,
+                    tool_id=TOOL_ID,
+                )
+        return
+    # 其他格式不做校验（保守策略：拒绝未知格式）
+    raise ToolboxError(
+        "INVALID_GPU_ARG",
+        f"不支持的 --gpus 参数格式: {gpus_arg}，请使用 'all' 或 'device=0,1'",
+        status_code=400,
+        tool_id=TOOL_ID,
+    )
+
+
+def _extract_volumes_from_raw_cmd(cmd: str) -> list[str]:
+    """从 docker run 原始命令中提取 -v / --volume 挂载路径。
+
+    返回宿主机侧路径列表（如 ['/host/path', '/data']）。
+    """
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return []
+    volumes: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-v", "--volume"):
+            if i + 1 < len(tokens):
+                vol_spec = tokens[i + 1]
+                # -v /host:/container 或 -v /host:/container:ro
+                host_part = vol_spec.split(":")[0]
+                volumes.append(host_part)
+                i += 2
+                continue
+        elif tok.startswith("-v") and len(tok) > 2:
+            # -v/host:/container 格式（连写）
+            vol_spec = tok[2:]
+            host_part = vol_spec.split(":")[0]
+            volumes.append(host_part)
+        elif tok.startswith("--volume="):
+            vol_spec = tok[len("--volume="):]
+            host_part = vol_spec.split(":")[0]
+            volumes.append(host_part)
+        i += 1
+    return volumes
+
+
+def _extract_gpus_from_raw_cmd(cmd: str) -> str:
+    """从 docker run 原始命令中提取 --gpus 参数值。
+
+    返回 gpus 参数值（如 'all' 或 'device=0,1'），未找到则返回空字符串。
+    """
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return ""
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--gpus":
+            if i + 1 < len(tokens):
+                return tokens[i + 1]
+            i += 1
+        elif tok.startswith("--gpus="):
+            return tok[len("--gpus="):]
+        i += 1
+    return ""
+
+
+def _extract_volumes_from_compose(yaml_content: str) -> list[str]:
+    """从 docker-compose YAML 中提取 bind 挂载的宿主机路径。
+
+    仅提取 type: bind 或直接路径格式的挂载，忽略 named volume。
+    """
+    try:
+        import yaml
+    except ImportError:
+        return []
+    try:
+        data = yaml.safe_load(yaml_content)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    paths: list[str] = []
+    services = data.get("services", {})
+    if not isinstance(services, dict):
+        return paths
+    for svc_config in services.values():
+        if not isinstance(svc_config, dict):
+            continue
+        vols = svc_config.get("volumes", [])
+        if not isinstance(vols, list):
+            continue
+        for vol in vols:
+            if isinstance(vol, str):
+                # "/host:/container" 或 "/host:/container:ro"
+                parts = vol.split(":")
+                if len(parts) >= 2:
+                    host_part = parts[0]
+                    # 忽略 named volume（不以 / 开头的）
+                    if host_part.startswith("/"):
+                        paths.append(host_part)
+            elif isinstance(vol, dict):
+                # {type: bind, source: /host, target: /container}
+                if vol.get("type") == "bind":
+                    src = vol.get("source", "")
+                    if src and src.startswith("/"):
+                        paths.append(src)
+    return paths
+
+
 def list_containers(server_id: str, user: User, all_containers: bool = True) -> list[dict[str, Any]]:
     """列出服务器上的容器，按所有权/角色过滤"""
     init_docker_database()
@@ -1300,7 +1519,8 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
-            if not perms.get("ctr_create"):
+            # 校验 server_visible + ctr_create 权限
+            if not perms.get("server_visible") or not perms.get("ctr_create"):
                 raise ToolboxError(
                     "NO_CREATE_PERMISSION", "您没有在此服务器创建容器的权限", status_code=403, tool_id=TOOL_ID
                 )
@@ -1310,7 +1530,14 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
                 whitelist = perms.get("ctr_path_whitelist", [])
                 if whitelist:
                     _validate_path_whitelist(volumes, whitelist)
+            # 校验 GPU 权限
+            gpus_arg = params.get("gpus", "") or ""
+            if gpus_arg:
+                _validate_gpus_permission(gpus_arg, perms.get("cuda_gpu_indices", []))
         row = _get_server_row(conn, server_id)
+        # 容器数量配额校验
+        if user.role != "admin":
+            _enforce_container_quota(conn, row, user)
 
     # 构建 docker run 命令
     cmd_parts = ["docker", "run", "-d"]
@@ -1357,7 +1584,19 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
         raise ToolboxError(
             "CREATE_CONTAINER_FAILED", f"创建容器失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID
         )
-    return {"success": True, "containerId": stdout.strip(), "command": full_cmd}
+
+    # 记录容器所有权（创建者=所有者=配额占用者）
+    # docker run -d 输出容器长 ID，取前12位作为短 ID；同时用容器名（若有）作为 ref
+    container_id_full = stdout.strip()
+    container_id_short = container_id_full[:12]
+    container_name = params.get("name", "") or ""
+    with get_connection() as conn:
+        # 用容器名和短 ID 都记录所有权，确保 list_containers 的双重匹配能命中
+        if container_name:
+            _record_resource_creator(conn, server_id, "container", container_name, user.id)
+        _record_resource_creator(conn, server_id, "container", container_id_short, user.id)
+
+    return {"success": True, "containerId": container_id_full, "command": full_cmd}
 
 
 def create_container_run_raw(server_id: str, command: str, user: User) -> dict[str, Any]:
@@ -1365,7 +1604,10 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
     直接在服务器上执行用户提供的完整 docker run 命令（命令行模式）。
     安全校验：
     - 命令必须以 `docker run` 开头（大小写不敏感、允许前缀空格）
-    - 用户必须拥有创建容器的权限
+    - 用户必须拥有创建容器的权限 + 服务器可见性
+    - 校验挂载路径白名单（从命令中解析 -v/--volume）
+    - 校验 GPU 权限（从命令中解析 --gpus）
+    - 容器数量配额校验
     """
     init_docker_database()
     cmd = command.strip()
@@ -1376,11 +1618,25 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
-            if not perms.get("ctr_create"):
+            # 校验 server_visible + ctr_create 权限
+            if not perms.get("server_visible") or not perms.get("ctr_create"):
                 raise ToolboxError(
                     "NO_CREATE_PERMISSION", "您没有在此服务器创建容器的权限", status_code=403, tool_id=TOOL_ID
                 )
+            # 校验挂载路径白名单（从原始命令中解析）
+            whitelist = perms.get("ctr_path_whitelist", [])
+            if whitelist:
+                raw_volumes = _extract_volumes_from_raw_cmd(cmd)
+                if raw_volumes:
+                    _validate_path_whitelist(raw_volumes, whitelist)
+            # 校验 GPU 权限
+            raw_gpus = _extract_gpus_from_raw_cmd(cmd)
+            if raw_gpus:
+                _validate_gpus_permission(raw_gpus, perms.get("cuda_gpu_indices", []))
         row = _get_server_row(conn, server_id)
+        # 容器数量配额校验
+        if user.role != "admin":
+            _enforce_container_quota(conn, row, user)
 
     client = _ssh_connect(row)
     try:
@@ -1392,22 +1648,56 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
         raise ToolboxError(
             "CREATE_CONTAINER_FAILED", f"创建容器失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID
         )
-    return {"success": True, "containerId": stdout.strip(), "command": cmd}
+
+    # 记录容器所有权
+    # 尝试从命令中解析容器名；docker run -d 输出容器长 ID
+    container_id_full = stdout.strip()
+    container_id_short = container_id_full[:12]
+    # 从命令中解析 --name 参数
+    container_name = ""
+    try:
+        tokens = shlex.split(cmd)
+        for i, tok in enumerate(tokens):
+            if tok == "--name" and i + 1 < len(tokens):
+                container_name = tokens[i + 1]
+                break
+            elif tok.startswith("--name="):
+                container_name = tok[len("--name="):]
+                break
+    except ValueError:
+        pass
+    with get_connection() as conn:
+        if container_name:
+            _record_resource_creator(conn, server_id, "container", container_name, user.id)
+        _record_resource_creator(conn, server_id, "container", container_id_short, user.id)
+
+    return {"success": True, "containerId": container_id_full, "command": cmd}
 
 
 def create_container_compose(server_id: str, yaml_content: str, user: User, project_name: str = "") -> dict[str, Any]:
     """
-    通过 docker compose 创建容器：将 YAML 上传至服务器临时目录执行
+    通过 docker compose 创建容器：将 YAML 上传至服务器临时目录执行。
+    安全校验：server_visible + ctr_create + 路径白名单 + 容器配额。
     """
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
-            if not perms.get("ctr_create"):
+            # 校验 server_visible + ctr_create 权限
+            if not perms.get("server_visible") or not perms.get("ctr_create"):
                 raise ToolboxError(
                     "NO_CREATE_PERMISSION", "您没有在此服务器创建容器的权限", status_code=403, tool_id=TOOL_ID
                 )
+            # 校验挂载路径白名单（从 YAML 中解析 volumes 的 bind 挂载）
+            whitelist = perms.get("ctr_path_whitelist", [])
+            if whitelist:
+                compose_volumes = _extract_volumes_from_compose(yaml_content)
+                if compose_volumes:
+                    _validate_path_whitelist(compose_volumes, whitelist)
         row = _get_server_row(conn, server_id)
+        # 容器数量配额校验
+        if user.role != "admin":
+            _enforce_container_quota(conn, row, user)
 
     tmp_dir = f"/tmp/.docker_manager_{uuid.uuid4().hex[:8]}"
     compose_file = f"{tmp_dir}/docker-compose.yml"
@@ -1440,6 +1730,37 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
         raise ToolboxError(
             "COMPOSE_FAILED", f"docker compose 失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID
         )
+
+    # 记录 compose 创建的容器所有权
+    # 通过 docker compose ps 获取该 project 下所有容器
+    ctr_refs: list[str] = []
+    record_client = _ssh_connect(row)
+    try:
+        # compose_file 已被删除，只能用 project name 查询
+        if project_name:
+            ps_cmd = f"docker compose -p {shlex.quote(project_name)} ps --format '{{{{json .}}}}'"
+            ps_out, _, ps_rc = _ssh_exec(record_client, ps_cmd, timeout=30)
+            if ps_rc == 0:
+                for line in ps_out.strip().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ctr_info = json.loads(line)
+                        # docker compose ps 的 Name 字段是容器名
+                        name = ctr_info.get("Name", "") or ctr_info.get("Names", "")
+                        if name:
+                            ctr_refs.append(name.lstrip("/"))
+                    except json.JSONDecodeError:
+                        continue
+    finally:
+        record_client.close()
+
+    if ctr_refs:
+        with get_connection() as conn:
+            for ref in ctr_refs:
+                _record_resource_creator(conn, server_id, "container", ref, user.id)
+
     return {"success": True, "output": stdout + stderr, "projectName": project_name}
 
 
@@ -1488,6 +1809,26 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
             status_code=502,
             tool_id=TOOL_ID,
         )
+
+    # 删除容器时清理平台元数据
+    if action == "remove":
+        with get_connection() as conn:
+            # 清理 docker_containers_meta
+            conn.execute(
+                "DELETE FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
+                (server_id, container_id),
+            )
+            # 清理 docker_resource_roles
+            conn.execute(
+                "DELETE FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=?",
+                (server_id, container_id),
+            )
+            # 清理 docker_container_resource_cache
+            conn.execute(
+                "DELETE FROM docker_container_resource_cache WHERE server_id=? AND container_ref=?",
+                (server_id, container_id),
+            )
+
     return {"success": True, "action": action, "containerId": container_id}
 
 
@@ -2961,6 +3302,9 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
         # ---------- 镜像配额（配额占用者均分） ----------
         img_usage = _calc_user_image_usage(conn, srv_row, user)
 
+        # ---------- 容器数量配额 ----------
+        ctr_usage = _calc_user_container_usage(conn, srv_row, user)
+
         # ---------- CUDA 权限 ----------
         server_gpu_info: list[dict[str, Any]] = json.loads(srv_row["gpu_info"]) if srv_row["gpu_info"] else []
         cuda_available = bool(srv_row["cuda_available"])
@@ -2993,6 +3337,12 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
             "remainingGb": img_usage["remainingGb"],
             "countSelf": img_usage["countSelf"],
             "countTotal": img_usage["countTotal"],
+        },
+        "container": {
+            "quotaNum": ctr_usage["quotaNum"],
+            "usedSelf": ctr_usage["usedSelf"],
+            "usedTotal": ctr_usage["usedTotal"],
+            "remaining": ctr_usage["remaining"],
         },
         "paths": paths_info,
         "cuda": {

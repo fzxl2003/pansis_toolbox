@@ -6,6 +6,7 @@ import { useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   AlertCircle,
+  Box,
   CheckCircle,
   ChevronDown,
   ChevronUp,
@@ -225,6 +226,7 @@ export function ResourceUsagePanel({
 
   const vol = overview?.volume;
   const img = overview?.image;
+  const ctr = overview?.container;
   const cuda = overview?.cuda;
 
   const volQuota = vol?.quotaGb ?? 0;
@@ -238,6 +240,11 @@ export function ResourceUsagePanel({
   const imgRemaining = img?.remainingGb ?? null;
   const imgCountSelf = img?.countSelf ?? 0;
   const imgCountTotal = img?.countTotal ?? 0;
+
+  const ctrQuota = ctr?.quotaNum ?? 0;
+  const ctrUsed = ctr?.usedSelf ?? 0;
+  const ctrTotal = ctr?.usedTotal ?? 0;
+  const ctrRemaining = ctr?.remaining ?? null;
 
   const gpuTotal = cuda?.totalGpuCount ?? 0;
   const gpuAllowed = cuda?.allowedGpuIndices?.length ?? 0;
@@ -253,6 +260,11 @@ export function ResourceUsagePanel({
         {loading && <Loader2 size={12} className="spin" style={{ marginLeft: 4 }} />}
         {!loading && overview && (
           <span className="dm-resource-usage-summary">
+            {resourceType === 'container' && ctrQuota > 0 && (
+              <span className={`dm-usage-chip${ctrRemaining !== null && ctrRemaining <= 0 ? ' warn' : ''}`}>
+                <Box size={11} /> {ctrUsed}/{ctrQuota} 个
+              </span>
+            )}
             {resourceType === 'container' && cuda?.serverHasCuda && (
               <span className="dm-usage-chip gpu">
                 <Cpu size={11} /> GPU {gpuAllowed}/{gpuTotal}
@@ -280,6 +292,41 @@ export function ResourceUsagePanel({
             </div>
           ) : overview ? (
             <div className="dm-resource-usage-content">
+              {/* 容器配额区域（容器 Tab 且有配额时显示） */}
+              {resourceType === 'container' && ctrQuota > 0 && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title">
+                    <Box size={13} />
+                    容器配额
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>我的容器</span>
+                    <span>{ctrUsed} 个</span>
+                  </div>
+                  <div className="dm-usage-row muted">
+                    <span>全服务器</span>
+                    <span>{ctrTotal} 个</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>配额上限</span>
+                    <span className="dm-usage-quota">{ctrQuota} 个</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>剩余</span>
+                    <span style={{ color: (ctrRemaining ?? 0) <= 0 ? '#ef4444' : '#22c55e' }}>{ctrRemaining}</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <ProgressBar segments={[
+                      { value: ctrUsed, max: ctrQuota, color: '#0ea5e9', label: '我的容器' },
+                    ]} />
+                    <div className="dm-progress-legend">
+                      <span><span className="dm-legend-dot" style={{ background: '#0ea5e9' }} />已用</span>
+                      <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {ctrRemaining}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* 镜像配额区域（镜像 Tab 或有镜像配额时显示） */}
               {resourceType === 'image' && (
                 <div className="dm-usage-section">

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ChevronRight, Cpu, Database, HardDrive, Image as ImageIcon, Server } from 'lucide-react';
 import { apiGet } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
-import { permColor, permLabel, formatSize, API } from './utils';
+import { formatSize, API } from './utils';
 import type { DmServer, ServerResourceOverview } from './types';
 import { Spin } from './components';
 
@@ -265,7 +265,6 @@ function ServerOverviewRow({ server, status }: { server: DmServer; status: 'onli
           )}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className={`dm-perm-badge ${permColor(server.permissionLevel)}`}>{permLabel(server.permissionLevel)}</span>
           <ChevronRight
             size={14}
             style={{

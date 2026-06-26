@@ -4,23 +4,9 @@
 
 import { useCallback, useState } from 'react';
 import { ApiError } from '../../../frontend/src/api/client';
-import type { PermLevel } from './types';
 
 // API 基础路径
 export const API = '/api/tools/docker-manager';
-
-// ---- 权限辅助 ----
-
-export function permColor(level: PermLevel): string {
-  if (level === 'manage') return 'manage';
-  if (level === 'use') return 'use';
-  return 'view';
-}
-
-export function permLabel(level: PermLevel): string {
-  const m: Record<PermLevel, string> = { manage: '管理', use: '使用', view: '查看', none: '无权限' };
-  return m[level] ?? level;
-}
 
 // ---- 容器状态辅助 ----
 

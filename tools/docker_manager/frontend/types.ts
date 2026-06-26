@@ -2,8 +2,6 @@
 // Types — Docker Manager
 // ============================================================
 
-export type PermLevel = 'manage' | 'use' | 'view' | 'none';
-
 export type GpuInfo = {
   index: number;
   name: string;
@@ -16,20 +14,14 @@ export type DmServer = {
   host: string;
   port: number;
   sshUsername: string;
-  permissionLevel: PermLevel;
+  serverVisible: boolean;
   createdAt: string;
   // CUDA 信息
   cudaAvailable?: boolean;
   gpuCount?: number;
   gpuInfo?: GpuInfo[];
-  // 当前用户在该服务器上的细粒度权限标志（由后端 list_servers 附带）
-  perms?: {
-    img_manage_all?: boolean;
-    img_copy?: boolean;
-    img_use?: boolean;
-    ctr_manage_all?: boolean;
-    vol_delete_all?: boolean;
-  };
+  // 当前用户在该服务器上的细粒度权限（由后端 list_servers 附带）
+  perms?: UserPerms;
 };
 
 // 细粒度权限结构
@@ -83,17 +75,7 @@ export type ServerPermEntry = {
   username: string;
   displayName: string;
   role: string;
-  level: PermLevel;
   perms: UserPerms;
-};
-
-// 兼容旧配额类型（内部使用）
-export type UserQuota = {
-  volumeTotalGb: number;
-  volumeUsedGb?: number;
-  pathWhitelist: string[];
-  canCreateContainer: boolean;
-  canManageContainer: boolean;
 };
 
 export type DockerImage = {
@@ -239,7 +221,6 @@ export type ResourceRoles = {
   quotaHolderUserIds: string[];    // 配额占用者（无需是所有者，资源大小在所有配额占用者间均分）
   creatorUserId: string | null;    // 创建者（唯一）
   platformManaged: boolean;
-  ownerUserId?: string | null;     // 兼容旧字段
 };
 
 export type ResourceItem = ResourceRoles;

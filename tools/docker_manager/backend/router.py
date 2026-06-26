@@ -47,9 +47,7 @@ from tools.docker_manager.backend.service import (
     rescan_server_cuda,
     get_server_resource_overview,
     set_resource_viewers,
-    set_user_permission,
     set_user_perms,
-    set_user_quota,
     update_template,
 )
 
@@ -66,19 +64,6 @@ class AddServerPayload(BaseModel):
     port: int = 22
     sshUsername: str
     sshPassword: str
-
-
-class SetPermissionPayload(BaseModel):
-    userId: str
-    level: str  # manage | use | view | none
-
-
-class SetQuotaPayload(BaseModel):
-    userId: str
-    volumeTotalGb: float = 0.0
-    pathWhitelist: list[str] = Field(default_factory=list)
-    canCreateContainer: bool = False
-    canManageContainer: bool = False
 
 
 class SetUserPermsPayload(BaseModel):
@@ -220,30 +205,6 @@ def delete_server_route(request: Request, server_id: str) -> dict:
 def list_permissions_route(request: Request, server_id: str) -> dict:
     user = require_user(request)
     return {"permissions": list_server_permissions(server_id, user)}
-
-
-@router.put("/servers/{server_id}/permissions")
-def set_permission_route(request: Request, server_id: str, payload: SetPermissionPayload) -> dict:
-    user = require_user(request)
-    result = set_user_permission(server_id, payload.userId, payload.level, user)
-    return {"permission": result}
-
-
-@router.put("/servers/{server_id}/quotas")
-def set_quota_route(request: Request, server_id: str, payload: SetQuotaPayload) -> dict:
-    user = require_user(request)
-    result = set_user_quota(
-        server_id,
-        payload.userId,
-        {
-            "volumeTotalGb": payload.volumeTotalGb,
-            "pathWhitelist": payload.pathWhitelist,
-            "canCreateContainer": payload.canCreateContainer,
-            "canManageContainer": payload.canManageContainer,
-        },
-        user,
-    )
-    return {"quota": result}
 
 
 @router.get("/servers/{server_id}/user-perms")
@@ -443,7 +404,7 @@ def copy_volume_route(request: Request, payload: CopyVolumePayload) -> dict:
 # ==============================================================
 
 class AssignResourceOwnerPayload(BaseModel):
-    """兼容旧接口：单 owner 分配"""
+    """单 owner 分配"""
     resourceType: str   # container | image | volume
     resourceRef: str    # 容器名/镜像 repo:tag/卷名
     ownerUserId: str    # 目标用户 ID，传 "" 表示取消分配
@@ -468,7 +429,7 @@ def list_server_resources_route(request: Request, server_id: str) -> dict:
 
 @router.put("/servers/{server_id}/resource-owner")
 def assign_resource_owner_route(request: Request, server_id: str, payload: AssignResourceOwnerPayload) -> dict:
-    """为服务器上的资源分配所有者（兼容旧接口，管理员专用）"""
+    """为服务器上的资源分配所有者（管理员专用）"""
     user = require_user(request)
     return assign_resource_owner(
         server_id,

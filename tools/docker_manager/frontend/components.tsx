@@ -18,7 +18,6 @@ import {
   X,
 } from 'lucide-react';
 import type { ServerResourceOverview } from './types';
-import { permColor, permLabel } from './utils';
 import type { DmServer } from './types';
 
 // ---- 基础组件 ----
@@ -171,7 +170,6 @@ export function ServerSelector({ servers, selected, onSelect }: { servers: DmSer
         <button key={s.id} className={`dm-server-chip${selected === s.id ? ' active' : ''}`} onClick={() => onSelect(s.id)}>
           <Server size={13} />
           {s.name}
-          <span className={`dm-perm-badge ${permColor(s.permissionLevel)}`}>{permLabel(s.permissionLevel)}</span>
         </button>
       ))}
     </div>

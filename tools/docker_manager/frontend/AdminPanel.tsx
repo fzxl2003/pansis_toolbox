@@ -507,18 +507,28 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     }
   }
 
-  // ─── 辅助：获取用户权限显示级别 ──────────────────────────
-  function getPermLevelDisplay(entry: ServerPermEntry) {
-    const lvlColor: Record<string, string> = {
-      manage: '#166534', use: '#1e40af', view: '#92400e', none: '#6b7280'
-    };
-    const lvlBg: Record<string, string> = {
-      manage: '#dcfce7', use: '#dbeafe', view: '#fef3c7', none: '#f3f4f6'
-    };
-    const levelLabel = entry.role === 'admin'
-      ? '全满权限'
-      : ({ manage: '管理', use: '使用', view: '查看', none: '无权限' }[entry.level] ?? entry.level);
-    return { color: lvlColor[entry.level] ?? '#6b7280', bg: lvlBg[entry.level] ?? '#f3f4f6', label: levelLabel };
+  // ─── 辅助：根据细粒度权限生成摘要显示 ────────────────────
+  function getPermSummary(entry: ServerPermEntry): { color: string; bg: string; label: string } {
+    if (entry.role === 'admin') {
+      return { color: '#166534', bg: '#dcfce7', label: '管理员' };
+    }
+    const p = entry.perms;
+    if (!p.server_visible) {
+      return { color: '#6b7280', bg: '#f3f4f6', label: '无权限' };
+    }
+    const manageFlags = [p.img_manage_all, p.ctr_manage_all, p.vol_delete_all, p.tpl_edit];
+    const useFlags = [p.img_pull, p.img_copy, p.ctr_create, p.ctr_create_template, p.vol_create, p.vol_copy, p.tpl_create];
+    const viewFlags = [p.img_use, p.img_view_all, p.ctr_use, p.ctr_view_all, p.vol_use, p.tpl_use];
+    if (manageFlags.some(Boolean)) {
+      return { color: '#166534', bg: '#dcfce7', label: '管理' };
+    }
+    if (useFlags.some(Boolean)) {
+      return { color: '#1e40af', bg: '#dbeafe', label: '使用' };
+    }
+    if (viewFlags.some(Boolean)) {
+      return { color: '#92400e', bg: '#fef3c7', label: '可见' };
+    }
+    return { color: '#6b7280', bg: '#f3f4f6', label: '仅可见' };
   }
 
   return (
@@ -641,7 +651,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                     </div>
                   )}
                   {perms.map((p) => {
-                    const { color, bg, label } = getPermLevelDisplay(p);
+                    const { color, bg, label } = getPermSummary(p);
                     return (
                       <div key={p.userId} className="dm-perm-row" style={{ alignItems: 'center' }}>
                         <span style={{ flex: 1, minWidth: 0 }}>

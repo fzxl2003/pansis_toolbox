@@ -59,13 +59,13 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
   const canManage = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
-    return me.role === 'admin' || s?.permissionLevel === 'manage' || !!s?.perms?.img_manage_all;
+    return me.role === 'admin' || !!s?.perms?.img_manage_all;
   };
 
   const canUse = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
-    return me.role === 'admin' || s?.permissionLevel === 'manage' || s?.permissionLevel === 'use';
+    return me.role === 'admin' || !!s?.perms?.img_use || !!s?.perms?.img_view_all;
   };
 
   const loadImages = useCallback(async (sid: string) => {

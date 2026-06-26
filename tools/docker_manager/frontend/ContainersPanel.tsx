@@ -40,7 +40,7 @@ import type {
   ServerResourceOverview,
   Template,
   TemplateDetail,
-  UserQuota,
+  UserPerms,
 } from './types';
 
 // ---- 容器端口标签渲染 ----
@@ -229,7 +229,7 @@ function buildDockerCmd(p: {
 
 export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuccess }: {
   serverId: string;
-  quota: UserQuota | null;
+  quota: UserPerms | null;
   serverOverview: ServerResourceOverview | null;
   onClose: () => void;
   onSuccess: () => void;
@@ -371,8 +371,8 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
       }>
       {error && <Alert type="error">{error}</Alert>}
       {serverOverview && <ResourceOverviewStrip overview={serverOverview} />}
-      {quota?.pathWhitelist && quota.pathWhitelist.length > 0 && (
-        <Alert type="info">挂载路径白名单：{quota.pathWhitelist.join('、')}</Alert>
+{quota?.ctr_path_whitelist && quota.ctr_path_whitelist.length > 0 && (
+<Alert type="info">挂载路径白名单：{quota.ctr_path_whitelist.join('、')}</Alert>
       )}
 
       {/* ===== CLI 模式 ===== */}
@@ -925,7 +925,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
   const [logs, setLogs] = useState<{ id: string; name: string; text: string } | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
   const [createMode, setCreateMode] = useState<CreateMode | null>(null);
-  const [quota, setQuota] = useState<UserQuota | null>(null);
+  const [quota, setQuota] = useState<UserPerms | null>(null);
   const [serverOverview, setServerOverview] = useState<ServerResourceOverview | null>(null);
   // 容器详情弹窗
   const [detailTarget, setDetailTarget] = useState<DockerContainer | null>(null);
@@ -943,13 +943,13 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
   const canCreate = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
-    return me.role === 'admin' || s?.permissionLevel === 'manage' || quota?.canCreateContainer;
+    return me.role === 'admin' || !!s?.perms?.ctr_create || !!quota?.ctr_create;
   };
 
   const canManage = (sid: string | null) => {
     if (!sid) return false;
     const s = servers.find((x) => x.id === sid);
-    return me.role === 'admin' || s?.permissionLevel === 'manage' || !!s?.perms?.ctr_manage_all || !!quota?.canManageContainer;
+    return me.role === 'admin' || !!s?.perms?.ctr_manage_all || !!quota?.ctr_manage_all;
   };
 
   const load = useCallback(async (sid: string) => {
@@ -958,11 +958,11 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
     try {
       const [cr, qr, ovr] = await Promise.all([
         apiGet<{ containers: DockerContainer[] }>(`${API}/servers/${sid}/containers`),
-        apiGet<{ quota: UserQuota }>(`${API}/servers/${sid}/my-quota`),
+        apiGet<UserPerms>(`${API}/servers/${sid}/my-quota`),
         apiGet<ServerResourceOverview>(`${API}/servers/${sid}/resource-overview`).catch(() => null),
       ]);
       setContainers(cr.containers);
-      setQuota(qr.quota);
+      setQuota(qr);
       setServerOverview(ovr);
     } catch (e) {
       setError(e);

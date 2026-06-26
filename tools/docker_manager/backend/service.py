@@ -801,6 +801,106 @@ def get_my_quota(server_id: str, user: User) -> dict[str, Any]:
 # 镜像管理
 # ==============================================================
 
+def _calc_user_image_usage(
+    conn: sqlite3.Connection, server_row: sqlite3.Row, user: User
+) -> dict[str, Any]:
+    """计算用户在指定服务器上的镜像使用情况与配额。
+
+    配额占用者均分逻辑：用户作为 quota_holder 的镜像，按该镜像的 quota_holder 数量均分大小。
+    SSH 连接失败时各项用量按 0 处理（不阻塞调用方）。
+
+    返回:
+        quotaGb      配额上限 GB（0=不限）
+        usedSelfGb   当前用户配额占用 GB（按配额占用者均分）
+        usedTotalGb  服务器全部镜像 GB
+        countSelf    当前用户作为配额占用者的镜像数
+        countTotal   服务器全部镜像数
+        remainingGb  剩余配额 GB（None=不限）
+    """
+    perms = _get_user_perms(conn, server_row["id"], user)
+    img_quota_gb = float(perms.get("img_quota_gb", 0))  # 0 = 不限
+    # 获取用户作为 quota_holder 的镜像 ref 集合
+    user_qh_img_refs: set[str] = set()
+    for r in conn.execute(
+        "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role='quota_holder'",
+        (server_row["id"], user.id),
+    ).fetchall():
+        user_qh_img_refs.add(r["resource_ref"])
+    # 构建镜像 ref → quota_holder 数量的映射（仅用户是 quota_holder 的镜像）
+    img_qh_counts: dict[str, int] = {}
+    for ref in user_qh_img_refs:
+        cnt_row = conn.execute(
+            """SELECT COUNT(DISTINCT user_id) as cnt FROM docker_resource_roles
+               WHERE server_id=? AND resource_type='image' AND resource_ref=? AND role='quota_holder'""",
+            (server_row["id"], ref),
+        ).fetchone()
+        img_qh_counts[ref] = max(1, cnt_row["cnt"])
+
+    # SSH 获取镜像列表及大小
+    img_used_self_gb = 0.0
+    img_used_total_gb = 0.0
+    img_count_self = 0
+    img_count_total = 0
+    try:
+        img_client = _ssh_connect(server_row)
+        try:
+            img_out, _, img_rc = _ssh_exec(
+                img_client,
+                'docker images --format \'{{.Repository}}:{{.Tag}}\t{{.Size}}\'',
+                timeout=15,
+            )
+        finally:
+            img_client.close()
+        if img_rc == 0:
+            for line in img_out.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                ref, size_str = parts[0], parts[1]
+                size_gb = _parse_size_to_gb(size_str)
+                img_used_total_gb += size_gb
+                img_count_total += 1
+                # 新均分逻辑：用户是 quota_holder 时按配额占用者数量均分
+                if ref in user_qh_img_refs:
+                    img_used_self_gb += size_gb / img_qh_counts[ref]
+                    img_count_self += 1
+    except ToolboxError:
+        pass  # SSH 连接失败时静默，不影响其他概览数据
+
+    img_remaining_gb = max(0.0, img_quota_gb - img_used_self_gb) if img_quota_gb > 0 else None
+    return {
+        "quotaGb": img_quota_gb,
+        "usedSelfGb": img_used_self_gb,
+        "usedTotalGb": img_used_total_gb,
+        "countSelf": img_count_self,
+        "countTotal": img_count_total,
+        "remainingGb": img_remaining_gb,
+    }
+
+
+def _enforce_image_quota(
+    conn: sqlite3.Connection, server_row: sqlite3.Row, user: User
+) -> None:
+    """若用户在指定服务器上的镜像配额已超出上限，抛出 QUOTA_EXCEEDED 异常。
+
+    用于拉取镜像 / 跨服务器复制镜像（目标服务器）前的配额校验。
+    管理员不受限（quota_gb=0 表示不限）。
+    """
+    usage = _calc_user_image_usage(conn, server_row, user)
+    quota_gb = float(usage["quotaGb"])
+    used_self_gb = float(usage["usedSelfGb"])
+    if quota_gb > 0 and used_self_gb >= quota_gb:
+        raise ToolboxError(
+            "QUOTA_EXCEEDED",
+            f"镜像空间配额不足，已用 {used_self_gb:.2f} GB，配额 {quota_gb:.2f} GB",
+            status_code=403,
+            tool_id=TOOL_ID,
+        )
+
+
 def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
     """列出服务器上的 Docker 镜像，按所有权/角色过滤"""
     init_docker_database()
@@ -815,28 +915,28 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
             "SELECT image_ref, owner_user_id FROM docker_images_meta WHERE server_id = ?", (server_id,)
         ).fetchall()
         meta_map = {r["image_ref"]: r["owner_user_id"] for r in meta_rows}
-        # 新角色表：查询当前用户拥有任意角色（owner/viewer/creator）的所有镜像 ref
+        # 新角色表：查询当前用户拥有查看权限（owner/viewer）的所有镜像 ref。creator/quota_holder 不具备查看权
         user_accessible_refs: set[str] = set()
         for r in conn.execute(
-            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=?",
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role IN ('owner','viewer')",
             (server_id, user.id),
         ).fetchall():
             user_accessible_refs.add(r["resource_ref"])
-        # 查询当前用户拥有 owner/creator 角色的镜像 ref（可管理=可删除/复制）
+        # 查询当前用户拥有 owner 角色的镜像 ref（可管理=可删除/复制）。creator 不拥有管理权，仅 owner 可管理
         user_managed_refs: set[str] = set()
         for r in conn.execute(
-            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role IN ('owner','creator')",
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role='owner'",
             (server_id, user.id),
         ).fetchall():
             user_managed_refs.add(r["resource_ref"])
         # 是否有全局镜像管理权限
         has_img_manage_all = user.role == "admin" or bool(perms.get("img_manage_all"))
         # 角色继承：查询用户有访问权的容器，通过缓存表找到这些容器使用的镜像
-        # 规则：容器的 viewer/owner/creator 自动继承该容器使用的镜像的查看权
+        # 规则：容器的 owner/viewer 自动继承该容器使用的镜像的查看权（creator/quota_holder 不继承）
         if user.role != "admin":
             accessible_ctrs: set[str] = set()
             for r in conn.execute(
-                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=?",
+                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=? AND role IN ('owner','viewer')",
                 (server_id, user.id),
             ).fetchall():
                 accessible_ctrs.add(r["resource_ref"])
@@ -862,8 +962,20 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
             client,
             'docker images --format \'{"id":"{{.ID}}","repo":"{{.Repository}}","tag":"{{.Tag}}","size":"{{.Size}}","created":"{{.CreatedAt}}"}\' ',
         )
+        # 获取服务器上所有容器引用的镜像（不受权限过滤），用于判断镜像是否被使用
+        ctr_stdout, _, _ = _ssh_exec(
+            client,
+            "docker ps -a --format '{{.Image}}'",
+        )
     finally:
         client.close()
+
+    # 构建被容器使用的镜像引用集合（所有容器，不受权限过滤）
+    used_image_refs: set[str] = set()
+    for line in ctr_stdout.strip().splitlines():
+        ref = line.strip()
+        if ref:
+            used_image_refs.add(ref)
 
     images = []
     for line in stdout.strip().splitlines():
@@ -880,10 +992,17 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
         owner = meta_map.get(ref_full) or meta_map.get(img.get("id", ""))
         img["ownerUserId"] = owner  # 前端字段（第一个所有者）
         img["platformManaged"] = owner is not None or ref_full in user_accessible_refs
-        # 当前用户是否可管理该镜像（删除/复制）：全局管理权 或 所有者/创建者
-        img["canManage"] = has_img_manage_all or ref_full in user_managed_refs or owner == user.id
+        # 当前用户是否可管理该镜像（删除/复制）：全局管理权 或 owner 角色。creator 不拥有管理权
+        img["canManage"] = has_img_manage_all or ref_full in user_managed_refs
+        # 该镜像是否被服务器上任意容器使用（不受权限过滤，用于禁用删除按钮）
+        img_id_short = (img.get("id", "") or "")[:12]
+        img["inUse"] = (
+            ref_full in used_image_refs
+            or (img.get("tag", "") == "latest" and img.get("repo", "") in used_image_refs)
+            or (img_id_short and img_id_short in used_image_refs)
+        )
 
-        # 访问过滤：view_all 看全部；否则看有角色关联的（owner/viewer/creator 皆可）
+        # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）
         if view_all:
             images.append(img)
         elif ref_full in user_accessible_refs or owner == user.id:
@@ -901,6 +1020,9 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
             if not perms.get("server_visible") or not perms.get("img_pull"):
                 raise ToolboxError("PERMISSION_DENIED", "您没有拉取镜像的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
+        # 镜像配额校验：拉取会在本服务器新增镜像并占用配额，配额已满则禁止拉取
+        if user.role != "admin":
+            _enforce_image_quota(conn, row, user)
 
     client = _ssh_connect(row)
     try:
@@ -937,9 +1059,9 @@ def delete_image(server_id: str, image_ref: str, user: User, force: bool = False
                         "您没有使用镜像的权限，无法删除镜像",
                         status_code=403, tool_id=TOOL_ID,
                     )
-                # 且只能删除自己拥有/创建的镜像
+                # 且只能删除自己拥有 owner 角色的镜像（creator 不拥有管理权）
                 role_row = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND resource_ref=? AND user_id=? AND role='owner'",
                     (server_id, image_ref, user.id),
                 ).fetchone()
                 if not role_row:
@@ -978,7 +1100,17 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
     init_docker_database()
     with get_connection() as conn:
         _require_server_visible(conn, src_server_id, user)
+        _require_server_visible(conn, dst_server_id, user)
         if user.role != "admin":
+            # 源服务器需要 img_copy 权限（跨服务器复制镜像）
+            # 注意：img_copy 是跨服务器复制的专用权限，img_manage_all / 镜像所有者均不能绕过
+            src_perms = _get_user_perms(conn, src_server_id, user)
+            if not src_perms.get("img_copy"):
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您在源服务器没有「跨服务器复制镜像」权限",
+                    status_code=403, tool_id=TOOL_ID,
+                )
             # 目标服务器需要 img_copy 权限（跨服务器复制镜像）
             dst_perms = _get_user_perms(conn, dst_server_id, user)
             if not dst_perms.get("img_copy"):
@@ -987,31 +1119,11 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
                     "您在目标服务器没有「跨服务器复制镜像」权限",
                     status_code=403, tool_id=TOOL_ID,
                 )
-            # 源服务器镜像管理权限：img_manage_all / img_copy / 镜像所有者 任一即可
-            perms = _get_user_perms(conn, src_server_id, user)
-            has_manage_all = bool(perms.get("img_manage_all"))
-            has_copy = bool(perms.get("img_copy"))
-            is_owner = bool(conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
-                (src_server_id, image_ref, user.id),
-            ).fetchone())
-            if not is_owner:
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_images_meta WHERE server_id = ? AND image_ref = ?",
-                    (src_server_id, image_ref),
-                ).fetchone()
-                if not meta or meta["owner_user_id"] != user.id:
-                    is_owner = False
-                else:
-                    is_owner = True
-            if not has_manage_all and not has_copy and not is_owner:
-                raise ToolboxError(
-                    "PERMISSION_DENIED",
-                    "您没有复制该镜像的权限，需要「跨服务器复制镜像」权限或为该镜像的所有者",
-                    status_code=403, tool_id=TOOL_ID,
-                )
         src_row = _get_server_row(conn, src_server_id)
         dst_row = _get_server_row(conn, dst_server_id)
+        # 目标服务器镜像配额校验：复制会在目标服务器新增镜像并占用配额，配额已满则禁止作为复制目标
+        if user.role != "admin":
+            _enforce_image_quota(conn, dst_row, user)
 
     try:
         import paramiko
@@ -1086,10 +1198,10 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
             "SELECT container_ref, owner_user_id FROM docker_containers_meta WHERE server_id = ?", (server_id,)
         ).fetchall()
         meta_map: dict[str, str] = {r["container_ref"]: r["owner_user_id"] for r in meta_rows}
-        # 新角色表：查询当前用户拥有任意角色的所有容器 ref
+        # 新角色表：查询当前用户拥有查看权限（owner/viewer）的所有容器 ref。creator/quota_holder 不具备查看权
         user_accessible_refs: set[str] = set()
         for r in conn.execute(
-            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=?",
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=? AND role IN ('owner','viewer')",
             (server_id, user.id),
         ).fetchall():
             user_accessible_refs.add(r["resource_ref"])
@@ -1344,9 +1456,9 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("ctr_manage_all", False)
-            # 新模型：检查用户是否是该容器的 owner/creator
+            # 新模型：检查用户是否是该容器的 owner（creator 不拥有管理权）
             is_resource_owner = conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role='owner'",
                 (server_id, container_id, user.id),
             ).fetchone() is not None
             # _meta 表查询
@@ -1396,7 +1508,7 @@ def update_restart_policy(server_id: str, container_id: str, policy: str, user: 
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("ctr_manage_all", False)
             is_resource_owner = conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role='owner'",
                 (server_id, container_id, user.id),
             ).fetchone() is not None
             if not is_resource_owner:
@@ -1429,7 +1541,7 @@ def update_restart_policy(server_id: str, container_id: str, policy: str, user: 
 def get_container_detail(server_id: str, container_id: str, user: User) -> dict[str, Any]:
     """
     获取容器详情（docker inspect），返回基础信息、环境变量、端口映射、卷挂载、网络等。
-    权限：容器的 owner/viewer/creator 角色，或 ctr_view_all / admin（所有容器）。
+    权限：容器的 owner/viewer 角色，或 ctr_view_all / admin（所有容器）。
     """
     init_docker_database()
     with get_connection() as conn:
@@ -1440,9 +1552,9 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
             if not view_all and not ctr_use:
                 raise ToolboxError("PERMISSION_DENIED", "您没有查看容器详情的权限", status_code=403, tool_id=TOOL_ID)
             if not view_all:
-                # 检查是否有该容器的角色（owner/viewer/creator）
+                # 检查是否有该容器的查看角色（owner/viewer）
                 accessible_roles = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=?",
+                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','viewer')",
                     (server_id, container_id, user.id),
                 ).fetchone()
                 # _meta 表查询
@@ -1581,7 +1693,7 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
 
 
 def get_container_logs(server_id: str, container_id: str, user: User, tail: int = 200) -> dict[str, Any]:
-    """获取容器日志（需容器 owner/viewer/creator 角色或 ctr_view_all）"""
+    """获取容器日志（需容器 owner/viewer 角色或 ctr_view_all）"""
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
@@ -1592,7 +1704,7 @@ def get_container_logs(server_id: str, container_id: str, user: User, tail: int 
                 raise ToolboxError("PERMISSION_DENIED", "您没有查看容器日志的权限", status_code=403, tool_id=TOOL_ID)
             if not view_all:
                 accessible = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=?",
+                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','viewer')",
                     (server_id, container_id, user.id),
                 ).fetchone()
                 meta = conn.execute(
@@ -1843,19 +1955,19 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
             "SELECT * FROM docker_volumes_meta WHERE server_id = ?", (server_id,)
         ).fetchall()
         meta_map = {r["volume_name"]: dict(r) for r in meta_rows}
-        # 新角色表：查询当前用户拥有任意角色的卷 ref
+        # 新角色表：查询当前用户拥有查看权限（owner/viewer）的卷 ref。creator/quota_holder 不具备查看权
         user_accessible_vols: set[str] = set()
         if user.role != "admin":
             for r in conn.execute(
-                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND user_id=?",
+                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND user_id=? AND role IN ('owner','viewer')",
                 (server_id, user.id),
             ).fetchall():
                 user_accessible_vols.add(r["resource_ref"])
             # 角色继承：查询用户有访问权的容器，通过缓存表找到这些容器挂载的卷
-            # 规则：容器的 viewer/owner/creator 自动继承该容器挂载的卷的查看权
+            # 规则：容器的 owner/viewer 自动继承该容器挂载的卷的查看权（creator/quota_holder 不继承）
             accessible_ctrs: set[str] = set()
             for r in conn.execute(
-                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=?",
+                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=? AND role IN ('owner','viewer')",
                 (server_id, user.id),
             ).fetchall():
                 accessible_ctrs.add(r["resource_ref"])
@@ -1920,7 +2032,7 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
     """
     获取卷详情：包含平台角色信息（creator/owner/viewer）以及挂载该卷的容器列表。
     容器列表按当前用户权限过滤：
-      - 有查看权限（viewer/owner/creator/ctr_view_all）的容器：返回完整信息
+      - 有查看权限（owner/viewer/ctr_view_all）的容器：返回完整信息
       - 无查看权限的容器：仅返回数量
     """
     init_docker_database()
@@ -1941,11 +2053,11 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
         perms = _get_user_perms(conn, server_id, user)
         view_all_ctrs = user.role == "admin" or perms.get("ctr_view_all", False)
 
-        # 当前用户可访问的容器 ref 集合（新角色表）
+        # 当前用户可访问的容器 ref 集合（仅 owner/viewer 具备查看权）
         user_accessible_ctrs: set[str] = set()
         if not view_all_ctrs:
             for r in conn.execute(
-                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=?",
+                "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=? AND role IN ('owner','viewer')",
                 (server_id, user.id),
             ).fetchall():
                 user_accessible_ctrs.add(r["resource_ref"])
@@ -2077,9 +2189,9 @@ def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_delete_all = perms.get("vol_delete_all", False)
-            # 检查是否是该卷的 owner/creator
+            # 检查是否是该卷的 owner（creator 不拥有管理权）
             is_owner = conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND user_id=? AND role IN ('owner','creator')",
+                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND user_id=? AND role='owner'",
                 (server_id, volume_name, user.id),
             ).fetchone() is not None
             if not is_owner:
@@ -2300,12 +2412,12 @@ def _get_resource_roles(conn: sqlite3.Connection, server_id: str, resource_type:
 
 def _user_has_resource_access(conn: sqlite3.Connection, server_id: str, resource_type: str, resource_ref: str, user_id: str) -> bool:
     """
-    判断用户是否能访问某资源：是 creator/owner/viewer 之一即可。
-    注意：creator 默认具备 owner 权限（除非被剥夺 owner 角色）。
+    判断用户是否能查看（访问）某资源：仅 owner/viewer 角色具备查看权。
+    creator 和 quota_holder 不是有权限角色，不授予任何权限。
     """
     row = conn.execute(
         """SELECT COUNT(*) as cnt FROM docker_resource_roles
-           WHERE server_id=? AND resource_type=? AND resource_ref=? AND user_id=?""",
+           WHERE server_id=? AND resource_type=? AND resource_ref=? AND user_id=? AND role IN ('owner','viewer')""",
         (server_id, resource_type, resource_ref, user_id),
     ).fetchone()
     return bool(row["cnt"] > 0)
@@ -2847,59 +2959,7 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
                 client.close()
 
         # ---------- 镜像配额（配额占用者均分） ----------
-        img_quota_gb = float(perms.get("img_quota_gb", 0))  # 0 = 不限
-        # 获取用户作为 quota_holder 的镜像 ref 集合
-        user_qh_img_refs: set[str] = set()
-        for r in conn.execute(
-            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND user_id=? AND role='quota_holder'",
-            (server_id, user.id),
-        ).fetchall():
-            user_qh_img_refs.add(r["resource_ref"])
-        # 构建镜像 ref → quota_holder 数量的映射（仅用户是 quota_holder 的镜像）
-        img_qh_counts: dict[str, int] = {}
-        for ref in user_qh_img_refs:
-            cnt_row = conn.execute(
-                """SELECT COUNT(DISTINCT user_id) as cnt FROM docker_resource_roles
-                   WHERE server_id=? AND resource_type='image' AND resource_ref=? AND role='quota_holder'""",
-                (server_id, ref),
-            ).fetchone()
-            img_qh_counts[ref] = max(1, cnt_row["cnt"])
-
-        # SSH 获取镜像列表及大小
-        img_used_self_gb = 0.0
-        img_used_total_gb = 0.0
-        img_count_self = 0
-        img_count_total = 0
-        try:
-            img_client = _ssh_connect(srv_row)
-            try:
-                img_out, _, img_rc = _ssh_exec(
-                    img_client,
-                    'docker images --format \'{{.Repository}}:{{.Tag}}\t{{.Size}}\'',
-                    timeout=15,
-                )
-            finally:
-                img_client.close()
-            if img_rc == 0:
-                for line in img_out.strip().splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) < 2:
-                        continue
-                    ref, size_str = parts[0], parts[1]
-                    size_gb = _parse_size_to_gb(size_str)
-                    img_used_total_gb += size_gb
-                    img_count_total += 1
-                    # 新均分逻辑：用户是 quota_holder 时按配额占用者数量均分
-                    if ref in user_qh_img_refs:
-                        img_used_self_gb += size_gb / img_qh_counts[ref]
-                        img_count_self += 1
-        except ToolboxError:
-            pass  # SSH 连接失败时静默，不影响其他概览数据
-
-        img_remaining_gb = max(0.0, img_quota_gb - img_used_self_gb) if img_quota_gb > 0 else None
+        img_usage = _calc_user_image_usage(conn, srv_row, user)
 
         # ---------- CUDA 权限 ----------
         server_gpu_info: list[dict[str, Any]] = json.loads(srv_row["gpu_info"]) if srv_row["gpu_info"] else []
@@ -2927,12 +2987,12 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
             "remainingGb": vol_remaining,
         },
         "image": {
-            "quotaGb": img_quota_gb,
-            "usedSelfGb": img_used_self_gb,
-            "usedTotalGb": img_used_total_gb,
-            "remainingGb": img_remaining_gb,
-            "countSelf": img_count_self,
-            "countTotal": img_count_total,
+            "quotaGb": img_usage["quotaGb"],
+            "usedSelfGb": img_usage["usedSelfGb"],
+            "usedTotalGb": img_usage["usedTotalGb"],
+            "remainingGb": img_usage["remainingGb"],
+            "countSelf": img_usage["countSelf"],
+            "countTotal": img_usage["countTotal"],
         },
         "paths": paths_info,
         "cuda": {

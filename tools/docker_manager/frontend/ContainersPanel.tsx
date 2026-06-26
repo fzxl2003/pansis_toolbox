@@ -13,6 +13,7 @@ import {
   FileText,
   Globe,
   HardDrive,
+  Image,
   Info,
   Layers,
   Network,
@@ -225,10 +226,159 @@ function buildDockerCmd(p: {
   return parts.join(' ');
 }
 
+// ---- CrossServerImageModal ----
+// 容器创建时，从其他服务器复制镜像到当前服务器
+
+function CrossServerImageModal({
+  servers,
+  me,
+  currentServerId,
+  currentServerName,
+  imgQuotaExhausted,
+  onClose,
+  onCopied,
+}: {
+  servers: DmServer[];
+  me: AuthUser;
+  currentServerId: string;
+  currentServerName: string;
+  imgQuotaExhausted: boolean;
+  onClose: () => void;
+  onCopied: (imageRef: string) => void;
+}) {
+  const [selectedSrcId, setSelectedSrcId] = useState<string | null>(null);
+  const [images, setImages] = useState<DockerImage[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [copying, setCopying] = useState<string | null>(null);
+  const [error, setError, clearError] = useErrorMsg();
+
+  const canCopyServer = (sid: string) => {
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || !!s?.perms?.img_copy;
+  };
+
+  // 可作为源服务器的列表（用户有 img_copy 权限，且不是当前服务器）
+  const srcServers = servers.filter((s) => s.id !== currentServerId && canCopyServer(s.id));
+
+  async function selectSrc(sid: string) {
+    setSelectedSrcId(sid);
+    setImages([]);
+    clearError();
+    setLoading(true);
+    try {
+      const r = await apiGet<{ images: DockerImage[] }>(`${API}/servers/${sid}/images`);
+      setImages(r.images);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function doCopy(imageRef: string) {
+    if (!selectedSrcId) return;
+    setCopying(imageRef);
+    clearError();
+    try {
+      await apiPost(`${API}/images/copy`, {
+        srcServerId: selectedSrcId,
+        dstServerId: currentServerId,
+        imageRef,
+      });
+      onCopied(imageRef);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setCopying(null);
+    }
+  }
+
+  const srcServer = servers.find((s) => s.id === selectedSrcId);
+
+  return (
+    <Modal title="从其他服务器复制镜像" onClose={onClose} wide
+      foot={
+        selectedSrcId ? (
+          <>
+            <button className="btn" onClick={() => { setSelectedSrcId(null); setImages([]); clearError(); }}>← 返回服务器列表</button>
+            <button className="btn btn-primary" onClick={onClose}>关闭</button>
+          </>
+        ) : (
+          <button className="btn btn-primary" onClick={onClose}>关闭</button>
+        )
+      }>
+      {error && <Alert type="error">{error}</Alert>}
+      {imgQuotaExhausted && (
+        <Alert type="error">当前服务器镜像空间配额已用满，无法接收复制的镜像。请删除不再使用的镜像或联系管理员调整配额。</Alert>
+      )}
+
+      {!selectedSrcId ? (
+        <div>
+          <Alert type="info">选择一个源服务器，将其中的镜像复制到当前服务器（{currentServerName}），复制完成后将自动选中该镜像。</Alert>
+          {srcServers.length === 0 ? (
+            <div className="dm-empty"><Image size={32} /> 暂无其他可复制镜像的服务器（需要在其他服务器也拥有「跨服务器复制镜像」权限）</div>
+          ) : (
+            <div className="dm-table">
+              <div className="dm-table-header" style={{ gridTemplateColumns: '2fr 1.5fr auto' }}>
+                <span>服务器</span><span>地址</span><span>操作</span>
+              </div>
+              {srcServers.map((s) => (
+                <div key={s.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1.5fr auto' }}>
+                  <span style={{ fontWeight: 600 }}>{s.name}</span>
+                  <span style={{ color: '#526071', fontFamily: 'monospace', fontSize: 13 }}>{s.host}:{s.port}</span>
+                  <span>
+                    <button className="btn" style={{ fontSize: 12 }} onClick={() => selectSrc(s.id)}>选择</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div>
+          <div style={{ marginBottom: 12, fontSize: 13, color: '#526071' }}>
+            源服务器：<strong>{srcServer?.name}</strong>（{srcServer?.host}:{srcServer?.port}） → 目标：<strong>{currentServerName}</strong>
+          </div>
+          {loading ? (
+            <div className="dm-empty"><Spin /> 加载镜像列表中…</div>
+          ) : images.length === 0 ? (
+            <div className="dm-empty"><Image size={32} /> 该服务器暂无可复制的镜像</div>
+          ) : (
+            <div className="dm-table">
+              <div className="dm-table-header" style={{ gridTemplateColumns: '2fr 1fr 1fr auto' }}>
+                <span>镜像</span><span>标签</span><span>大小</span><span>操作</span>
+              </div>
+              {images.map((img) => {
+                const ref = `${img.repo}:${img.tag}`;
+                return (
+                  <div key={img.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 1fr auto' }}>
+                    <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={img.repo} /></span>
+                    <span><code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{img.tag}</code></span>
+                    <span style={{ color: '#526071' }}>{img.size}</span>
+                    <span>
+                      <button className="btn btn-primary" style={{ fontSize: 12 }}
+                        disabled={!!copying || imgQuotaExhausted}
+                        onClick={() => doCopy(ref)}>
+                        {copying === ref ? <Spin /> : <Copy size={12} />} 复制
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 // ---- RunCreateModal ----
 
-export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuccess }: {
+export function RunCreateModal({ serverId, servers, me, quota, serverOverview, onClose, onSuccess }: {
   serverId: string;
+  servers: DmServer[];
+  me: AuthUser;
   quota: UserPerms | null;
   serverOverview: ServerResourceOverview | null;
   onClose: () => void;
@@ -264,6 +414,17 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
   const [loading, setLoading] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
 
+  // ---------- 跨服务器镜像复制 ----------
+  const [showCrossServer, setShowCrossServer] = useState(false);
+
+  // 权限判断
+  const canPull = me.role === 'admin' || !!quota?.img_pull;
+  const canCopyCurrent = me.role === 'admin' || !!quota?.img_copy;
+
+  // 镜像配额是否已用满（remainingGb=null 表示不限）
+  const imgQuotaExhausted =
+    serverOverview?.image?.remainingGb != null && serverOverview.image.remainingGb <= 0;
+
   const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
   const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
 
@@ -275,15 +436,20 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
   }
 
   // 加载镜像和卷列表（懒加载）
-  useEffect(() => {
-    if (imagesLoaded) return;
-    setImagesLoaded(true);
+  const reloadImages = () => {
     apiGet<{ images: DockerImage[] }>(`${API}/servers/${serverId}/images`)
       .then(r => setAvailImages(r.images))
       .catch(() => {/* 静默 */});
+  };
+
+  useEffect(() => {
+    if (imagesLoaded) return;
+    setImagesLoaded(true);
+    reloadImages();
     apiGet<{ volumes: DockerVolume[] }>(`${API}/servers/${serverId}/volumes`)
       .then(r => setAvailVolumes(r.volumes ?? []))
       .catch(() => {/* 静默 */});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverId, imagesLoaded]);
 
   // 当切换到 CLI 模式时，将界面表单同步为命令字符串
@@ -337,10 +503,19 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
     finally { setLoading(false); }
   }
 
+  // 跨服务器复制成功后：关闭弹窗、刷新镜像列表、自动选中
+  function handleCrossServerCopied(imageRef: string) {
+    setShowCrossServer(false);
+    reloadImages();
+    setImage(imageRef);
+    setImageMode('select');
+  }
+
   const canSubmitGui = imageMode === 'input' ? !!imageInput.trim() : !!image;
 
   // ---------- 渲染 ----------
   return (
+    <>
     <Modal title="docker run 创建容器" onClose={onClose} wide
       foot={
         <>
@@ -395,28 +570,36 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
         <div style={{ display: 'grid', gap: 16 }}>
 
           {/* ── 基本信息 ── */}
-          <div className="dm-run-section">
-            <div className="dm-run-section-title">基本信息</div>
-            <div className="dm-form-grid">
+            <div className="dm-run-section">
+              <div className="dm-run-section-title">基本信息</div>
+              <div className="dm-form-grid">
               {/* 镜像 */}
               <Field label="镜像 *" full>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {imageMode === 'select' ? (
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <select
-                          value={image}
-                          onChange={e => setImage(e.target.value)}
-                          style={{ flex: 1 }}
-                        >
-                          <option value="">— 选择已有镜像 —</option>
-                          {availImages.map(img => (
-                            <option key={`${img.repo}:${img.tag}`} value={`${img.repo}:${img.tag}`}>
-                              {img.repo}:{img.tag}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      <select
+                        value={image}
+                        onChange={e => {
+                          if (e.target.value === '__cross_server__') {
+                            setShowCrossServer(true);
+                            setImage('');
+                          } else {
+                            setImage(e.target.value);
+                          }
+                        }}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="">— 选择已有镜像 —</option>
+                        {canCopyCurrent && (
+                          <option value="__cross_server__">⟳ 从其他服务器复制镜像…</option>
+                        )}
+                        {availImages.map(img => (
+                          <option key={`${img.repo}:${img.tag}`} value={`${img.repo}:${img.tag}`}>
+                            {img.repo}:{img.tag}
+                          </option>
+                        ))}
+                      </select>
                     ) : (
                       <input
                         value={imageInput}
@@ -425,15 +608,22 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
                       />
                     )}
                   </div>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ flexShrink: 0, fontSize: 12 }}
-                    onClick={() => { setImageMode(m => m === 'select' ? 'input' : 'select'); }}
-                  >
-                    {imageMode === 'select' ? '手动输入' : '选择已有'}
-                  </button>
+                  {canPull && (
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ flexShrink: 0, fontSize: 12 }}
+                      onClick={() => { setImageMode(m => m === 'select' ? 'input' : 'select'); }}
+                    >
+                      {imageMode === 'select' ? '手动输入' : '选择已有'}
+                    </button>
+                  )}
                 </div>
+                {!canPull && imageMode === 'select' && (
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                    您没有拉取镜像权限，只能选择已有镜像或从其他服务器复制。
+                  </div>
+                )}
               </Field>
               <Field label="容器名称">
                 <input value={name} onChange={e => setName(e.target.value)} placeholder="my-nginx（可选）" />
@@ -678,6 +868,18 @@ export function RunCreateModal({ serverId, quota, serverOverview, onClose, onSuc
         </div>
       )}
     </Modal>
+    {showCrossServer && (
+      <CrossServerImageModal
+        servers={servers}
+        me={me}
+        currentServerId={serverId}
+        currentServerName={servers.find(s => s.id === serverId)?.name ?? serverId}
+        imgQuotaExhausted={imgQuotaExhausted}
+        onClose={() => setShowCrossServer(false)}
+        onCopied={handleCrossServerCopied}
+      />
+    )}
+    </>
   );
 }
 
@@ -1455,7 +1657,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
       )}
 
       {createMode === 'run' && serverId && (
-        <RunCreateModal serverId={serverId} quota={quota} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
+        <RunCreateModal serverId={serverId} servers={servers} me={me} quota={quota} serverOverview={serverOverview} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />
       )}
       {createMode === 'compose' && serverId && (
         <ComposeCreateModal serverId={serverId} onClose={() => setCreateMode(null)} onSuccess={() => { setCreateMode(null); void load(serverId!); }} />

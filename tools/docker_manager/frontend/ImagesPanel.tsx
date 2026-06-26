@@ -68,6 +68,19 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
     return me.role === 'admin' || !!s?.perms?.img_use || !!s?.perms?.img_view_all;
   };
 
+  const canPull = (sid: string | null) => {
+    if (!sid) return false;
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || !!s?.perms?.img_pull;
+  };
+
+  // 跨服务器复制镜像权限：img_copy 是专用权限，img_manage_all / 镜像所有者均不能绕过
+  const canCopy = (sid: string | null) => {
+    if (!sid) return false;
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || !!s?.perms?.img_copy;
+  };
+
   const loadImages = useCallback(async (sid: string) => {
     setLoading(true);
     clearError();
@@ -128,9 +141,8 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
 
   async function doDelete(imageRef: string, img: DockerImage) {
     if (!serverId) return;
-    const imageCntrs = getImageContainers(img);
-    if (imageCntrs.length > 0) {
-      // 有正在挂载/使用该镜像的容器，不允许删除
+    if (img.inUse) {
+      // 该镜像被服务器上任意容器使用（含用户无权查看的容器），不允许删除
       return;
     }
     if (!confirm(`确定要删除镜像 ${imageRef} 吗？`)) return;
@@ -174,6 +186,13 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
   // ---- 按镜像分组的容器视图 ----
   const imagesWithContainers = images.filter((img) => getImageContainers(img).length > 0);
 
+  // 可作为跨服务器复制目标的服务器（排除源服务器，且用户在目标服务器也拥有 img_copy 权限）
+  const copyableDstCount = servers.filter((s) => s.id !== serverId && canCopy(s.id)).length;
+
+  // 镜像配额是否已用满（remainingGb=null 表示不限，此时不会耗尽）
+  const imgQuotaExhausted =
+    serverOverview?.image?.remainingGb != null && serverOverview.image.remainingGb <= 0;
+
   return (
     <div style={{ display: 'grid', gap: 16 }}>
       <ServerSelector servers={servers} selected={serverId} onSelect={handleServerChange} />
@@ -185,14 +204,20 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
       {/* 工具栏 */}
       {serverId && canUse(serverId) && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div className="dm-form-field" style={{ flex: '1 1 260px' }}>
-            <label>拉取镜像</label>
-            <input value={pullRef} onChange={(e) => setPullRef(e.target.value)} placeholder="nginx:latest 或 registry/image:tag"
-              onKeyDown={(e) => e.key === 'Enter' && doPull()} />
-          </div>
-          <button className="btn btn-primary" onClick={doPull} disabled={pulling || !pullRef.trim()}>
-            {pulling ? <Spin /> : <Download size={14} />} 拉取
-          </button>
+          {canPull(serverId) && (
+            <>
+              <div className="dm-form-field" style={{ flex: '1 1 260px' }}>
+                <label>拉取镜像</label>
+                <input value={pullRef} onChange={(e) => setPullRef(e.target.value)} placeholder="nginx:latest 或 registry/image:tag"
+                  onKeyDown={(e) => e.key === 'Enter' && doPull()} disabled={imgQuotaExhausted} />
+              </div>
+              <button className="btn btn-primary" onClick={doPull}
+                disabled={pulling || !pullRef.trim() || imgQuotaExhausted}
+                title={imgQuotaExhausted ? '镜像空间配额已满，无法拉取新镜像' : undefined}>
+                {pulling ? <Spin /> : <Download size={14} />} 拉取
+              </button>
+            </>
+          )}
           <button className="btn" onClick={doRefresh} disabled={loading || containersLoading}>
             <RefreshCw size={14} /> 刷新
           </button>
@@ -200,6 +225,11 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
       )}
 
       {pullMsg && <div className="dm-logs-box" style={{ maxHeight: 180 }}>{pullMsg}</div>}
+
+      {/* 镜像配额耗尽提示 */}
+      {serverId && canPull(serverId) && imgQuotaExhausted && (
+        <Alert type="error">镜像空间配额已用满，无法拉取新镜像，也无法作为跨服务器复制的目标服务器。请删除不再使用的镜像或联系管理员调整配额。</Alert>
+      )}
 
       {/* 子 Tab 导航 */}
       {serverId && (
@@ -267,17 +297,17 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
                     )}
                   </span>
                   <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    {img.canManage && servers.length > 1 && (
+                    {canCopy(serverId) && copyableDstCount > 0 && (
                       <button className="dm-btn-icon" title="跨服务器复制" onClick={() => { setCopyRef(`${img.repo}:${img.tag}`); setCopyDst(''); setShowCopy(true); }}>
                         <Copy size={13} />
                       </button>
                     )}
-                    {img.canManage && !hasContainers && (
+                    {img.canManage && !img.inUse && (
                       <button className="dm-btn-icon danger" title="删除" onClick={() => doDelete(`${img.repo}:${img.tag}`, img)}>
                         <Trash2 size={13} />
                       </button>
                     )}
-                    {img.canManage && hasContainers && (
+                    {img.canManage && img.inUse && (
                       <span
                         title="该镜像正被容器使用，无法删除"
                         style={{ display: 'flex', alignItems: 'center', padding: '3px 4px', color: '#94a3b8', cursor: 'not-allowed' }}
@@ -362,7 +392,7 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
             <Field label="目标服务器">
               <select value={copyDst} onChange={(e) => setCopyDst(e.target.value)}>
                 <option value="">请选择…</option>
-                {servers.filter(s => s.id !== serverId).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {servers.filter(s => s.id !== serverId && canCopy(s.id)).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </Field>
           </div>

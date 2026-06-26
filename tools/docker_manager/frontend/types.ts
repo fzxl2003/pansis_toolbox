@@ -85,6 +85,7 @@ export type DockerImage = {
   size: string;
   created: string;
   canManage?: boolean;  // 当前用户是否可管理该镜像（删除/复制）
+  inUse?: boolean;      // 该镜像是否被服务器上任意容器使用（不受权限过滤，用于禁用删除按钮）
 };
 
 export type DockerContainer = {

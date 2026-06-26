@@ -592,15 +592,17 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
 
       {/* ============================================================
           合并管理面板 Modal（权限配置 + 资源角色管理）
+          注意：二级弹窗（权限编辑/角色分配）作为独立 Modal 叠加在本面板之上，
+          因此本面板始终渲染，不因二级弹窗打开而隐藏，避免 tab 按钮消失。
       ============================================================ */}
-      {panelServer && !permsEditTarget && !assignRolesTarget && (
+      {panelServer && (
         <Modal
           title={`服务器管理 — ${panelServer.name}`}
           onClose={closePanel}
           wide
           foot={<button className="btn" onClick={closePanel}>关闭</button>}
         >
-          {/* 切换按钮 */}
+          {/* 切换按钮（sticky 固定在 modal body 顶部，滚动时不消失） */}
           <div style={{
             display: 'flex',
             gap: 0,
@@ -609,6 +611,10 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
             borderRadius: 8,
             overflow: 'hidden',
             width: 'fit-content',
+            position: 'sticky',
+            top: 0,
+            zIndex: 2,
+            background: '#fff',
           }}>
             <button
               onClick={() => void switchPanelTab('perms')}

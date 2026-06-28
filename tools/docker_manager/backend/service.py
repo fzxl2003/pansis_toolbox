@@ -111,8 +111,9 @@ def init_docker_database() -> None:
                     ctr_quota_num INTEGER NOT NULL DEFAULT 0,    -- 容器数量配额(0=不限)
                     -- 卷权限
                     vol_use INTEGER NOT NULL DEFAULT 0,      -- 是否有权使用（查看/访问）卷
+                    vol_view_all INTEGER NOT NULL DEFAULT 0,  -- 查看所有用户的卷
                     vol_create INTEGER NOT NULL DEFAULT 0,
-                    vol_delete_all INTEGER NOT NULL DEFAULT 0,   -- 删除他人卷
+                    vol_manage_all INTEGER NOT NULL DEFAULT 0,   -- 管理所有用户的卷（删除权，自动包含查看权）
                     vol_copy INTEGER NOT NULL DEFAULT 0,
                     vol_quota_gb REAL NOT NULL DEFAULT 0,    -- 卷空间配额(GB，0=不限)
                     -- 模板权限
@@ -205,6 +206,30 @@ def init_docker_database() -> None:
                 );
                 """
             )
+            # 迁移：为已有数据库添加新列
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_user_perms)").fetchall()}
+            if "vol_view_all" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN vol_view_all INTEGER NOT NULL DEFAULT 0")
+            # vol_manage_all 迁移：新列取代旧的 vol_delete_all
+            if "vol_manage_all" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN vol_manage_all INTEGER NOT NULL DEFAULT 0")
+                # 如果旧列 vol_delete_all 存在，将其数据迁移到 vol_manage_all
+                if "vol_delete_all" in existing_cols:
+                    conn.execute("UPDATE docker_user_perms SET vol_manage_all = vol_delete_all")
+            if "ctr_view_all" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN ctr_view_all INTEGER NOT NULL DEFAULT 0")
+            if "ctr_create_template" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN ctr_create_template INTEGER NOT NULL DEFAULT 0")
+            if "ctr_path_whitelist" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN ctr_path_whitelist TEXT NOT NULL DEFAULT '[]'")
+            if "ctr_quota_num" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN ctr_quota_num INTEGER NOT NULL DEFAULT 0")
+            if "cuda_gpu_indices" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN cuda_gpu_indices TEXT NOT NULL DEFAULT '[]'")
+            # docker_containers_meta 新列迁移
+            ctr_meta_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_containers_meta)").fetchall()}
+            if "display_ports" not in ctr_meta_cols:
+                conn.execute("ALTER TABLE docker_containers_meta ADD COLUMN display_ports TEXT")
         _DB_INITIALIZED = True
 
 
@@ -341,8 +366,9 @@ _PERMS_DEFAULTS: dict[str, Any] = {
     "ctr_quota_num": 0,         # 容器数量配额（0=不限）
     # 卷权限
     "vol_use": False,           # 是否有权使用（查看/访问）卷
+    "vol_view_all": False,      # 查看所有用户的卷
     "vol_create": False,
-    "vol_delete_all": False,    # 删除他人卷
+    "vol_manage_all": False,    # 管理所有用户的卷（删除权，自动包含查看权）
     "vol_copy": False,
     "vol_quota_gb": 0.0,        # 卷空间配额(GB，0=不限)
     # 模板权限
@@ -392,8 +418,9 @@ def _row_to_perms(row: sqlite3.Row) -> dict[str, Any]:
         "ctr_quota_num": _i("ctr_quota_num"),
         # 卷
         "vol_use": _b("vol_use"),
+        "vol_view_all": _b("vol_view_all"),
         "vol_create": _b("vol_create"),
-        "vol_delete_all": _b("vol_delete_all"),
+        "vol_manage_all": _b("vol_manage_all"),
         "vol_copy": _b("vol_copy"),
         "vol_quota_gb": _f("vol_quota_gb"),
         # 模板
@@ -722,7 +749,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 ctr_use, ctr_view_all,
                 ctr_create, ctr_create_template,
                 ctr_manage_all, ctr_path_whitelist, ctr_quota_num,
-                vol_use, vol_create, vol_delete_all, vol_copy, vol_quota_gb,
+                vol_use, vol_view_all, vol_create, vol_manage_all, vol_copy, vol_quota_gb,
                 tpl_use, tpl_create, tpl_edit,
                 cuda_gpu_indices,
                 updated_at
@@ -732,7 +759,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
-                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 ?, ?, ?,
                 ?,
                 ?
@@ -753,8 +780,9 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 ctr_path_whitelist = excluded.ctr_path_whitelist,
                 ctr_quota_num = excluded.ctr_quota_num,
                 vol_use = excluded.vol_use,
+                vol_view_all = excluded.vol_view_all,
                 vol_create = excluded.vol_create,
-                vol_delete_all = excluded.vol_delete_all,
+                vol_manage_all = excluded.vol_manage_all,
                 vol_copy = excluded.vol_copy,
                 vol_quota_gb = excluded.vol_quota_gb,
                 tpl_use = excluded.tpl_use,
@@ -769,7 +797,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 b("ctr_use"), b("ctr_view_all"),
                 b("ctr_create"), b("ctr_create_template"),
                 b("ctr_manage_all"), path_whitelist_json, ctr_quota_num,
-                b("vol_use"), b("vol_create"), b("vol_delete_all"), b("vol_copy"), vol_quota_gb,
+                b("vol_use"), b("vol_view_all"), b("vol_create"), b("vol_manage_all"), b("vol_copy"), vol_quota_gb,
                 b("tpl_use"), b("tpl_create"), b("tpl_edit"),
                 cuda_gpu_indices_json,
                 now,
@@ -788,12 +816,12 @@ def get_my_quota(server_id: str, user: User) -> dict[str, Any]:
     with get_connection() as conn:
         _require_server_visible(conn, server_id, user)
         perms = _get_user_perms(conn, server_id, user)
-        # 计算已用卷空间
-        used = conn.execute(
-            "SELECT COALESCE(SUM(size_gb), 0) as used FROM docker_volumes_meta WHERE server_id = ? AND owner_user_id = ?",
-            (server_id, user.id),
-        ).fetchone()["used"]
-        perms["volumeUsedGb"] = used
+        # 计算已用卷空间（使用 quota_holder 均分逻辑，与 list_volumes / get_server_resource_overview 对齐）
+        row = _get_server_row(conn, server_id)
+        vol_usage = _calc_user_volume_usage(conn, row, user)
+        perms["volumeUsedGb"] = vol_usage["usedSelfGb"]
+        perms["volumeTotalGb"] = vol_usage["quotaGb"]
+        perms["volumeRemainingGb"] = vol_usage["remainingGb"]
     return perms
 
 
@@ -2273,23 +2301,175 @@ def create_from_template(
 # 卷管理
 # ==============================================================
 
-def list_volumes(server_id: str, user: User) -> dict[str, Any]:
-    """列出服务器上的卷，附加平台元数据"""
+def _calc_user_volume_usage(
+    conn: sqlite3.Connection, server_row: sqlite3.Row, user: User
+) -> dict[str, Any]:
+    """计算用户在指定服务器上的卷使用情况与配额。
+
+    配额占用者均分逻辑：用户作为 quota_holder 的卷，按该卷的 quota_holder 数量均分大小。
+
+    返回:
+        quotaGb      配额上限 GB（0=不限）
+        usedSelfGb   当前用户配额占用 GB（按配额占用者均分）
+        usedTotalGb  服务器全部卷 GB
+        countSelf    当前用户作为配额占用者的卷数
+        countTotal   服务器全部卷数
+        remainingGb  剩余配额 GB（None=不限）
+    """
+    perms = _get_user_perms(conn, server_row["id"], user)
+    vol_quota_gb = float(perms.get("vol_quota_gb", 0))  # 0 = 不限
+    # 获取用户作为 quota_holder 的卷 ref 集合
+    user_qh_vol_refs: set[str] = set()
+    for r in conn.execute(
+        "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND user_id=? AND role='quota_holder'",
+        (server_row["id"], user.id),
+    ).fetchall():
+        user_qh_vol_refs.add(r["resource_ref"])
+    # 构建卷 ref → quota_holder 数量的映射（仅用户是 quota_holder 的卷）
+    vol_qh_counts: dict[str, int] = {}
+    for ref in user_qh_vol_refs:
+        cnt_row = conn.execute(
+            """SELECT COUNT(DISTINCT user_id) as cnt FROM docker_resource_roles
+               WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND role='quota_holder'""",
+            (server_row["id"], ref),
+        ).fetchone()
+        vol_qh_counts[ref] = max(1, cnt_row["cnt"])
+
+    # 从 _meta 表获取卷大小
+    vol_used_self_gb = 0.0
+    vol_used_total_gb = 0.0
+    vol_count_self = len(user_qh_vol_refs)
+    vol_count_total = 0
+    all_vols = conn.execute(
+        "SELECT volume_name, size_gb FROM docker_volumes_meta WHERE server_id=?",
+        (server_row["id"],),
+    ).fetchall()
+    for r in all_vols:
+        size_gb = float(r["size_gb"] or 0)
+        vol_used_total_gb += size_gb
+        vol_count_total += 1
+        if r["volume_name"] in user_qh_vol_refs:
+            vol_used_self_gb += size_gb / vol_qh_counts[r["volume_name"]]
+
+    vol_remaining_gb = max(0.0, vol_quota_gb - vol_used_self_gb) if vol_quota_gb > 0 else None
+    return {
+        "quotaGb": vol_quota_gb,
+        "usedSelfGb": vol_used_self_gb,
+        "usedTotalGb": vol_used_total_gb,
+        "countSelf": vol_count_self,
+        "countTotal": vol_count_total,
+        "remainingGb": vol_remaining_gb,
+    }
+
+
+def _enforce_volume_quota(
+    conn: sqlite3.Connection, server_row: sqlite3.Row, user: User
+) -> None:
+    """若用户在指定服务器上的卷空间配额已超出上限，抛出 QUOTA_EXCEEDED 异常。
+
+    用于创建卷 / 跨服务器复制卷（目标服务器）前的配额校验。
+    管理员不受限（quota_gb=0 表示不限）。
+    """
+    usage = _calc_user_volume_usage(conn, server_row, user)
+    quota_gb = float(usage["quotaGb"])
+    used_self_gb = float(usage["usedSelfGb"])
+    if quota_gb > 0 and used_self_gb >= quota_gb:
+        raise ToolboxError(
+            "QUOTA_EXCEEDED",
+            f"卷空间配额不足，已用 {used_self_gb:.2f} GB，配额 {quota_gb:.2f} GB",
+            status_code=403,
+            tool_id=TOOL_ID,
+        )
+
+
+def _measure_volume_sizes(row: sqlite3.Row) -> dict[str, float]:
+    """通过 SSH 测量服务器上所有 Docker 卷的实际磁盘占用大小。
+
+    使用 ``docker volume ls`` + ``docker volume inspect`` + ``du -sk`` 组合命令，
+    一次性获取所有卷的实际占用空间（KB），转换为 GB 返回。
+
+    Args:
+        row: docker_servers 表行
+
+    Returns:
+        ``{volume_name: size_gb}`` 字典。SSH 失败时返回空字典。
+    """
+    client = _ssh_connect(row)
+    try:
+        # 一次性测量所有卷的磁盘占用（du -sk 输出 KB）
+        cmd = (
+            "docker volume ls --format '{{.Name}}' | while IFS= read -r name; do "
+            'mp=$(docker volume inspect "$name" --format \'{{.Mountpoint}}\' 2>/dev/null); '
+            'size=$(du -sk "$mp" 2>/dev/null | awk \'{print $1}\'); '
+            'echo "${name}|${size:-0}"; '
+            "done"
+        )
+        stdout, stderr, code = _ssh_exec(client, cmd, timeout=120)
+    finally:
+        client.close()
+
+    if code != 0:
+        return {}
+
+    sizes: dict[str, float] = {}
+    for line in stdout.strip().splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|", 1)
+        if len(parts) != 2:
+            continue
+        name, size_kb_str = parts[0].strip(), parts[1].strip()
+        if not name:
+            continue
+        try:
+            size_kb = float(size_kb_str)
+        except ValueError:
+            continue
+        sizes[name] = size_kb / (1024 * 1024)  # KB → GB
+    return sizes
+
+
+def refresh_volume_sizes(server_id: str, user: User) -> dict[str, Any]:
+    """刷新服务器上所有卷的实际大小并写入数据库。
+
+    管理员或拥有 ``server_visible`` 权限的用户可调用。
+    返回 ``{serverId, sizes, count}``。
+    """
     init_docker_database()
     with get_connection() as conn:
         _require_server_visible(conn, server_id, user)
         row = _get_server_row(conn, server_id)
 
-        # 获取当前用户配额信息
+    sizes = _measure_volume_sizes(row)
+
+    # 更新数据库中所有平台管理卷的大小
+    with get_connection() as conn:
+        for vname, size_gb in sizes.items():
+            conn.execute(
+                "UPDATE docker_volumes_meta SET size_gb = ? WHERE server_id = ? AND volume_name = ?",
+                (size_gb, server_id, vname),
+            )
+
+    return {"serverId": server_id, "sizes": sizes, "count": len(sizes)}
+
+
+def list_volumes(server_id: str, user: User) -> dict[str, Any]:
+    """列出服务器上的卷，附加平台元数据，按所有权/角色过滤（对齐镜像 list_images 模式）"""
+    init_docker_database()
+    with get_connection() as conn:
+        perms = _get_user_perms(conn, server_id, user)
+        # 需要 vol_use 或 vol_view_all 或管理员
+        if user.role != "admin" and not perms.get("vol_use") and not perms.get("vol_view_all"):
+            raise ToolboxError("PERMISSION_DENIED", "您没有查看卷的权限", status_code=403, tool_id=TOOL_ID)
+        row = _get_server_row(conn, server_id)
+
+        # 获取当前用户配额信息（使用 quota_holder 均分逻辑）
         if user.role == "admin":
             quota = {"volumeTotalGb": None, "volumeUsedGb": None}
         else:
-            user_perms = _get_user_perms(conn, server_id, user)
-            used = conn.execute(
-                "SELECT COALESCE(SUM(size_gb), 0) as used FROM docker_volumes_meta WHERE server_id = ? AND owner_user_id = ?",
-                (server_id, user.id),
-            ).fetchone()["used"]
-            quota = {"volumeTotalGb": user_perms.get("vol_quota_gb", 0), "volumeUsedGb": used}
+            vol_usage = _calc_user_volume_usage(conn, row, user)
+            quota = {"volumeTotalGb": vol_usage["quotaGb"], "volumeUsedGb": vol_usage["usedSelfGb"]}
 
         # 查询平台记录的卷元数据
         meta_rows = conn.execute(
@@ -2324,6 +2504,17 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
                     [server_id, *accessible_ctrs],
                 ).fetchall():
                     user_accessible_vols.add(r["resource_ref"])
+        # 查询当前用户拥有 owner 角色的卷 ref（可管理=可删除/复制）。creator 不拥有管理权，仅 owner 可管理
+        user_managed_vols: set[str] = set()
+        for r in conn.execute(
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND user_id=? AND role='owner'",
+            (server_id, user.id),
+        ).fetchall():
+            user_managed_vols.add(r["resource_ref"])
+        # 是否有全局卷管理权限
+        has_vol_manage_all = user.role == "admin" or bool(perms.get("vol_manage_all"))
+        # view_all：管理员、vol_view_all、vol_manage_all（管理权自动包含查看权）、ctr_view_all
+        view_all = user.role == "admin" or perms.get("vol_view_all", False) or perms.get("vol_manage_all", False) or perms.get("ctr_view_all", False)
 
     # 从服务器获取实际卷列表
     client = _ssh_connect(row)
@@ -2334,6 +2525,17 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
         )
     finally:
         client.close()
+
+    # 测量所有卷的实际磁盘占用大小（du -sk）
+    actual_sizes = _measure_volume_sizes(row)
+    # 同步更新数据库中平台管理卷的大小（供配额计算使用）
+    if actual_sizes:
+        with get_connection() as conn:
+            for vname, size_gb in actual_sizes.items():
+                conn.execute(
+                    "UPDATE docker_volumes_meta SET size_gb = ? WHERE server_id = ? AND volume_name = ?",
+                    (size_gb, server_id, vname),
+                )
 
     volumes = []
     for line in stdout.strip().splitlines():
@@ -2346,25 +2548,27 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
             continue
 
         vname = vol.get("name", "")
+        # 优先使用实测大小，回退到数据库记录
+        measured_size = actual_sizes.get(vname)
         if vname in meta_map:
             m = meta_map[vname]
             vol["ownerUserId"] = m["owner_user_id"]  # 前端字段
-            vol["sizeGb"] = m["size_gb"]
+            vol["sizeGb"] = measured_size if measured_size is not None else m["size_gb"]
             vol["createdAt"] = m["created_at"]
             vol["platformManaged"] = True
         else:
             vol["ownerUserId"] = None
+            vol["sizeGb"] = measured_size
             vol["platformManaged"] = vname in user_accessible_vols
 
-        # 访问过滤：管理员看全部；普通用户看自己有角色关联的
-        if user.role != "admin":
-            legacy_owner = vol.get("ownerUserId")
-            if legacy_owner and legacy_owner != user.id and vname not in user_accessible_vols:
-                continue
-            if not legacy_owner and vname not in user_accessible_vols:
-                continue
+        # 当前用户是否可管理该卷（删除）：全局管理权 或 owner 角色。creator 不拥有管理权
+        vol["canManage"] = has_vol_manage_all or vname in user_managed_vols
 
-        volumes.append(vol)
+        # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）
+        if view_all:
+            volumes.append(vol)
+        elif vname in user_accessible_vols or vol.get("ownerUserId") == user.id:
+            volumes.append(vol)
 
     return {"volumes": volumes, "quota": quota}
 
@@ -2475,29 +2679,22 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
     }
 
 
-def create_volume(server_id: str, name: str, size_gb: float, user: User) -> dict[str, Any]:
-    """创建 Docker 卷（含配额校验）"""
+def create_volume(server_id: str, name: str, user: User) -> dict[str, Any]:
+    """创建 Docker 卷（含权限与配额校验，对齐镜像 pull_image 模式）
+
+    卷大小由 list_volumes / refresh_volume_sizes 通过 ``du`` 实测，创建时不预设。
+    """
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
-            if not perms.get("vol_create"):
-                raise ToolboxError("NO_CREATE_PERMISSION", "您没有在此服务器创建卷的权限", status_code=403, tool_id=TOOL_ID)
-            vol_quota_gb = perms.get("vol_quota_gb", 0)
-            if vol_quota_gb > 0:
-                used_row = conn.execute(
-                    "SELECT COALESCE(SUM(size_gb), 0) as used FROM docker_volumes_meta WHERE server_id = ? AND owner_user_id = ?",
-                    (server_id, user.id),
-                ).fetchone()
-                used = used_row["used"]
-                if used + size_gb > vol_quota_gb:
-                    raise ToolboxError(
-                        "QUOTA_EXCEEDED",
-                        f"卷空间配额不足，已用 {used:.2f} GB，配额 {vol_quota_gb:.2f} GB，请求 {size_gb:.2f} GB",
-                        status_code=403,
-                        tool_id=TOOL_ID,
-                    )
-        row = _get_server_row(conn, server_id)
+            if not perms.get("server_visible") or not perms.get("vol_create"):
+                raise ToolboxError("PERMISSION_DENIED", "您没有在此服务器创建卷的权限", status_code=403, tool_id=TOOL_ID)
+            # 卷配额校验：创建会在本服务器新增卷并占用配额，配额已满则禁止创建
+            row = _get_server_row(conn, server_id)
+            _enforce_volume_quota(conn, row, user)
+        else:
+            row = _get_server_row(conn, server_id)
 
     client = _ssh_connect(row)
     try:
@@ -2508,41 +2705,44 @@ def create_volume(server_id: str, name: str, size_gb: float, user: User) -> dict
     if code != 0:
         raise ToolboxError("CREATE_VOLUME_FAILED", f"创建卷失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
 
-    # 记录平台元数据
-    now = _now()
-    vol_id = _new_id()
+    # 记录创建者+所有者（对齐镜像 pull_image 中的 _record_resource_creator）
+    # size_gb 由 list_volumes / refresh_volume_sizes 通过 du 实测填充，此处不预设
     with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO docker_volumes_meta (id, volume_name, server_id, owner_user_id, size_gb, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (vol_id, name, server_id, user.id, size_gb, now),
-        )
+        _record_resource_creator(conn, server_id, "volume", name, user.id)
 
-    return {"success": True, "volumeName": name, "serverId": server_id, "sizeGb": size_gb, "createdAt": now}
+    now = _now()
+    return {"success": True, "volumeName": name, "serverId": server_id, "createdAt": now}
 
 
 def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any]:
-    """删除 Docker 卷（需是卷的 owner 角色或拥有 vol_delete_all 权限）"""
+    """删除 Docker 卷（需 vol_use 权限且是卷的 owner 角色，或拥有 vol_manage_all 权限，对齐镜像 delete_image 模式）"""
     init_docker_database()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
-            can_delete_all = perms.get("vol_delete_all", False)
-            # 检查是否是该卷的 owner（creator 不拥有管理权）
-            is_owner = conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND user_id=? AND role='owner'",
-                (server_id, volume_name, user.id),
-            ).fetchone() is not None
-            if not is_owner:
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
-                    (server_id, volume_name),
-                ).fetchone()
-                is_owner = bool(meta and meta["owner_user_id"] == user.id)
-            if not can_delete_all and not is_owner:
-                raise ToolboxError("PERMISSION_DENIED", "您没有删除此卷的权限（需要是卷的所有者或拥有全局删除权限）", status_code=403, tool_id=TOOL_ID)
+            can_manage_all = perms.get("vol_manage_all", False)
+            # 有 vol_manage_all 权限的可删除任意卷
+            if not can_manage_all:
+                # 没有 vol_manage_all 的需要 vol_use 权限
+                if not perms.get("vol_use"):
+                    raise ToolboxError(
+                        "PERMISSION_DENIED",
+                        "您没有使用卷的权限，无法删除卷",
+                        status_code=403, tool_id=TOOL_ID,
+                    )
+                # 且只能删除自己拥有 owner 角色的卷（creator 不拥有管理权）
+                is_owner = conn.execute(
+                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND user_id=? AND role='owner'",
+                    (server_id, volume_name, user.id),
+                ).fetchone() is not None
+                if not is_owner:
+                    meta = conn.execute(
+                        "SELECT owner_user_id FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
+                        (server_id, volume_name),
+                    ).fetchone()
+                    is_owner = bool(meta and meta["owner_user_id"] == user.id)
+                if not is_owner:
+                    raise ToolboxError("PERMISSION_DENIED", "您没有删除此卷的权限（需要是卷的所有者或拥有全局管理权限）", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     client = _ssh_connect(row)
@@ -2554,10 +2754,14 @@ def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any
     if code != 0:
         raise ToolboxError("DELETE_VOLUME_FAILED", f"删除卷失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
 
-    # 清除平台元数据
+    # 清除平台元数据与角色（对齐容器删除时的清理逻辑）
     with get_connection() as conn:
         conn.execute(
             "DELETE FROM docker_volumes_meta WHERE server_id = ? AND volume_name = ?",
+            (server_id, volume_name),
+        )
+        conn.execute(
+            "DELETE FROM docker_resource_roles WHERE server_id = ? AND resource_type = 'volume' AND resource_ref = ?",
             (server_id, volume_name),
         )
 
@@ -2572,41 +2776,39 @@ def copy_volume(
     user: User,
 ) -> dict[str, Any]:
     """
-    跨服务器（或同服务器）复制卷数据：
+    跨服务器（或同服务器）复制卷数据（对齐镜像 copy_image 模式）：
       源端: docker run --rm -v <src>:/src:ro alpine tar -czC /src .
       目标端: docker volume create <dst> && docker run --rm -i -v <dst>:/dst alpine sh -c 'tar -xzC /dst'
     整个流程在平台内存中流式中转，不在任何服务器落盘。
     """
     init_docker_database()
     with get_connection() as conn:
-        # 源：需要 vol_copy 权限
+        _require_server_visible(conn, src_server_id, user)
+        _require_server_visible(conn, dst_server_id, user)
         if user.role != "admin":
+            # 源服务器需要 vol_copy 权限（跨服务器复制卷）
             src_perms = _get_user_perms(conn, src_server_id, user)
             if not src_perms.get("vol_copy"):
-                raise ToolboxError("PERMISSION_DENIED", "您没有复制卷的权限", status_code=403, tool_id=TOOL_ID)
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您在源服务器没有「跨服务器复制卷」权限",
+                    status_code=403, tool_id=TOOL_ID,
+                )
+            # 目标服务器也需要 vol_copy 权限（对齐镜像 copy_image：源和目标均需 img_copy）
             dst_perms = _get_user_perms(conn, dst_server_id, user)
-            if not dst_perms.get("vol_create"):
-                raise ToolboxError("PERMISSION_DENIED", "您在目标服务器没有创建卷的权限", status_code=403, tool_id=TOOL_ID)
+            if not dst_perms.get("vol_copy"):
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您在目标服务器没有「跨服务器复制卷」权限",
+                    status_code=403, tool_id=TOOL_ID,
+                )
 
         src_row = _get_server_row(conn, src_server_id)
         dst_row = _get_server_row(conn, dst_server_id)
 
-        # 目标卷配额检查
+        # 目标服务器卷配额校验：复制会在目标服务器新增卷并占用配额，配额已满则禁止作为复制目标
         if user.role != "admin":
-            dst_perms = _get_user_perms(conn, dst_server_id, user)
-            used_row = conn.execute(
-                "SELECT COALESCE(SUM(size_gb), 0) as used FROM docker_volumes_meta WHERE server_id = ? AND owner_user_id = ?",
-                (dst_server_id, user.id),
-            ).fetchone()
-            used = used_row["used"]
-            quota_gb = dst_perms.get("vol_quota_gb", 0.0)
-            if quota_gb > 0 and used >= quota_gb:
-                raise ToolboxError(
-                    "QUOTA_EXCEEDED",
-                    f"目标服务器卷配额不足，已用 {used:.2f} GB，配额 {quota_gb:.2f} GB",
-                    status_code=403,
-                    tool_id=TOOL_ID,
-                )
+            _enforce_volume_quota(conn, dst_row, user)
 
         # 获取源卷元数据（用于继承 size_gb）
         src_meta = conn.execute(
@@ -2693,19 +2895,12 @@ def copy_volume(
         if not same_server:
             dst_client.close()
 
-    # 记录目标卷平台元数据
-    now = _now()
-    vol_id = _new_id()
-    size_gb = float(src_meta["size_gb"]) if src_meta else 0.0
+    # 记录目标卷创建者+所有者（对齐镜像 copy_image 中的 _record_resource_creator）
+    # size_gb 由 list_volumes / refresh_volume_sizes 通过 du 实测填充，此处不预设
     with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO docker_volumes_meta (id, volume_name, server_id, owner_user_id, size_gb, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (vol_id, dst_volume_name, dst_server_id, user.id, size_gb, now),
-        )
+        _record_resource_creator(conn, dst_server_id, "volume", dst_volume_name, user.id)
 
+    now = _now()
     return {
         "success": True,
         "srcServerId": src_server_id,
@@ -3221,38 +3416,7 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
         perms = _get_user_perms(conn, server_id, user)
 
         # ---------- 卷配额（配额占用者均分） ----------
-        vol_quota_gb = float(perms.get("vol_quota_gb", 0))  # 0 = 不限
-        vol_used_total = conn.execute(
-            "SELECT COALESCE(SUM(size_gb), 0) as s FROM docker_volumes_meta WHERE server_id=?",
-            (server_id,),
-        ).fetchone()["s"]
-
-        # 新均分逻辑：对于用户是 quota_holder 的每个卷，按该卷的 quota_holder 数量均分
-        # vol_used_self = Σ (volume_size / num_quota_holders)
-        user_qh_volumes = conn.execute(
-            """SELECT r.resource_ref FROM docker_resource_roles r
-               WHERE r.server_id=? AND r.resource_type='volume' AND r.user_id=? AND r.role='quota_holder'""",
-            (server_id, user.id),
-        ).fetchall()
-        vol_used_self: float = 0.0
-        for row in user_qh_volumes:
-            vol_name = row["resource_ref"]
-            # 该卷的 quota_holder 数量
-            qh_count_row = conn.execute(
-                """SELECT COUNT(DISTINCT user_id) as cnt FROM docker_resource_roles
-                   WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND role='quota_holder'""",
-                (server_id, vol_name),
-            ).fetchone()
-            qh_count = max(1, qh_count_row["cnt"])
-            # 该卷的大小
-            vol_size_row = conn.execute(
-                "SELECT COALESCE(size_gb, 0) as s FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
-                (server_id, vol_name),
-            ).fetchone()
-            if vol_size_row:
-                vol_used_self += vol_size_row["s"] / qh_count
-
-        vol_remaining = max(0.0, vol_quota_gb - vol_used_self) if vol_quota_gb > 0 else None
+        vol_usage = _calc_user_volume_usage(conn, srv_row, user)
 
         # ---------- 挂载路径磁盘空间 ----------
         path_whitelist: list[str] = perms.get("ctr_path_whitelist", [])
@@ -3325,10 +3489,12 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
     return {
         "serverId": server_id,
         "volume": {
-            "quotaGb": vol_quota_gb,
-            "usedSelfGb": vol_used_self,
-            "usedTotalGb": vol_used_total,
-            "remainingGb": vol_remaining,
+            "quotaGb": vol_usage["quotaGb"],
+            "usedSelfGb": vol_usage["usedSelfGb"],
+            "usedTotalGb": vol_usage["usedTotalGb"],
+            "remainingGb": vol_usage["remainingGb"],
+            "countSelf": vol_usage["countSelf"],
+            "countTotal": vol_usage["countTotal"],
         },
         "image": {
             "quotaGb": img_usage["quotaGb"],

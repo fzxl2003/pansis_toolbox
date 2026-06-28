@@ -481,7 +481,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
         ctr_use: true,
         ctr_create: true, ctr_create_template: true,
         // 卷：可查看、创建、复制
-        vol_use: true, vol_create: true, vol_copy: true,
+        vol_use: true, vol_view_all: false, vol_create: true, vol_copy: true,
         // 模板：可使用
         tpl_use: true,
       });
@@ -498,7 +498,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
         ctr_create: true, ctr_create_template: true,
         ctr_path_whitelist: [], ctr_quota_num: 0,
         // 卷：全权限
-        vol_use: true, vol_create: true, vol_delete_all: true, vol_copy: true, vol_quota_gb: 0,
+        vol_use: true, vol_view_all: true, vol_create: true, vol_manage_all: true, vol_copy: true, vol_quota_gb: 0,
         // 模板：全权限
         tpl_use: true, tpl_create: true, tpl_edit: true,
         // CUDA：不在预设中设置（保留当前值）
@@ -516,9 +516,9 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     if (!p.server_visible) {
       return { color: '#6b7280', bg: '#f3f4f6', label: '无权限' };
     }
-    const manageFlags = [p.img_manage_all, p.ctr_manage_all, p.vol_delete_all, p.tpl_edit];
+    const manageFlags = [p.img_manage_all, p.ctr_manage_all, p.vol_manage_all, p.tpl_edit];
     const useFlags = [p.img_pull, p.img_copy, p.ctr_create, p.ctr_create_template, p.vol_create, p.vol_copy, p.tpl_create];
-    const viewFlags = [p.img_use, p.img_view_all, p.ctr_use, p.ctr_view_all, p.vol_use, p.tpl_use];
+    const viewFlags = [p.img_use, p.img_view_all, p.ctr_use, p.ctr_view_all, p.vol_use, p.vol_view_all, p.tpl_use];
     if (manageFlags.some(Boolean)) {
       return { color: '#166534', bg: '#dcfce7', label: '管理' };
     }
@@ -1294,11 +1294,29 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 tooltip="可执行 docker volume create 新建数据卷"
               />
               <PermCheck
-                checked={permsForm.vol_delete_all}
-                onChange={pf('vol_delete_all')}
+                checked={permsForm.vol_manage_all}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setPermsForm((prev) => ({
+                    ...prev,
+                    vol_manage_all: checked,
+                    // 勾选「管理所有用户的卷」时自动勾选「查看所有用户的卷」
+                    vol_view_all: checked ? true : prev.vol_view_all,
+                  }));
+                }}
                 disabled={!permsForm.vol_use}
-                label={<strong>删除他人的卷</strong>}
-                tooltip="可删除非自己创建的卷；自身创建的卷及拥有所有者角色的卷默认可删"
+                label={<strong>管理所有用户的卷</strong>}
+                tooltip="可删除任意用户的卷（执行 docker volume rm）；勾选后「查看所有用户的卷」将自动开启"
+              />
+              <PermCheck
+                checked={permsForm.vol_view_all || permsForm.vol_manage_all}
+                onChange={(e) => {
+                  if (permsForm.vol_manage_all) return; // 管理所有用户的卷时不可单独关闭
+                  setPermsForm((prev) => ({ ...prev, vol_view_all: e.target.checked }));
+                }}
+                disabled={!permsForm.vol_use || permsForm.vol_manage_all}
+                label="查看所有用户的卷"
+                tooltip="可看到所有用户的卷（不受资源角色分配限制）；开启「管理所有用户的卷」时此项自动开启且不可单独关闭"
               />
               <PermCheck
                 checked={permsForm.vol_copy}

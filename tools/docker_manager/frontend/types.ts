@@ -46,8 +46,9 @@ export type UserPerms = {
   ctr_quota_num: number;    // 容器数量配额（0=不限）
   // 卷权限
   vol_use: boolean;         // 是否有权使用（查看/访问）卷
+  vol_view_all: boolean;    // 查看所有用户的卷
   vol_create: boolean;
-  vol_delete_all: boolean;  // 删除他人卷
+  vol_manage_all: boolean;  // 管理所有用户的卷（删除权，自动包含查看权）
   vol_copy: boolean;
   vol_quota_gb: number;     // 卷空间配额(GB，0=不限)
   // 模板权限
@@ -65,7 +66,7 @@ export const DEFAULT_PERMS: UserPerms = {
   ctr_manage_all: false,
   ctr_create: false, ctr_create_template: false,
   ctr_path_whitelist: [], ctr_quota_num: 0,
-  vol_use: false, vol_create: false, vol_delete_all: false, vol_copy: false, vol_quota_gb: 0,
+  vol_use: false, vol_view_all: false, vol_create: false, vol_manage_all: false, vol_copy: false, vol_quota_gb: 0,
   tpl_use: false, tpl_create: false, tpl_edit: false,
   cuda_gpu_indices: [],
 };
@@ -166,6 +167,7 @@ export type DockerVolume = {
   sizeGb?: number;
   createdAt?: string;
   platformManaged: boolean;
+  canManage?: boolean;  // 当前用户是否可管理该卷（删除）
 };
 
 export type VolumeDetailUser = {

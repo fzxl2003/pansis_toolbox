@@ -46,6 +46,7 @@ from tools.docker_manager.backend.service import (
     pull_image,
     rescan_server_cuda,
     get_server_resource_overview,
+    refresh_volume_sizes,
     set_resource_viewers,
     set_user_perms,
     update_template,
@@ -87,8 +88,9 @@ class SetUserPermsPayload(BaseModel):
     ctr_quota_num: int = 0          # 容器数量配额（0=不限）
     # 卷权限
     vol_use: bool = False           # 是否有权使用（查看/访问）卷（资源角色查看者的前提条件）
+    vol_view_all: bool = False      # 查看所有用户的卷
     vol_create: bool = False
-    vol_delete_all: bool = False    # 删除他人卷（自身创建的卷及所有者角色的卷默认可删）
+    vol_manage_all: bool = False    # 管理所有用户的卷（删除权，自动包含查看权）
     vol_copy: bool = False
     vol_quota_gb: float = 0.0       # 卷空间配额(GB，0=不限)
     # 模板权限
@@ -137,7 +139,6 @@ class ContainerActionPayload(BaseModel):
 
 class CreateVolumePayload(BaseModel):
     name: str
-    sizeGb: float = 0.0
 
 
 class CopyVolumePayload(BaseModel):
@@ -377,7 +378,7 @@ def get_volume_detail_route(request: Request, server_id: str, volume_name: str) 
 @router.post("/servers/{server_id}/volumes")
 def create_volume_route(request: Request, server_id: str, payload: CreateVolumePayload) -> dict:
     user = require_user(request)
-    return create_volume(server_id, payload.name, payload.sizeGb, user)
+    return create_volume(server_id, payload.name, user)
 
 
 @router.delete("/servers/{server_id}/volumes/{volume_name}")
@@ -397,6 +398,13 @@ def copy_volume_route(request: Request, payload: CopyVolumePayload) -> dict:
         payload.dstVolumeName,
         user,
     )
+
+
+@router.post("/servers/{server_id}/volumes/refresh-sizes")
+def refresh_volume_sizes_route(request: Request, server_id: str) -> dict:
+    """刷新服务器上所有卷的实际磁盘占用大小（du -sk 实测）"""
+    user = require_user(request)
+    return refresh_volume_sizes(server_id, user)
 
 
 # ==============================================================

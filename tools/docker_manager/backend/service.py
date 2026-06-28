@@ -506,6 +506,156 @@ def _get_server_row(conn: sqlite3.Connection, server_id: str) -> sqlite3.Row:
     return row
 
 
+def _normalize_image_ref(image_ref: str) -> str:
+    """Normalize Docker image refs so ``nginx`` and ``nginx:latest`` match platform metadata."""
+    ref = image_ref.strip()
+    if not ref:
+        return ref
+    # sha256/image IDs are already concrete identifiers.
+    if ref.startswith("sha256:"):
+        return ref
+    last_part = ref.split("/")[-1]
+    if ":" not in last_part:
+        return f"{ref}:latest"
+    return ref
+
+
+def _resource_ref_candidates(resource_type: str, resource_ref: str) -> list[str]:
+    """Return likely platform refs for a Docker resource without broadening across resources."""
+    ref = resource_ref.strip().lstrip("/") if resource_ref else ""
+    refs: list[str] = []
+    if ref:
+        refs.append(_normalize_image_ref(ref) if resource_type == "image" else ref)
+        if resource_type in {"container", "image"} and len(ref) > 12:
+            refs.append(ref[:12])
+    return list(dict.fromkeys(refs))
+
+
+def _sql_in_clause(values: list[str]) -> tuple[str, list[str]]:
+    placeholders = ",".join("?" * len(values))
+    return placeholders, values
+
+
+def _has_resource_role(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_refs: list[str],
+    user_id: str,
+    roles: tuple[str, ...],
+) -> bool:
+    if not resource_refs:
+        return False
+    ref_placeholders, ref_params = _sql_in_clause(resource_refs)
+    role_placeholders, role_params = _sql_in_clause(list(roles))
+    row = conn.execute(
+        f"""SELECT 1 FROM docker_resource_roles
+            WHERE server_id=? AND resource_type=? AND user_id=?
+              AND resource_ref IN ({ref_placeholders})
+              AND role IN ({role_placeholders})
+            LIMIT 1""",
+        [server_id, resource_type, user_id, *ref_params, *role_params],
+    ).fetchone()
+    return row is not None
+
+
+def _legacy_owner_matches(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_refs: list[str],
+    user_id: str,
+) -> bool:
+    if not resource_refs:
+        return False
+    placeholders, params = _sql_in_clause(resource_refs)
+    if resource_type == "image":
+        row = conn.execute(
+            f"SELECT 1 FROM docker_images_meta WHERE server_id=? AND owner_user_id=? AND image_ref IN ({placeholders}) LIMIT 1",
+            [server_id, user_id, *params],
+        ).fetchone()
+    elif resource_type == "container":
+        row = conn.execute(
+            f"SELECT 1 FROM docker_containers_meta WHERE server_id=? AND owner_user_id=? AND container_ref IN ({placeholders}) LIMIT 1",
+            [server_id, user_id, *params],
+        ).fetchone()
+    elif resource_type == "volume":
+        row = conn.execute(
+            f"SELECT 1 FROM docker_volumes_meta WHERE server_id=? AND owner_user_id=? AND volume_name IN ({placeholders}) LIMIT 1",
+            [server_id, user_id, *params],
+        ).fetchone()
+    else:
+        return False
+    return row is not None
+
+
+def _user_can_access_resource(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_ref: str,
+    user: User,
+) -> bool:
+    if user.role == "admin":
+        return True
+    refs = _resource_ref_candidates(resource_type, resource_ref)
+    return (
+        _has_resource_role(conn, server_id, resource_type, refs, user.id, ("owner", "viewer"))
+        or _legacy_owner_matches(conn, server_id, resource_type, refs, user.id)
+    )
+
+
+def _user_can_manage_resource(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_ref: str,
+    user: User,
+) -> bool:
+    if user.role == "admin":
+        return True
+    refs = _resource_ref_candidates(resource_type, resource_ref)
+    return (
+        _has_resource_role(conn, server_id, resource_type, refs, user.id, ("owner",))
+        or _legacy_owner_matches(conn, server_id, resource_type, refs, user.id)
+    )
+
+
+def _delete_resource_metadata(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_refs: list[str],
+) -> None:
+    refs = [r for r in dict.fromkeys(resource_refs) if r]
+    if not refs:
+        return
+    placeholders, params = _sql_in_clause(refs)
+    conn.execute(
+        f"DELETE FROM docker_resource_roles WHERE server_id=? AND resource_type=? AND resource_ref IN ({placeholders})",
+        [server_id, resource_type, *params],
+    )
+    if resource_type == "image":
+        conn.execute(
+            f"DELETE FROM docker_images_meta WHERE server_id=? AND image_ref IN ({placeholders})",
+            [server_id, *params],
+        )
+    elif resource_type == "container":
+        conn.execute(
+            f"DELETE FROM docker_containers_meta WHERE server_id=? AND container_ref IN ({placeholders})",
+            [server_id, *params],
+        )
+        conn.execute(
+            f"DELETE FROM docker_container_resource_cache WHERE server_id=? AND container_ref IN ({placeholders})",
+            [server_id, *params],
+        )
+    elif resource_type == "volume":
+        conn.execute(
+            f"DELETE FROM docker_volumes_meta WHERE server_id=? AND volume_name IN ({placeholders})",
+            [server_id, *params],
+        )
+
+
 # ==============================================================
 # 服务器管理
 # ==============================================================
@@ -678,6 +828,10 @@ def delete_server(server_id: str, user: User) -> None:
         _get_server_row(conn, server_id)
         conn.execute("DELETE FROM docker_user_perms WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_volumes_meta WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_images_meta WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_containers_meta WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_resource_roles WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_container_resource_cache WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_servers WHERE id = ?", (server_id,))
 
 
@@ -933,6 +1087,7 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
     """列出服务器上的 Docker 镜像，按所有权/角色过滤"""
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         perms = _get_user_perms(conn, server_id, user)
         # 需要 img_use 或 img_view_all 或管理员
         if user.role != "admin" and not perms.get("img_use") and not perms.get("img_view_all"):
@@ -1017,11 +1172,12 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
 
         # 查找所有者：优先用 repo:tag 匹配，其次用 image id 匹配
         ref_full = f"{img.get('repo', '')}:{img.get('tag', '')}"
-        owner = meta_map.get(ref_full) or meta_map.get(img.get("id", ""))
+        ref_candidates = _resource_ref_candidates("image", ref_full) + _resource_ref_candidates("image", img.get("id", ""))
+        owner = next((meta_map.get(ref) for ref in ref_candidates if meta_map.get(ref)), None)
         img["ownerUserId"] = owner  # 前端字段（第一个所有者）
-        img["platformManaged"] = owner is not None or ref_full in user_accessible_refs
+        img["platformManaged"] = owner is not None or any(ref in user_accessible_refs for ref in ref_candidates)
         # 当前用户是否可管理该镜像（删除/复制）：全局管理权 或 owner 角色。creator 不拥有管理权
-        img["canManage"] = has_img_manage_all or ref_full in user_managed_refs
+        img["canManage"] = has_img_manage_all or any(ref in user_managed_refs for ref in ref_candidates)
         # 该镜像是否被服务器上任意容器使用（不受权限过滤，用于禁用删除按钮）
         img_id_short = (img.get("id", "") or "")[:12]
         img["inUse"] = (
@@ -1033,7 +1189,7 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
         # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）
         if view_all:
             images.append(img)
-        elif ref_full in user_accessible_refs or owner == user.id:
+        elif any(ref in user_accessible_refs for ref in ref_candidates) or owner == user.id:
             images.append(img)
 
     return images
@@ -1043,9 +1199,10 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
     """在服务器上拉取 Docker 镜像"""
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
-            if not perms.get("server_visible") or not perms.get("img_pull"):
+            if not perms.get("img_pull"):
                 raise ToolboxError("PERMISSION_DENIED", "您没有拉取镜像的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
         # 镜像配额校验：拉取会在本服务器新增镜像并占用配额，配额已满则禁止拉取
@@ -1062,10 +1219,7 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
         raise ToolboxError("PULL_FAILED", f"镜像拉取失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
 
     # 记录创建者+所有者（image_ref 使用 repo:tag 格式）
-    image_ref = image_ref.strip()
-    # 兼容不带 tag 的写法：docker pull nginx → nginx:latest
-    if ":" not in image_ref.split("/")[-1]:
-        image_ref = f"{image_ref}:latest"
+    image_ref = _normalize_image_ref(image_ref)
     with get_connection() as conn:
         _record_resource_creator(conn, server_id, "image", image_ref, user.id)
 
@@ -1075,7 +1229,9 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
 def delete_image(server_id: str, image_ref: str, user: User, force: bool = False) -> dict[str, Any]:
     """删除服务器上的 Docker 镜像（需 img_use 权限，且须是所有者或 img_manage_all）"""
     init_docker_database()
+    normalized_ref = _normalize_image_ref(image_ref)
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             # 有 img_manage_all 权限的可删除任意镜像
@@ -1088,23 +1244,14 @@ def delete_image(server_id: str, image_ref: str, user: User, force: bool = False
                         status_code=403, tool_id=TOOL_ID,
                     )
                 # 且只能删除自己拥有 owner 角色的镜像（creator 不拥有管理权）
-                role_row = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='image' AND resource_ref=? AND user_id=? AND role='owner'",
-                    (server_id, image_ref, user.id),
-                ).fetchone()
-                if not role_row:
-                    meta = conn.execute(
-                        "SELECT owner_user_id FROM docker_images_meta WHERE server_id = ? AND image_ref = ?",
-                        (server_id, image_ref),
-                    ).fetchone()
-                    if not meta or meta["owner_user_id"] != user.id:
-                        raise ToolboxError("PERMISSION_DENIED", "您只能删除自己拥有的镜像，如需删除他人镜像请申请「管理所有用户的镜像」权限", status_code=403, tool_id=TOOL_ID)
+                if not _user_can_manage_resource(conn, server_id, "image", normalized_ref, user):
+                    raise ToolboxError("PERMISSION_DENIED", "您只能删除自己拥有的镜像，如需删除他人镜像请申请「管理所有用户的镜像」权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     client = _ssh_connect(row)
     try:
         flag = "-f " if force else ""
-        stdout, stderr, code = _ssh_exec(client, f"docker rmi {flag}{shlex.quote(image_ref)}")
+        stdout, stderr, code = _ssh_exec(client, f"docker rmi {flag}{shlex.quote(normalized_ref)}")
     finally:
         client.close()
 
@@ -1113,10 +1260,7 @@ def delete_image(server_id: str, image_ref: str, user: User, force: bool = False
 
     # 清除平台元数据
     with get_connection() as conn:
-        conn.execute(
-            "DELETE FROM docker_images_meta WHERE server_id = ? AND image_ref = ?",
-            (server_id, image_ref),
-        )
+        _delete_resource_metadata(conn, server_id, "image", _resource_ref_candidates("image", normalized_ref))
     return {"success": True, "output": stdout + stderr}
 
 
@@ -1126,6 +1270,7 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
     整个过程在平台服务器内存中流式处理，避免落盘大文件
     """
     init_docker_database()
+    image_ref_norm = _normalize_image_ref(image_ref)
     with get_connection() as conn:
         _require_server_visible(conn, src_server_id, user)
         _require_server_visible(conn, dst_server_id, user)
@@ -1146,6 +1291,18 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
                     "PERMISSION_DENIED",
                     "您在目标服务器没有「跨服务器复制镜像」权限",
                     status_code=403, tool_id=TOOL_ID,
+                )
+            can_view_source = (
+                src_perms.get("img_view_all")
+                or src_perms.get("img_manage_all")
+                or _user_can_access_resource(conn, src_server_id, "image", image_ref_norm, user)
+            )
+            if not can_view_source:
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您没有访问源镜像的权限，无法复制该镜像",
+                    status_code=403,
+                    tool_id=TOOL_ID,
                 )
         src_row = _get_server_row(conn, src_server_id)
         dst_row = _get_server_row(conn, dst_server_id)
@@ -1169,7 +1326,7 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
         src_chan = src_transport.open_session()
         dst_chan = dst_transport.open_session()
 
-        src_chan.exec_command(f"docker save {shlex.quote(image_ref)} | gzip")
+        src_chan.exec_command(f"docker save {shlex.quote(image_ref_norm)} | gzip")
         dst_chan.exec_command("gunzip | docker load")
 
         # 流式传输数据
@@ -1193,9 +1350,6 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
             raise ToolboxError("COPY_DST_FAILED", f"目标端加载镜像失败: {dst_err}", status_code=502, tool_id=TOOL_ID)
 
         # 在目标服务器记录创建者+所有者（默认为复制者）
-        image_ref_norm = image_ref.strip()
-        if ":" not in image_ref_norm.split("/")[-1]:
-            image_ref_norm = f"{image_ref_norm}:latest"
         with get_connection() as conn:
             _record_resource_creator(conn, dst_server_id, "image", image_ref_norm, user.id)
 
@@ -1367,6 +1521,58 @@ def _extract_volumes_from_raw_cmd(cmd: str) -> list[str]:
     return volumes
 
 
+def _extract_volume_specs_from_raw_cmd(cmd: str) -> list[str]:
+    """Extract raw -v/--volume specs from a docker run command."""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return []
+    specs: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-v", "--volume"):
+            if i + 1 < len(tokens):
+                specs.append(tokens[i + 1])
+                i += 2
+                continue
+        elif tok.startswith("-v") and len(tok) > 2:
+            specs.append(tok[2:])
+        elif tok.startswith("--volume="):
+            specs.append(tok[len("--volume="):])
+        elif tok in ("--mount",):
+            if i + 1 < len(tokens):
+                spec = _volume_spec_from_mount_option(tokens[i + 1])
+                if spec:
+                    specs.append(spec)
+                i += 2
+                continue
+        elif tok.startswith("--mount="):
+            spec = _volume_spec_from_mount_option(tok[len("--mount="):])
+            if spec:
+                specs.append(spec)
+        i += 1
+    return specs
+
+
+def _volume_spec_from_mount_option(raw: str) -> str:
+    """Convert Docker --mount syntax into a simplified source:target style spec."""
+    parts: dict[str, str] = {}
+    for item in raw.split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parts[key.strip()] = value.strip()
+    mount_type = parts.get("type", "")
+    source = parts.get("source") or parts.get("src") or ""
+    target = parts.get("target") or parts.get("dst") or parts.get("destination") or ""
+    if mount_type == "bind":
+        return f"{source}:{target}" if target else source
+    if mount_type == "volume":
+        return f"{source}:{target}" if source and target else source
+    return ""
+
+
 def _extract_gpus_from_raw_cmd(cmd: str) -> str:
     """从 docker run 原始命令中提取 --gpus 参数值。
 
@@ -1385,6 +1591,34 @@ def _extract_gpus_from_raw_cmd(cmd: str) -> str:
             i += 1
         elif tok.startswith("--gpus="):
             return tok[len("--gpus="):]
+        i += 1
+    return ""
+
+
+def _extract_image_from_raw_cmd(cmd: str) -> str:
+    """Best-effort extraction of the image token from a docker run command."""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return ""
+    if len(tokens) < 3:
+        return ""
+    i = 2  # docker run
+    opts_with_value = {
+        "-e", "--env", "--env-file", "-h", "--hostname", "--name", "--user", "-u",
+        "-w", "--workdir", "-p", "--publish", "--expose", "-v", "--volume",
+        "--mount", "--network", "--restart", "--gpus", "--add-host", "--label",
+        "--log-driver", "--log-opt", "--entrypoint", "--cpus", "--memory", "-m",
+    }
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            return tokens[i + 1] if i + 1 < len(tokens) else ""
+        if not tok.startswith("-"):
+            return tok
+        if tok in opts_with_value and i + 1 < len(tokens):
+            i += 2
+            continue
         i += 1
     return ""
 
@@ -1432,10 +1666,105 @@ def _extract_volumes_from_compose(yaml_content: str) -> list[str]:
     return paths
 
 
+def _extract_container_resources_from_compose(
+    yaml_content: str,
+    project_name: str = "",
+) -> dict[str, list[str]]:
+    """Extract images, bind paths, and named volumes from docker compose YAML."""
+    try:
+        import yaml
+    except ImportError:
+        return {"images": [], "bindPaths": [], "volumeSpecs": []}
+    try:
+        data = yaml.safe_load(yaml_content)
+    except Exception:
+        return {"images": [], "bindPaths": [], "volumeSpecs": []}
+    if not isinstance(data, dict):
+        return {"images": [], "bindPaths": [], "volumeSpecs": []}
+
+    top_volumes = data.get("volumes", {})
+    external_volumes: set[str] = set()
+    if isinstance(top_volumes, dict):
+        for name, config in top_volumes.items():
+            if isinstance(config, dict) and config.get("external"):
+                external_volumes.add(str(config.get("name") or name))
+
+    images: list[str] = []
+    bind_paths: list[str] = []
+    volume_specs: list[str] = []
+    services = data.get("services", {})
+    if not isinstance(services, dict):
+        return {"images": [], "bindPaths": [], "volumeSpecs": []}
+
+    def _compose_volume_ref(source: str) -> str:
+        if source in external_volumes:
+            return source
+        if project_name and source:
+            return f"{project_name}_{source}"
+        return source
+
+    for svc_config in services.values():
+        if not isinstance(svc_config, dict):
+            continue
+        image_ref = svc_config.get("image")
+        if isinstance(image_ref, str) and image_ref.strip():
+            images.append(image_ref.strip())
+        vols = svc_config.get("volumes", [])
+        if not isinstance(vols, list):
+            continue
+        for vol in vols:
+            if isinstance(vol, str):
+                parts = vol.split(":")
+                if len(parts) >= 2:
+                    source = parts[0]
+                    if source.startswith("/") or source.startswith(".") or source.startswith("~"):
+                        bind_paths.append(source)
+                    elif source:
+                        volume_specs.append(f"{_compose_volume_ref(source)}:{parts[1]}")
+                elif len(parts) == 1 and parts[0].startswith("/"):
+                    volume_specs.append(parts[0])
+            elif isinstance(vol, dict):
+                mount_type = vol.get("type")
+                source = str(vol.get("source") or vol.get("src") or "")
+                target = str(vol.get("target") or vol.get("dst") or vol.get("destination") or "")
+                if mount_type == "bind":
+                    if source:
+                        bind_paths.append(source)
+                elif mount_type == "volume":
+                    if source:
+                        volume_specs.append(f"{_compose_volume_ref(source)}:{target}" if target else _compose_volume_ref(source))
+                    elif target:
+                        volume_specs.append(target)
+
+    return {
+        "images": list(dict.fromkeys(images)),
+        "bindPaths": list(dict.fromkeys(bind_paths)),
+        "volumeSpecs": list(dict.fromkeys(volume_specs)),
+    }
+
+
+def _compose_has_build(yaml_content: str) -> bool:
+    try:
+        import yaml
+    except ImportError:
+        return False
+    try:
+        data = yaml.safe_load(yaml_content)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    services = data.get("services", {})
+    if not isinstance(services, dict):
+        return False
+    return any(isinstance(config, dict) and bool(config.get("build")) for config in services.values())
+
+
 def list_containers(server_id: str, user: User, all_containers: bool = True) -> list[dict[str, Any]]:
     """列出服务器上的容器，按所有权/角色过滤"""
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         perms = _get_user_perms(conn, server_id, user)
         if user.role != "admin" and not perms.get("ctr_use") and not perms.get("ctr_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看容器的权限", status_code=403, tool_id=TOOL_ID)
@@ -1512,10 +1841,18 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
 
 def _validate_path_whitelist(mount_paths: list[str], whitelist: list[str]) -> None:
     """校验挂载路径是否在白名单内（前缀匹配）"""
-    if not whitelist:
-        return  # 没有设置白名单时不做限制（仅在有挂载路径时才需要白名单）
     for path in mount_paths:
         host_path = path.split(":")[0] if ":" in path else path
+        # 仅限制宿主机绝对路径 bind mount；named volume 不属于路径白名单范畴。
+        if not host_path.startswith("/"):
+            continue
+        if not whitelist:
+            raise ToolboxError(
+                "PATH_NOT_ALLOWED",
+                f"未配置宿主机路径挂载白名单，禁止挂载 {host_path}",
+                status_code=403,
+                tool_id=TOOL_ID,
+            )
         allowed = any(host_path.startswith(w.rstrip("/")) for w in whitelist)
         if not allowed:
             raise ToolboxError(
@@ -1524,6 +1861,136 @@ def _validate_path_whitelist(mount_paths: list[str], whitelist: list[str]) -> No
                 status_code=403,
                 tool_id=TOOL_ID,
             )
+
+
+def _is_bind_mount_source(source: str) -> bool:
+    return source.startswith("/") or source.startswith(".") or source.startswith("~")
+
+
+def _volume_source_from_spec(spec: str) -> tuple[str, str]:
+    """Return (kind, source) where kind is bind, named, anonymous, or none."""
+    raw = spec.strip()
+    if not raw:
+        return "none", ""
+    parts = raw.split(":")
+    if len(parts) == 1:
+        return ("anonymous", "") if parts[0].startswith("/") else ("named", parts[0])
+    source = parts[0].strip()
+    if not source:
+        return "anonymous", ""
+    if _is_bind_mount_source(source):
+        return "bind", source
+    return "named", source
+
+
+def _remote_docker_resource_exists(server_row: sqlite3.Row, resource_type: str, resource_ref: str) -> bool:
+    cmd = ""
+    if resource_type == "image":
+        cmd = f"docker image inspect {shlex.quote(resource_ref)} >/dev/null 2>&1"
+    elif resource_type == "volume":
+        cmd = f"docker volume inspect {shlex.quote(resource_ref)} >/dev/null 2>&1"
+    else:
+        return False
+    client = _ssh_connect(server_row)
+    try:
+        _, _, rc = _ssh_exec(client, cmd, timeout=20)
+    finally:
+        client.close()
+    return rc == 0
+
+
+def _plan_container_image_usage(
+    conn: sqlite3.Connection,
+    server_row: sqlite3.Row,
+    image_refs: list[str],
+    user: User,
+) -> list[str]:
+    """Validate images used by a new container and return auto-pulled refs to record after success."""
+    if user.role == "admin":
+        return []
+    perms = _get_user_perms(conn, server_row["id"], user)
+    can_use_images = bool(perms.get("img_use") or perms.get("img_view_all") or perms.get("img_manage_all"))
+    pulled_refs: list[str] = []
+    for image_ref in [ref for ref in image_refs if ref.strip()]:
+        normalized_ref = _normalize_image_ref(image_ref)
+        exists = _remote_docker_resource_exists(server_row, "image", normalized_ref)
+        can_access_existing = (
+            perms.get("img_view_all")
+            or perms.get("img_manage_all")
+            or _user_can_access_resource(conn, server_row["id"], "image", normalized_ref, user)
+        )
+        if exists:
+            if not can_use_images:
+                raise ToolboxError("PERMISSION_DENIED", "您没有使用镜像的权限，无法创建容器", status_code=403, tool_id=TOOL_ID)
+            if not can_access_existing:
+                raise ToolboxError("PERMISSION_DENIED", f"您没有访问镜像 {normalized_ref} 的权限，无法创建容器", status_code=403, tool_id=TOOL_ID)
+            continue
+        if not (perms.get("img_use") and perms.get("img_pull")):
+            raise ToolboxError(
+                "PERMISSION_DENIED",
+                f"镜像 {normalized_ref} 不存在或不可见，且您没有拉取并使用镜像的权限",
+                status_code=403,
+                tool_id=TOOL_ID,
+            )
+        _enforce_image_quota(conn, server_row, user)
+        pulled_refs.append(normalized_ref)
+    return list(dict.fromkeys(pulled_refs))
+
+
+def _plan_container_volume_usage(
+    conn: sqlite3.Connection,
+    server_row: sqlite3.Row,
+    volume_specs: list[str],
+    user: User,
+) -> list[str]:
+    """Validate named/anonymous Docker volumes and return newly created named volumes to record."""
+    if user.role == "admin":
+        return []
+    perms = _get_user_perms(conn, server_row["id"], user)
+    created_named_volumes: list[str] = []
+    for spec in volume_specs:
+        kind, source = _volume_source_from_spec(spec)
+        if kind in {"none", "bind"}:
+            continue
+        if kind == "anonymous":
+            if not perms.get("vol_create"):
+                raise ToolboxError("PERMISSION_DENIED", "匿名卷会创建新 Docker 卷，您没有创建卷的权限", status_code=403, tool_id=TOOL_ID)
+            _enforce_volume_quota(conn, server_row, user)
+            continue
+
+        exists = _remote_docker_resource_exists(server_row, "volume", source)
+        can_access_existing = (
+            perms.get("vol_view_all")
+            or perms.get("vol_manage_all")
+            or _user_can_access_resource(conn, server_row["id"], "volume", source, user)
+        )
+        if exists:
+            if not perms.get("vol_use") and not perms.get("vol_view_all") and not perms.get("vol_manage_all"):
+                raise ToolboxError("PERMISSION_DENIED", "您没有使用卷的权限，无法挂载 Docker 卷", status_code=403, tool_id=TOOL_ID)
+            if not can_access_existing:
+                raise ToolboxError("PERMISSION_DENIED", f"您没有访问卷 {source} 的权限，无法挂载到容器", status_code=403, tool_id=TOOL_ID)
+            continue
+
+        if not perms.get("vol_create"):
+            raise ToolboxError("PERMISSION_DENIED", f"卷 {source} 不存在或不可见，且您没有创建卷的权限", status_code=403, tool_id=TOOL_ID)
+        _enforce_volume_quota(conn, server_row, user)
+        created_named_volumes.append(source)
+    return list(dict.fromkeys(created_named_volumes))
+
+
+def _record_container_resource_creations(
+    server_id: str,
+    user: User,
+    image_refs: list[str],
+    volume_refs: list[str],
+) -> None:
+    if user.role == "admin":
+        return
+    with get_connection() as conn:
+        for image_ref in image_refs:
+            _record_resource_creator(conn, server_id, "image", _normalize_image_ref(image_ref), user.id)
+        for volume_ref in volume_refs:
+            _record_resource_creator(conn, server_id, "volume", volume_ref, user.id)
 
 
 def create_container_run(server_id: str, params: dict[str, Any], user: User) -> dict[str, Any]:
@@ -1544,6 +2011,11 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
     }
     """
     init_docker_database()
+    image_ref = (params.get("image") or "").strip()
+    if not image_ref:
+        raise ToolboxError("INVALID_IMAGE", "镜像不能为空", status_code=400, tool_id=TOOL_ID)
+    images_to_record: list[str] = []
+    volumes_to_record: list[str] = []
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
@@ -1556,8 +2028,7 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
             volumes = params.get("volumes", [])
             if volumes:
                 whitelist = perms.get("ctr_path_whitelist", [])
-                if whitelist:
-                    _validate_path_whitelist(volumes, whitelist)
+                _validate_path_whitelist(volumes, whitelist)
             # 校验 GPU 权限
             gpus_arg = params.get("gpus", "") or ""
             if gpus_arg:
@@ -1566,6 +2037,8 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
+            images_to_record = _plan_container_image_usage(conn, row, [image_ref], user)
+            volumes_to_record = _plan_container_volume_usage(conn, row, params.get("volumes", []), user)
 
     # 构建 docker run 命令
     cmd_parts = ["docker", "run", "-d"]
@@ -1595,7 +2068,7 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
         # 安全追加额外参数
         cmd_parts += shlex.split(params["extra_args"])
 
-    cmd_parts.append(shlex.quote(params["image"]))
+    cmd_parts.append(shlex.quote(image_ref))
 
     if params.get("command"):
         cmd_parts += shlex.split(params["command"])
@@ -1623,6 +2096,7 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
         if container_name:
             _record_resource_creator(conn, server_id, "container", container_name, user.id)
         _record_resource_creator(conn, server_id, "container", container_id_short, user.id)
+    _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
     return {"success": True, "containerId": container_id_full, "command": full_cmd}
 
@@ -1643,6 +2117,12 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
     if not cmd.lower().startswith("docker run"):
         raise ToolboxError("INVALID_COMMAND", "命令必须以 'docker run' 开头", status_code=400, tool_id=TOOL_ID)
 
+    raw_image = _extract_image_from_raw_cmd(cmd)
+    if not raw_image:
+        raise ToolboxError("INVALID_IMAGE", "无法从 docker run 命令中解析镜像", status_code=400, tool_id=TOOL_ID)
+    raw_volume_specs = _extract_volume_specs_from_raw_cmd(cmd)
+    images_to_record: list[str] = []
+    volumes_to_record: list[str] = []
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
@@ -1653,10 +2133,8 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
                 )
             # 校验挂载路径白名单（从原始命令中解析）
             whitelist = perms.get("ctr_path_whitelist", [])
-            if whitelist:
-                raw_volumes = _extract_volumes_from_raw_cmd(cmd)
-                if raw_volumes:
-                    _validate_path_whitelist(raw_volumes, whitelist)
+            if raw_volume_specs:
+                _validate_path_whitelist(raw_volume_specs, whitelist)
             # 校验 GPU 权限
             raw_gpus = _extract_gpus_from_raw_cmd(cmd)
             if raw_gpus:
@@ -1665,6 +2143,8 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
+            images_to_record = _plan_container_image_usage(conn, row, [raw_image], user)
+            volumes_to_record = _plan_container_volume_usage(conn, row, raw_volume_specs, user)
 
     client = _ssh_connect(row)
     try:
@@ -1698,6 +2178,7 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
         if container_name:
             _record_resource_creator(conn, server_id, "container", container_name, user.id)
         _record_resource_creator(conn, server_id, "container", container_id_short, user.id)
+    _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
     return {"success": True, "containerId": container_id_full, "command": cmd}
 
@@ -1708,6 +2189,9 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
     安全校验：server_visible + ctr_create + 路径白名单 + 容器配额。
     """
     init_docker_database()
+    compose_resources = _extract_container_resources_from_compose(yaml_content, project_name)
+    images_to_record: list[str] = []
+    volumes_to_record: list[str] = []
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
@@ -1718,14 +2202,16 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
                 )
             # 校验挂载路径白名单（从 YAML 中解析 volumes 的 bind 挂载）
             whitelist = perms.get("ctr_path_whitelist", [])
-            if whitelist:
-                compose_volumes = _extract_volumes_from_compose(yaml_content)
-                if compose_volumes:
-                    _validate_path_whitelist(compose_volumes, whitelist)
+            if compose_resources["bindPaths"]:
+                _validate_path_whitelist(compose_resources["bindPaths"], whitelist)
+            if _compose_has_build(yaml_content) and not (perms.get("img_use") and perms.get("img_pull")):
+                raise ToolboxError("PERMISSION_DENIED", "Compose build 会创建镜像，您没有使用并拉取/新增镜像的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
+            images_to_record = _plan_container_image_usage(conn, row, compose_resources["images"], user)
+            volumes_to_record = _plan_container_volume_usage(conn, row, compose_resources["volumeSpecs"], user)
 
     tmp_dir = f"/tmp/.docker_manager_{uuid.uuid4().hex[:8]}"
     compose_file = f"{tmp_dir}/docker-compose.yml"
@@ -1788,6 +2274,7 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
         with get_connection() as conn:
             for ref in ctr_refs:
                 _record_resource_creator(conn, server_id, "container", ref, user.id)
+    _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
     return {"success": True, "output": stdout + stderr, "projectName": project_name}
 
@@ -1802,30 +2289,34 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
         raise ToolboxError("INVALID_ACTION", "无效的容器操作", status_code=400, tool_id=TOOL_ID)
 
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("ctr_manage_all", False)
             # 新模型：检查用户是否是该容器的 owner（creator 不拥有管理权）
-            is_resource_owner = conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role='owner'",
-                (server_id, container_id, user.id),
-            ).fetchone() is not None
-            # _meta 表查询
-            if not is_resource_owner:
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
-                    (server_id, container_id),
-                ).fetchone()
-                is_resource_owner = bool(meta and meta["owner_user_id"] == user.id)
+            is_resource_owner = _user_can_manage_resource(conn, server_id, "container", container_id, user)
             if not can_manage_all and not is_resource_owner:
                 raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限（需要是容器所有者或拥有全局管理权限）", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     docker_cmd = "rm -f" if action == "remove" else action
     cmd = f"docker {docker_cmd} {shlex.quote(container_id)}"
+    cleanup_refs = _resource_ref_candidates("container", container_id)
 
     client = _ssh_connect(row)
     try:
+        if action == "remove":
+            inspect_out, _, inspect_code = _ssh_exec(
+                client,
+                f"docker inspect --format '{{{{.Name}}}}\t{{{{.Id}}}}' {shlex.quote(container_id)}",
+                timeout=15,
+            )
+            if inspect_code == 0 and inspect_out.strip():
+                parts = inspect_out.strip().split("\t")
+                if parts:
+                    cleanup_refs.extend(_resource_ref_candidates("container", parts[0]))
+                if len(parts) > 1:
+                    cleanup_refs.extend(_resource_ref_candidates("container", parts[1]))
         stdout, stderr, code = _ssh_exec(client, cmd, timeout=60)
     finally:
         client.close()
@@ -1841,21 +2332,7 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
     # 删除容器时清理平台元数据
     if action == "remove":
         with get_connection() as conn:
-            # 清理 docker_containers_meta
-            conn.execute(
-                "DELETE FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
-                (server_id, container_id),
-            )
-            # 清理 docker_resource_roles
-            conn.execute(
-                "DELETE FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=?",
-                (server_id, container_id),
-            )
-            # 清理 docker_container_resource_cache
-            conn.execute(
-                "DELETE FROM docker_container_resource_cache WHERE server_id=? AND container_ref=?",
-                (server_id, container_id),
-            )
+            _delete_resource_metadata(conn, server_id, "container", cleanup_refs)
 
     return {"success": True, "action": action, "containerId": container_id}
 
@@ -1873,19 +2350,11 @@ def update_restart_policy(server_id: str, container_id: str, policy: str, user: 
 
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("ctr_manage_all", False)
-            is_resource_owner = conn.execute(
-                "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role='owner'",
-                (server_id, container_id, user.id),
-            ).fetchone() is not None
-            if not is_resource_owner:
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
-                    (server_id, container_id),
-                ).fetchone()
-                is_resource_owner = bool(meta and meta["owner_user_id"] == user.id)
+            is_resource_owner = _user_can_manage_resource(conn, server_id, "container", container_id, user)
             if not can_manage_all and not is_resource_owner:
                 raise ToolboxError("PERMISSION_DENIED", "您没有管理容器的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
@@ -1914,6 +2383,7 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
     """
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             view_all = perms.get("ctr_view_all", False)
@@ -1922,16 +2392,7 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
                 raise ToolboxError("PERMISSION_DENIED", "您没有查看容器详情的权限", status_code=403, tool_id=TOOL_ID)
             if not view_all:
                 # 检查是否有该容器的查看角色（owner/viewer）
-                accessible_roles = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','viewer')",
-                    (server_id, container_id, user.id),
-                ).fetchone()
-                # _meta 表查询
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
-                    (server_id, container_id),
-                ).fetchone()
-                if not accessible_roles and (not meta or meta["owner_user_id"] != user.id):
+                if not _user_can_access_resource(conn, server_id, "container", container_id, user):
                     raise ToolboxError("PERMISSION_DENIED", "您没有权限查看此容器的详情", status_code=403, tool_id=TOOL_ID)
 
         # 查询平台元数据
@@ -2065,6 +2526,7 @@ def get_container_logs(server_id: str, container_id: str, user: User, tail: int 
     """获取容器日志（需容器 owner/viewer 角色或 ctr_view_all）"""
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             view_all = perms.get("ctr_view_all", False)
@@ -2072,15 +2534,7 @@ def get_container_logs(server_id: str, container_id: str, user: User, tail: int 
             if not view_all and not ctr_use:
                 raise ToolboxError("PERMISSION_DENIED", "您没有查看容器日志的权限", status_code=403, tool_id=TOOL_ID)
             if not view_all:
-                accessible = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND resource_ref=? AND user_id=? AND role IN ('owner','viewer')",
-                    (server_id, container_id, user.id),
-                ).fetchone()
-                meta = conn.execute(
-                    "SELECT owner_user_id FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
-                    (server_id, container_id),
-                ).fetchone()
-                if not accessible and (not meta or meta["owner_user_id"] != user.id):
+                if not _user_can_access_resource(conn, server_id, "container", container_id, user):
                     raise ToolboxError("PERMISSION_DENIED", "您只能查看自己有权限的容器日志", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
@@ -2433,12 +2887,16 @@ def _measure_volume_sizes(row: sqlite3.Row) -> dict[str, float]:
 def refresh_volume_sizes(server_id: str, user: User) -> dict[str, Any]:
     """刷新服务器上所有卷的实际大小并写入数据库。
 
-    管理员或拥有 ``server_visible`` 权限的用户可调用。
+    管理员或拥有卷查看/管理权限的用户可调用。
     返回 ``{serverId, sizes, count}``。
     """
     init_docker_database()
     with get_connection() as conn:
         _require_server_visible(conn, server_id, user)
+        if user.role != "admin":
+            perms = _get_user_perms(conn, server_id, user)
+            if not (perms.get("vol_use") or perms.get("vol_view_all") or perms.get("vol_manage_all")):
+                raise ToolboxError("PERMISSION_DENIED", "您没有刷新卷大小的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
     sizes = _measure_volume_sizes(row)
@@ -2458,6 +2916,7 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
     """列出服务器上的卷，附加平台元数据，按所有权/角色过滤（对齐镜像 list_images 模式）"""
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         perms = _get_user_perms(conn, server_id, user)
         # 需要 vol_use 或 vol_view_all 或管理员
         if user.role != "admin" and not perms.get("vol_use") and not perms.get("vol_view_all"):
@@ -2596,6 +3055,14 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
 
         # 当前用户细粒度权限（容器可见性判断用）
         perms = _get_user_perms(conn, server_id, user)
+        can_view_volume = (
+            user.role == "admin"
+            or perms.get("vol_view_all")
+            or perms.get("vol_manage_all")
+            or (perms.get("vol_use") and _user_can_access_resource(conn, server_id, "volume", volume_name, user))
+        )
+        if not can_view_volume:
+            raise ToolboxError("PERMISSION_DENIED", "您没有权限查看此卷详情", status_code=403, tool_id=TOOL_ID)
         view_all_ctrs = user.role == "admin" or perms.get("ctr_view_all", False)
 
         # 当前用户可访问的容器 ref 集合（仅 owner/viewer 具备查看权）
@@ -2659,6 +3126,7 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
         creator_info = _get_user_basic(roles.get("creatorUserId"))
         owner_infos = [_get_user_basic(uid) for uid in roles.get("ownerUserIds", []) if uid]
         viewer_infos = [_get_user_basic(uid) for uid in roles.get("viewerUserIds", []) if uid]
+        quota_holder_infos = [_get_user_basic(uid) for uid in roles.get("quotaHolderUserIds", []) if uid]
 
     return {
         "serverId": server_id,
@@ -2673,6 +3141,8 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
             "owners": [o for o in owner_infos if o],
             "viewerUserIds": roles.get("viewerUserIds", []),
             "viewers": [v for v in viewer_infos if v],
+            "quotaHolderUserIds": roles.get("quotaHolderUserIds", []),
+            "quotaHolders": [q for q in quota_holder_infos if q],
         },
         "mountedContainers": visible_containers,
         "hiddenContainerCount": hidden_count,
@@ -2718,6 +3188,7 @@ def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any
     """删除 Docker 卷（需 vol_use 权限且是卷的 owner 角色，或拥有 vol_manage_all 权限，对齐镜像 delete_image 模式）"""
     init_docker_database()
     with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
             can_manage_all = perms.get("vol_manage_all", False)
@@ -2731,17 +3202,7 @@ def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any
                         status_code=403, tool_id=TOOL_ID,
                     )
                 # 且只能删除自己拥有 owner 角色的卷（creator 不拥有管理权）
-                is_owner = conn.execute(
-                    "SELECT 1 FROM docker_resource_roles WHERE server_id=? AND resource_type='volume' AND resource_ref=? AND user_id=? AND role='owner'",
-                    (server_id, volume_name, user.id),
-                ).fetchone() is not None
-                if not is_owner:
-                    meta = conn.execute(
-                        "SELECT owner_user_id FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
-                        (server_id, volume_name),
-                    ).fetchone()
-                    is_owner = bool(meta and meta["owner_user_id"] == user.id)
-                if not is_owner:
+                if not _user_can_manage_resource(conn, server_id, "volume", volume_name, user):
                     raise ToolboxError("PERMISSION_DENIED", "您没有删除此卷的权限（需要是卷的所有者或拥有全局管理权限）", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
 
@@ -2756,14 +3217,7 @@ def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any
 
     # 清除平台元数据与角色（对齐容器删除时的清理逻辑）
     with get_connection() as conn:
-        conn.execute(
-            "DELETE FROM docker_volumes_meta WHERE server_id = ? AND volume_name = ?",
-            (server_id, volume_name),
-        )
-        conn.execute(
-            "DELETE FROM docker_resource_roles WHERE server_id = ? AND resource_type = 'volume' AND resource_ref = ?",
-            (server_id, volume_name),
-        )
+        _delete_resource_metadata(conn, server_id, "volume", _resource_ref_candidates("volume", volume_name))
 
     return {"success": True, "volumeName": volume_name}
 
@@ -2801,6 +3255,18 @@ def copy_volume(
                     "PERMISSION_DENIED",
                     "您在目标服务器没有「跨服务器复制卷」权限",
                     status_code=403, tool_id=TOOL_ID,
+                )
+            can_view_source = (
+                src_perms.get("vol_view_all")
+                or src_perms.get("vol_manage_all")
+                or _user_can_access_resource(conn, src_server_id, "volume", src_volume_name, user)
+            )
+            if not can_view_source:
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您没有访问源卷的权限，无法复制该卷",
+                    status_code=403,
+                    tool_id=TOOL_ID,
                 )
 
         src_row = _get_server_row(conn, src_server_id)

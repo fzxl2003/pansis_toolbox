@@ -142,6 +142,13 @@
   gap: 4px;
 }
 
+.dm-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
 .dm-card-actions {
   display: flex;
   gap: 6px;
@@ -584,72 +591,80 @@ animation: dm-pulse 1s ease-in-out infinite;
 }
 
 .dm-perm-checks {
-display: grid;
-grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 12px;
+  align-items: start;
+}
+
+.dm-muted-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 8px;
 }
 
 /* ── Capsule Switch（胶囊开关）── */
 
 .dm-capsule-switch {
-display: inline-flex;
-align-items: center;
-gap: 8px;
-margin-left: auto;
-flex-shrink: 0;
-cursor: pointer;
-user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
 }
 
 .dm-capsule-switch.disabled {
-opacity: 0.55;
-cursor: not-allowed;
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .dm-capsule-switch-label {
-display: inline-flex;
-align-items: center;
-font-size: 13px;
-font-weight: 600;
-color: #374151;
-text-transform: none;
-letter-spacing: normal;
-white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
 }
 
 .dm-capsule-switch-input {
-position: absolute;
-opacity: 0;
-width: 0;
-height: 0;
-margin: 0;
-pointer-events: none;
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  pointer-events: none;
 }
 
 .dm-capsule-switch-track {
-position: relative;
-width: 40px;
-height: 22px;
-border-radius: 999px;
-background: #cbd5e1;
-transition: background 0.2s;
-flex-shrink: 0;
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition: background 0.2s;
+  flex-shrink: 0;
 }
 
 .dm-capsule-switch-track.on {
-background: #2563eb;
+  background: #2563eb;
 }
 
 .dm-capsule-switch-knob {
-position: absolute;
-top: 2px;
-left: 2px;
-width: 18px;
-height: 18px;
-border-radius: 50%;
-background: #fff;
-box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-transition: transform 0.2s;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: transform 0.2s;
 }
 
 .dm-capsule-switch-track.on .dm-capsule-switch-knob {
@@ -1492,4 +1507,3 @@ transform: translateX(18px);
   background: #fef3c7;
   color: #92400e;
 }
-

@@ -410,7 +410,7 @@ export function ResourceUsagePanel({
                       {cuda.availableGpus.map((g) => (
                         <span key={g.index} className="dm-gpu-chip" title={g.name}>
                           #{g.index} {g.name?.replace(/NVIDIA/i, '').trim()}
-                          {g.memTotalMb ? ` (${(g.memTotalMb / 1024).toFixed(0)}G)` : ''}
+                          {g.memoryTotal ? ` (${g.memoryTotal})` : ''}
                         </span>
                       ))}
                     </div>

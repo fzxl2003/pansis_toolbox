@@ -893,7 +893,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
             <div><strong>角色说明：</strong></div>
             <div>• <strong>创建者</strong>：平台自动记录，不可修改，默认同时是所有者</div>
             <div>• <strong>所有者</strong>：拥有该资源的全部权限（查看、启停、分配查看者等）</div>
-            <div>• <strong>配额占用者</strong>：必须同时是所有者，可独占或分摊资源配额</div>
+            <div>• <strong>配额占用者</strong>：只负责资源配额归属，可独占或多人分摊</div>
             <div>• <strong>查看者</strong>：只读权限；拥有容器查看权后自动继承其挂载卷和镜像的查看权</div>
           </div>
 
@@ -975,9 +975,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 资源大小在所有配额占用者间均分
               </span>
             </div>
-            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
-              配额占用者无需是所有者。资源大小将被所有配额占用者平均分配占用。例如 100MB 镜像、5 个配额占用者，每人占用 20MB。
-            </div>
+            <div className="dm-muted-note">资源大小将被所有配额占用者平均分配占用。</div>
             <div className="dm-roles-checklist">
               {users.filter((u) => u.role !== 'admin').map((u) => {
                 const hasUsePerms = (() => {

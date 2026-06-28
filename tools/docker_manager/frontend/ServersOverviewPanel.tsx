@@ -278,8 +278,8 @@ function ServerOverviewRow({ server, status }: { server: DmServer; status: 'onli
 
       {/* 连接信息（常显示） */}
       <div className="dm-card-meta" style={{ padding: '0 16px 10px' }}>
-        <span>🖥 {server.host}:{server.port}</span>
-        <span>👤 {server.sshUsername}</span>
+        <span><Server size={12} /> {server.host}:{server.port}</span>
+        <span>{server.sshUsername}</span>
         <span style={{ color: '#94a3b8', fontSize: 12 }}>添加于 {server.createdAt.slice(0, 10)}</span>
       </div>
 

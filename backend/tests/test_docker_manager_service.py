@@ -7,7 +7,7 @@ import pytest
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection, init_database
 from backend.app.services.auth_service import User
-from tools.docker_manager.backend import service
+from tools.docker_manager.backend import base, containers, images, service, volumes
 
 
 SERVER_A = "dm_test_server_a"
@@ -81,6 +81,13 @@ def _set_perms(server_id: str, user_id: str, **overrides: Any) -> None:
     service.set_user_perms(server_id, user_id, perms, User(id="admin", username="admin", display_name="Admin", role="admin"))
 
 
+def _patch_ssh(monkeypatch: pytest.MonkeyPatch, connect: Any, exec_fn: Any | None = None) -> None:
+    for module in (base, containers, images, service, volumes):
+        monkeypatch.setattr(module, "_ssh_connect", connect)
+        if exec_fn is not None:
+            monkeypatch.setattr(module, "_ssh_exec", exec_fn)
+
+
 DF_SAMPLE = """
 Images space usage:
 
@@ -101,8 +108,6 @@ dataset       1         2.5GB
 
 
 def test_docker_df_refresh_populates_cache_and_lists_without_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-
     def fake_exec(client: FakeSshClient, cmd: str, timeout: int = 60) -> tuple[str, str, int]:
         if cmd == "docker system df -v":
             return DF_SAMPLE, "", 0
@@ -110,7 +115,7 @@ def test_docker_df_refresh_populates_cache_and_lists_without_ssh(monkeypatch: py
             return "abc123def456\tweb\t0.0.0.0:8080->80/tcp, :::8080->80/tcp\n", "", 0
         return "", f"unexpected command: {cmd}", 1
 
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec)
 
     result = service.refresh_docker_df_cache(SERVER_A, _admin())
 
@@ -125,13 +130,13 @@ def test_docker_df_refresh_populates_cache_and_lists_without_ssh(monkeypatch: py
             return "", "ports unavailable", 1
         return "", f"unexpected command: {cmd}", 1
 
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec_ports_failed)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec_ports_failed)
     service.refresh_docker_df_cache(SERVER_A, _admin())
 
     def fail_connect(row: Any) -> FakeSshClient:
         raise AssertionError("list calls should read docker system df cache without SSH")
 
-    monkeypatch.setattr(service, "_ssh_connect", fail_connect)
+    _patch_ssh(monkeypatch, fail_connect)
 
     images = service.list_images(SERVER_A, _admin())
     containers = service.list_containers(SERVER_A, _admin())
@@ -195,8 +200,7 @@ def test_volume_list_does_not_treat_container_view_all_as_volume_view_all() -> N
 
 def test_pull_image_records_creator_owner_and_quota_holder(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_perms(SERVER_A, USER_A, server_visible=True, img_pull=True, img_use=True)
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", lambda client, cmd, timeout=60: ("pulled", "", 0))
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), lambda client, cmd, timeout=60: ("pulled", "", 0))
 
     result = service.pull_image(SERVER_A, "nginx", _user())
     assert result["success"] is True
@@ -242,8 +246,7 @@ def test_remove_container_cleans_name_and_short_id_metadata(monkeypatch: pytest.
             return "trainer\n", "", 0
         return "", "", 1
 
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec)
 
     result = service.container_action(SERVER_A, "trainer", "remove", _user())
     assert result["success"] is True
@@ -276,8 +279,7 @@ def test_volume_detail_enforces_access_and_returns_quota_holders(monkeypatch: py
         admin,
         quota_holder_user_ids=[USER_A, USER_B],
     )
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", lambda client, cmd, timeout=60: ("", "", 0))
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), lambda client, cmd, timeout=60: ("", "", 0))
 
     detail = service.get_volume_detail(SERVER_A, "dataset", _user(USER_A))
     assert detail["roles"]["quotaHolderUserIds"] == [USER_A, USER_B]
@@ -298,8 +300,7 @@ def test_create_container_requires_image_access(monkeypatch: pytest.MonkeyPatch)
             return "", "", 0
         return "", "", 0
 
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec)
 
     with pytest.raises(ToolboxError) as exc:
         service.create_container_run(SERVER_A, {"image": "private/app:1", "name": "app"}, _user())
@@ -325,8 +326,7 @@ def test_create_container_uses_accessible_image_and_volume(monkeypatch: pytest.M
             return "abcdef1234567890\n", "", 0
         return "", "", 0
 
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec)
 
     result = service.create_container_run(
         SERVER_A,
@@ -358,8 +358,7 @@ def test_create_container_rejects_missing_named_volume_without_create_permission
             return "", "", 1
         return "", "", 0
 
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec)
 
     with pytest.raises(ToolboxError) as exc:
         service.create_container_run(
@@ -373,7 +372,7 @@ def test_create_container_rejects_missing_named_volume_without_create_permission
 
 
 def test_create_container_rejects_frontend_volume_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient())
 
     with pytest.raises(ToolboxError) as exc:
         service.create_container_run(
@@ -424,8 +423,7 @@ def test_create_container_records_auto_pulled_image_and_created_volume(monkeypat
             return "123456abcdef7890\n", "", 0
         return "", "", 0
 
-    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
+    _patch_ssh(monkeypatch, lambda row: FakeSshClient(), fake_exec)
 
     result = service.create_container_run(
         SERVER_A,

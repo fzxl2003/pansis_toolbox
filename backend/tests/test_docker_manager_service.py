@@ -102,13 +102,31 @@ dataset       1         2.5GB
 
 def test_docker_df_refresh_populates_cache_and_lists_without_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
-    monkeypatch.setattr(service, "_ssh_exec", lambda client, cmd, timeout=60: (DF_SAMPLE, "", 0))
+
+    def fake_exec(client: FakeSshClient, cmd: str, timeout: int = 60) -> tuple[str, str, int]:
+        if cmd == "docker system df -v":
+            return DF_SAMPLE, "", 0
+        if cmd.startswith("docker ps -a --format"):
+            return "abc123def456\tweb\t0.0.0.0:8080->80/tcp, :::8080->80/tcp\n", "", 0
+        return "", f"unexpected command: {cmd}", 1
+
+    monkeypatch.setattr(service, "_ssh_exec", fake_exec)
 
     result = service.refresh_docker_df_cache(SERVER_A, _admin())
 
     assert result["images"] == 2
     assert result["containers"] == 1
     assert result["volumes"] == 1
+
+    def fake_exec_ports_failed(client: FakeSshClient, cmd: str, timeout: int = 60) -> tuple[str, str, int]:
+        if cmd == "docker system df -v":
+            return DF_SAMPLE, "", 0
+        if cmd.startswith("docker ps -a --format"):
+            return "", "ports unavailable", 1
+        return "", f"unexpected command: {cmd}", 1
+
+    monkeypatch.setattr(service, "_ssh_exec", fake_exec_ports_failed)
+    service.refresh_docker_df_cache(SERVER_A, _admin())
 
     def fail_connect(row: Any) -> FakeSshClient:
         raise AssertionError("list calls should read docker system df cache without SSH")
@@ -125,6 +143,7 @@ def test_docker_df_refresh_populates_cache_and_lists_without_ssh(monkeypatch: py
     ]
     assert containers[0]["Names"] == "web"
     assert containers[0]["Image"] == "nginx"
+    assert containers[0]["Ports"] == "0.0.0.0:8080->80/tcp, :::8080->80/tcp"
     assert volumes[0]["name"] == "dataset"
     assert volumes[0]["links"] == 1
     assert volumes[0]["sizeGb"] == pytest.approx(2.5)
@@ -144,6 +163,34 @@ def test_resource_lists_require_server_visibility() -> None:
     with pytest.raises(ToolboxError) as container_exc:
         service.list_containers(SERVER_A, _user())
     assert container_exc.value.status_code == 403
+
+
+def test_volume_list_does_not_treat_container_view_all_as_volume_view_all() -> None:
+    _set_perms(SERVER_A, USER_A, server_visible=True, vol_use=True, ctr_view_all=True)
+    service._store_docker_df_cache(
+        SERVER_A,
+        "",
+        {
+            "refreshedAt": service._now(),
+            "images": [],
+            "containers": [],
+            "volumes": [
+                {"name": "owned-data", "links": 1, "size": "1GB", "sizeGb": 1.0},
+                {"name": "other-data", "links": 0, "size": "2GB", "sizeGb": 2.0},
+            ],
+        },
+    )
+    with get_connection() as conn:
+        service._record_resource_creator(conn, SERVER_A, "volume", "owned-data", USER_A)
+        service._record_resource_creator(conn, SERVER_A, "volume", "other-data", USER_B)
+
+    visible = service.list_volumes(SERVER_A, _user(USER_A))["volumes"]
+
+    assert [v["name"] for v in visible] == ["owned-data"]
+
+    _set_perms(SERVER_A, USER_A, server_visible=True, vol_use=True, vol_view_all=True, ctr_view_all=True)
+    visible_all = service.list_volumes(SERVER_A, _user(USER_A))["volumes"]
+    assert [v["name"] for v in visible_all] == ["other-data", "owned-data"]
 
 
 def test_pull_image_records_creator_owner_and_quota_holder(monkeypatch: pytest.MonkeyPatch) -> None:

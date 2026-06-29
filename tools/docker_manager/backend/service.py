@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
@@ -242,6 +243,7 @@ def init_docker_database() -> None:
                     command TEXT NOT NULL DEFAULT '',
                     local_volumes INTEGER NOT NULL DEFAULT 0,
                     size TEXT NOT NULL DEFAULT '',
+                    ports TEXT NOT NULL DEFAULT '',
                     created TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT '',
                     names TEXT NOT NULL DEFAULT '',
@@ -287,6 +289,9 @@ def init_docker_database() -> None:
             ctr_meta_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_containers_meta)").fetchall()}
             if "display_ports" not in ctr_meta_cols:
                 conn.execute("ALTER TABLE docker_containers_meta ADD COLUMN display_ports TEXT")
+            df_ctr_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_df_containers)").fetchall()}
+            if "ports" not in df_ctr_cols:
+                conn.execute("ALTER TABLE docker_df_containers ADD COLUMN ports TEXT NOT NULL DEFAULT ''")
         _DB_INITIALIZED = True
     _start_df_cache_refresher()
 
@@ -606,28 +611,74 @@ def refresh_docker_df_cache(server_id: str, user: User | None = None) -> dict[st
             _require_server_visible(conn, server_id, user)
 
     try:
-        client = _ssh_connect(row)
-        try:
-            stdout, stderr, code = _ssh_exec(client, "docker system df -v", timeout=120)
-        finally:
-            client.close()
-        if code != 0:
-            _store_docker_df_error(server_id, stderr.strip() or stdout.strip())
-            raise ToolboxError("DF_REFRESH_FAILED", f"docker system df -v 失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
-        parsed = _parse_docker_system_df_v(stdout)
-        _store_docker_df_cache(server_id, stdout, parsed)
+        collector_results = _run_docker_inventory_collectors(row)
+        df_result = collector_results["system_df"]
+        if df_result["code"] != 0:
+            error = df_result["stderr"].strip() or df_result["stdout"].strip()
+            _store_docker_df_error(server_id, error)
+            raise ToolboxError("DF_REFRESH_FAILED", f"docker system df -v 失败: {error}", status_code=502, tool_id=TOOL_ID)
+        parsed = _parse_docker_system_df_v(df_result["stdout"])
+        ports_result = collector_results.get("container_ports")
+        if ports_result and ports_result["code"] == 0:
+            _merge_container_ports(parsed["containers"], _parse_container_ports_output(ports_result["stdout"]))
+        else:
+            _merge_container_ports(parsed["containers"], _load_cached_container_ports(server_id))
+        _store_docker_df_cache(server_id, df_result["stdout"], parsed)
         return {
             "serverId": server_id,
             "refreshedAt": parsed["refreshedAt"],
             "images": len(parsed["images"]),
             "containers": len(parsed["containers"]),
             "volumes": len(parsed["volumes"]),
+            "collectors": {
+                name: {"ok": result["code"] == 0, "error": result["stderr"].strip()}
+                for name, result in collector_results.items()
+            },
         }
     except ToolboxError:
         raise
     except Exception as exc:
         _store_docker_df_error(server_id, str(exc))
         raise ToolboxError("DF_REFRESH_FAILED", f"刷新 Docker 缓存失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
+
+
+def _docker_inventory_collectors() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "system_df",
+            "cmd": "docker system df -v",
+            "timeout": 120,
+        },
+        {
+            "name": "container_ports",
+            "cmd": "docker ps -a --format '{{.ID}}\t{{.Names}}\t{{.Ports}}'",
+            "timeout": 60,
+        },
+    ]
+
+
+def _run_docker_inventory_collectors(server_row: sqlite3.Row) -> dict[str, dict[str, Any]]:
+    collectors = _docker_inventory_collectors()
+    results: dict[str, dict[str, Any]] = {}
+
+    def run_one(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        client = _ssh_connect(server_row)
+        try:
+            stdout, stderr, code = _ssh_exec(client, spec["cmd"], timeout=int(spec.get("timeout", 60)))
+            return spec["name"], {"stdout": stdout, "stderr": stderr, "code": code}
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=max(1, len(collectors))) as executor:
+        future_map = {executor.submit(run_one, spec): spec["name"] for spec in collectors}
+        for future in as_completed(future_map):
+            name = future_map[future]
+            try:
+                result_name, result = future.result()
+                results[result_name] = result
+            except Exception as exc:
+                results[name] = {"stdout": "", "stderr": str(exc), "code": -1}
+    return results
 
 
 def _store_docker_df_error(server_id: str, error: str) -> None:
@@ -690,8 +741,8 @@ def _store_docker_df_cache(server_id: str, raw_text: str, parsed: dict[str, Any]
             conn.execute(
                 """
                 INSERT INTO docker_df_containers
-                    (server_id, container_id, image, command, local_volumes, size, created, status, names, size_gb, refreshed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (server_id, container_id, image, command, local_volumes, size, ports, created, status, names, size_gb, refreshed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     server_id,
@@ -700,6 +751,7 @@ def _store_docker_df_cache(server_id: str, raw_text: str, parsed: dict[str, Any]
                     ctr["command"],
                     ctr["localVolumes"],
                     ctr["size"],
+                    ctr.get("ports", ""),
                     ctr["created"],
                     ctr["status"],
                     ctr["names"],
@@ -774,6 +826,47 @@ def _parse_docker_system_df_v(text: str) -> dict[str, Any]:
     return {"refreshedAt": _now(), "images": images, "containers": containers, "volumes": volumes}
 
 
+def _parse_container_ports_output(text: str) -> dict[str, str]:
+    ports_by_ref: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        container_id = parts[0].strip()
+        name = parts[1].strip().lstrip("/")
+        ports = parts[2].strip()
+        for key in (container_id, container_id[:12], name):
+            if key:
+                ports_by_ref[key] = ports
+    return ports_by_ref
+
+
+def _load_cached_container_ports(server_id: str) -> dict[str, str]:
+    ports_by_ref: dict[str, str] = {}
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT container_id, names, ports FROM docker_df_containers WHERE server_id=?",
+            (server_id,),
+        ).fetchall()
+    for row in rows:
+        ports = row["ports"] or ""
+        if not ports:
+            continue
+        for key in (row["container_id"], row["container_id"][:12], row["names"]):
+            if key:
+                ports_by_ref[key] = ports
+    return ports_by_ref
+
+
+def _merge_container_ports(containers: list[dict[str, Any]], ports_by_ref: dict[str, str]) -> None:
+    for ctr in containers:
+        container_id = ctr.get("containerId", "")
+        name = ctr.get("names", "")
+        ctr["ports"] = ports_by_ref.get(container_id) or ports_by_ref.get(container_id[:12]) or ports_by_ref.get(name) or ""
+
+
 def _looks_like_df_header(line: str) -> bool:
     compact = " ".join(line.upper().split())
     return (
@@ -828,6 +921,7 @@ def _parse_df_container_line(line: str) -> dict[str, Any] | None:
         "created": created,
         "status": status,
         "names": names,
+        "ports": "",
         "sizeGb": _parse_size_to_gb(size.split(" ", 1)[0]),
     }
 
@@ -2106,7 +2200,7 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
             "Command": cache["command"],
             "Status": status,
             "State": status.split(" ", 1)[0].lower() if status else "",
-            "Ports": "",
+            "Ports": cache["ports"],
             "CreatedAt": cache["created"],
             "Size": cache["size"],
             "LocalVolumes": cache["local_volumes"],
@@ -3148,8 +3242,13 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
     with get_connection() as conn:
         _require_server_visible(conn, server_id, user)
         perms = _get_user_perms(conn, server_id, user)
-        # 需要 vol_use 或 vol_view_all 或管理员
-        if user.role != "admin" and not perms.get("vol_use") and not perms.get("vol_view_all"):
+        # 需要基础卷使用权，或显式的全量查看/管理权限。
+        if (
+            user.role != "admin"
+            and not perms.get("vol_use")
+            and not perms.get("vol_view_all")
+            and not perms.get("vol_manage_all")
+        ):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看卷的权限", status_code=403, tool_id=TOOL_ID)
         # 获取当前用户配额信息（使用 quota_holder 均分逻辑）
         if user.role == "admin":
@@ -3201,8 +3300,8 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
             user_managed_vols.add(r["resource_ref"])
         # 是否有全局卷管理权限
         has_vol_manage_all = user.role == "admin" or bool(perms.get("vol_manage_all"))
-        # view_all：管理员、vol_view_all、vol_manage_all（管理权自动包含查看权）、ctr_view_all
-        view_all = user.role == "admin" or perms.get("vol_view_all", False) or perms.get("vol_manage_all", False) or perms.get("ctr_view_all", False)
+        # view_all 只受卷权限控制。ctr_view_all 不能绕过卷的查看边界。
+        view_all = user.role == "admin" or perms.get("vol_view_all", False) or perms.get("vol_manage_all", False)
         cache_rows = conn.execute(
             "SELECT * FROM docker_df_volumes WHERE server_id=? ORDER BY volume_name",
             (server_id,),
@@ -3703,6 +3802,7 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
             "Command": row["command"],
             "Status": row["status"],
             "State": row["status"].split(" ", 1)[0].lower() if row["status"] else "",
+            "Ports": row["ports"],
             "CreatedAt": row["created"],
             "Size": row["size"],
             "LocalVolumes": row["local_volumes"],

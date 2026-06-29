@@ -12,6 +12,7 @@ import secrets
 import shlex
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User
 
 TOOL_ID = "docker_manager"
+DF_CACHE_REFRESH_INTERVAL_SECONDS = 10
 
 # 模板 MD 文件存储目录
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
@@ -58,6 +60,8 @@ def _decrypt(cipher: str) -> str:
 
 _DB_INITIALIZED = False
 _DB_LOCK = threading.Lock()
+_DF_CACHE_THREAD_STARTED = False
+_DF_CACHE_THREAD_LOCK = threading.Lock()
 
 
 def init_docker_database() -> None:
@@ -204,6 +208,59 @@ def init_docker_database() -> None:
                     PRIMARY KEY(server_id, container_ref, resource_type, resource_ref),
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS docker_df_cache (
+                    server_id TEXT PRIMARY KEY,
+                    refreshed_at TEXT NOT NULL,
+                    raw_text TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'ok',
+                    error TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(server_id) REFERENCES docker_servers(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS docker_df_images (
+                    server_id TEXT NOT NULL,
+                    image_ref TEXT NOT NULL,
+                    repository TEXT NOT NULL DEFAULT '',
+                    tag TEXT NOT NULL DEFAULT '',
+                    image_id TEXT NOT NULL DEFAULT '',
+                    created TEXT NOT NULL DEFAULT '',
+                    size TEXT NOT NULL DEFAULT '',
+                    shared_size TEXT NOT NULL DEFAULT '',
+                    unique_size TEXT NOT NULL DEFAULT '',
+                    containers INTEGER NOT NULL DEFAULT 0,
+                    size_gb REAL NOT NULL DEFAULT 0,
+                    refreshed_at TEXT NOT NULL,
+                    PRIMARY KEY(server_id, image_ref),
+                    FOREIGN KEY(server_id) REFERENCES docker_servers(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS docker_df_containers (
+                    server_id TEXT NOT NULL,
+                    container_id TEXT NOT NULL,
+                    image TEXT NOT NULL DEFAULT '',
+                    command TEXT NOT NULL DEFAULT '',
+                    local_volumes INTEGER NOT NULL DEFAULT 0,
+                    size TEXT NOT NULL DEFAULT '',
+                    created TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    names TEXT NOT NULL DEFAULT '',
+                    size_gb REAL NOT NULL DEFAULT 0,
+                    refreshed_at TEXT NOT NULL,
+                    PRIMARY KEY(server_id, container_id),
+                    FOREIGN KEY(server_id) REFERENCES docker_servers(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS docker_df_volumes (
+                    server_id TEXT NOT NULL,
+                    volume_name TEXT NOT NULL,
+                    links INTEGER NOT NULL DEFAULT 0,
+                    size TEXT NOT NULL DEFAULT '',
+                    size_gb REAL NOT NULL DEFAULT 0,
+                    refreshed_at TEXT NOT NULL,
+                    PRIMARY KEY(server_id, volume_name),
+                    FOREIGN KEY(server_id) REFERENCES docker_servers(id)
+                );
                 """
             )
             # 迁移：为已有数据库添加新列
@@ -231,6 +288,7 @@ def init_docker_database() -> None:
             if "display_ports" not in ctr_meta_cols:
                 conn.execute("ALTER TABLE docker_containers_meta ADD COLUMN display_ports TEXT")
         _DB_INITIALIZED = True
+    _start_df_cache_refresher()
 
 
 # ==============================================================
@@ -506,6 +564,293 @@ def _get_server_row(conn: sqlite3.Connection, server_id: str) -> sqlite3.Row:
     return row
 
 
+# ==============================================================
+# docker system df -v 缓存
+# ==============================================================
+
+def _start_df_cache_refresher() -> None:
+    global _DF_CACHE_THREAD_STARTED
+    with _DF_CACHE_THREAD_LOCK:
+        if _DF_CACHE_THREAD_STARTED:
+            return
+        _DF_CACHE_THREAD_STARTED = True
+        thread = threading.Thread(target=_df_cache_refresher_loop, name="docker-df-cache-refresher", daemon=True)
+        thread.start()
+
+
+def _df_cache_refresher_loop() -> None:
+    while True:
+        try:
+            refresh_all_docker_df_caches()
+        except Exception:
+            pass
+        time.sleep(DF_CACHE_REFRESH_INTERVAL_SECONDS)
+
+
+def refresh_all_docker_df_caches() -> None:
+    init_docker_database()
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM docker_servers ORDER BY name").fetchall()
+    for row in rows:
+        try:
+            refresh_docker_df_cache(row["id"])
+        except Exception:
+            continue
+
+
+def refresh_docker_df_cache(server_id: str, user: User | None = None) -> dict[str, Any]:
+    init_docker_database()
+    with get_connection() as conn:
+        row = _get_server_row(conn, server_id)
+        if user is not None:
+            _require_server_visible(conn, server_id, user)
+
+    try:
+        client = _ssh_connect(row)
+        try:
+            stdout, stderr, code = _ssh_exec(client, "docker system df -v", timeout=120)
+        finally:
+            client.close()
+        if code != 0:
+            _store_docker_df_error(server_id, stderr.strip() or stdout.strip())
+            raise ToolboxError("DF_REFRESH_FAILED", f"docker system df -v 失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
+        parsed = _parse_docker_system_df_v(stdout)
+        _store_docker_df_cache(server_id, stdout, parsed)
+        return {
+            "serverId": server_id,
+            "refreshedAt": parsed["refreshedAt"],
+            "images": len(parsed["images"]),
+            "containers": len(parsed["containers"]),
+            "volumes": len(parsed["volumes"]),
+        }
+    except ToolboxError:
+        raise
+    except Exception as exc:
+        _store_docker_df_error(server_id, str(exc))
+        raise ToolboxError("DF_REFRESH_FAILED", f"刷新 Docker 缓存失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
+
+
+def _store_docker_df_error(server_id: str, error: str) -> None:
+    now = _now()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO docker_df_cache (server_id, refreshed_at, raw_text, status, error)
+            VALUES (?, ?, '', 'error', ?)
+            ON CONFLICT(server_id) DO UPDATE SET
+                refreshed_at=excluded.refreshed_at,
+                status=excluded.status,
+                error=excluded.error
+            """,
+            (server_id, now, error),
+        )
+
+
+def _store_docker_df_cache(server_id: str, raw_text: str, parsed: dict[str, Any]) -> None:
+    refreshed_at = parsed["refreshedAt"]
+    with get_connection() as conn:
+        conn.execute("DELETE FROM docker_df_images WHERE server_id=?", (server_id,))
+        conn.execute("DELETE FROM docker_df_containers WHERE server_id=?", (server_id,))
+        conn.execute("DELETE FROM docker_df_volumes WHERE server_id=?", (server_id,))
+        conn.execute(
+            """
+            INSERT INTO docker_df_cache (server_id, refreshed_at, raw_text, status, error)
+            VALUES (?, ?, ?, 'ok', '')
+            ON CONFLICT(server_id) DO UPDATE SET
+                refreshed_at=excluded.refreshed_at,
+                raw_text=excluded.raw_text,
+                status=excluded.status,
+                error=excluded.error
+            """,
+            (server_id, refreshed_at, raw_text),
+        )
+        for img in parsed["images"]:
+            conn.execute(
+                """
+                INSERT INTO docker_df_images
+                    (server_id, image_ref, repository, tag, image_id, created, size, shared_size, unique_size, containers, size_gb, refreshed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    server_id,
+                    img["imageRef"],
+                    img["repository"],
+                    img["tag"],
+                    img["imageId"],
+                    img["created"],
+                    img["size"],
+                    img["sharedSize"],
+                    img["uniqueSize"],
+                    img["containers"],
+                    img["sizeGb"],
+                    refreshed_at,
+                ),
+            )
+        for ctr in parsed["containers"]:
+            conn.execute(
+                """
+                INSERT INTO docker_df_containers
+                    (server_id, container_id, image, command, local_volumes, size, created, status, names, size_gb, refreshed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    server_id,
+                    ctr["containerId"],
+                    ctr["image"],
+                    ctr["command"],
+                    ctr["localVolumes"],
+                    ctr["size"],
+                    ctr["created"],
+                    ctr["status"],
+                    ctr["names"],
+                    ctr["sizeGb"],
+                    refreshed_at,
+                ),
+            )
+        for vol in parsed["volumes"]:
+            conn.execute(
+                """
+                INSERT INTO docker_df_volumes
+                    (server_id, volume_name, links, size, size_gb, refreshed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (server_id, vol["name"], vol["links"], vol["size"], vol["sizeGb"], refreshed_at),
+            )
+            conn.execute(
+                "UPDATE docker_volumes_meta SET size_gb=? WHERE server_id=? AND volume_name=?",
+                (vol["sizeGb"], server_id, vol["name"]),
+            )
+
+
+def _refresh_docker_df_cache_best_effort(server_id: str) -> None:
+    try:
+        refresh_docker_df_cache(server_id)
+    except Exception:
+        pass
+
+
+def _parse_docker_system_df_v(text: str) -> dict[str, Any]:
+    sections: dict[str, list[str]] = {"images": [], "containers": [], "volumes": []}
+    current: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        lowered = line.lower()
+        if lowered.startswith("images space usage"):
+            current = "images"
+            continue
+        if lowered.startswith("containers space usage"):
+            current = "containers"
+            continue
+        if lowered.startswith("local volumes space usage"):
+            current = "volumes"
+            continue
+        if lowered.startswith("build cache usage"):
+            current = None
+            continue
+        if current is None:
+            continue
+        if _looks_like_df_header(line):
+            continue
+        sections[current].append(line)
+
+    images = []
+    for line in sections["images"]:
+        parsed = _parse_df_image_line(line)
+        if parsed:
+            images.append(parsed)
+    containers = []
+    for line in sections["containers"]:
+        parsed = _parse_df_container_line(line)
+        if parsed:
+            containers.append(parsed)
+    volumes = []
+    for line in sections["volumes"]:
+        parsed = _parse_df_volume_line(line)
+        if parsed:
+            volumes.append(parsed)
+
+    return {"refreshedAt": _now(), "images": images, "containers": containers, "volumes": volumes}
+
+
+def _looks_like_df_header(line: str) -> bool:
+    compact = " ".join(line.upper().split())
+    return (
+        compact.startswith("REPOSITORY TAG IMAGE ID")
+        or compact.startswith("CONTAINER ID IMAGE COMMAND")
+        or compact.startswith("VOLUME NAME LINKS SIZE")
+    )
+
+
+def _split_df_columns(line: str) -> list[str]:
+    import re
+    return [part.strip() for part in re.split(r"\s{2,}", line.strip()) if part.strip()]
+
+
+def _parse_df_image_line(line: str) -> dict[str, Any] | None:
+    cols = _split_df_columns(line)
+    if len(cols) < 8:
+        return None
+    repository, tag, image_id = cols[0], cols[1], cols[2]
+    containers_raw = cols[7] if len(cols) > 7 else "0"
+    ref = f"{repository}:{tag}" if tag and tag != "<none>" else image_id
+    return {
+        "repository": repository,
+        "tag": tag,
+        "imageId": image_id,
+        "created": cols[3],
+        "size": cols[4],
+        "sharedSize": cols[5],
+        "uniqueSize": cols[6],
+        "containers": _safe_int(containers_raw),
+        "imageRef": _normalize_image_ref(ref) if tag and tag != "<none>" else image_id,
+        "sizeGb": _parse_size_to_gb(cols[4]),
+    }
+
+
+def _parse_df_container_line(line: str) -> dict[str, Any] | None:
+    cols = _split_df_columns(line)
+    if len(cols) < 8:
+        return None
+    names = cols[-1]
+    status = cols[-2]
+    created = cols[-3]
+    size = cols[-4]
+    local_volumes = _safe_int(cols[-5])
+    command_cols = cols[2:-5]
+    return {
+        "containerId": cols[0],
+        "image": cols[1],
+        "command": " ".join(command_cols),
+        "localVolumes": local_volumes,
+        "size": size,
+        "created": created,
+        "status": status,
+        "names": names,
+        "sizeGb": _parse_size_to_gb(size.split(" ", 1)[0]),
+    }
+
+
+def _parse_df_volume_line(line: str) -> dict[str, Any] | None:
+    cols = _split_df_columns(line)
+    if len(cols) < 3:
+        return None
+    return {
+        "name": cols[0],
+        "links": _safe_int(cols[1]),
+        "size": cols[2],
+        "sizeGb": _parse_size_to_gb(cols[2]),
+    }
+
+
+def _safe_int(value: str) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
 def _normalize_image_ref(image_ref: str) -> str:
     """Normalize Docker image refs so ``nginx`` and ``nginx:latest`` match platform metadata."""
     ref = image_ref.strip()
@@ -739,6 +1084,7 @@ def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
             (server_id, name, host, port, ssh_username, encrypted_pw, user.id, now, now,
              1 if cuda_available else 0, gpu_count, json.dumps(gpu_info)),
         )
+    _refresh_docker_df_cache_best_effort(server_id)
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM docker_servers WHERE id = ?", (server_id,)).fetchone()
     return _public_server(row)
@@ -832,6 +1178,10 @@ def delete_server(server_id: str, user: User) -> None:
         conn.execute("DELETE FROM docker_containers_meta WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_resource_roles WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_container_resource_cache WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_df_cache WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_df_images WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_df_containers WHERE server_id = ?", (server_id,))
+        conn.execute("DELETE FROM docker_df_volumes WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_servers WHERE id = ?", (server_id,))
 
 
@@ -1018,39 +1368,21 @@ def _calc_user_image_usage(
         ).fetchone()
         img_qh_counts[ref] = max(1, cnt_row["cnt"])
 
-    # SSH 获取镜像列表及大小
     img_used_self_gb = 0.0
     img_used_total_gb = 0.0
     img_count_self = 0
     img_count_total = 0
-    try:
-        img_client = _ssh_connect(server_row)
-        try:
-            img_out, _, img_rc = _ssh_exec(
-                img_client,
-                'docker images --format \'{{.Repository}}:{{.Tag}}\t{{.Size}}\'',
-                timeout=15,
-            )
-        finally:
-            img_client.close()
-        if img_rc == 0:
-            for line in img_out.strip().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 2:
-                    continue
-                ref, size_str = parts[0], parts[1]
-                size_gb = _parse_size_to_gb(size_str)
-                img_used_total_gb += size_gb
-                img_count_total += 1
-                # 新均分逻辑：用户是 quota_holder 时按配额占用者数量均分
-                if ref in user_qh_img_refs:
-                    img_used_self_gb += size_gb / img_qh_counts[ref]
-                    img_count_self += 1
-    except ToolboxError:
-        pass  # SSH 连接失败时静默，不影响其他概览数据
+    for row in conn.execute(
+        "SELECT image_ref, size_gb FROM docker_df_images WHERE server_id=?",
+        (server_row["id"],),
+    ).fetchall():
+        ref = row["image_ref"]
+        size_gb = float(row["size_gb"] or 0)
+        img_used_total_gb += size_gb
+        img_count_total += 1
+        if ref in user_qh_img_refs:
+            img_used_self_gb += size_gb / img_qh_counts[ref]
+            img_count_self += 1
 
     img_remaining_gb = max(0.0, img_quota_gb - img_used_self_gb) if img_quota_gb > 0 else None
     return {
@@ -1092,7 +1424,6 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
         # 需要 img_use 或 img_view_all 或管理员
         if user.role != "admin" and not perms.get("img_use") and not perms.get("img_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看镜像的权限", status_code=403, tool_id=TOOL_ID)
-        row = _get_server_row(conn, server_id)
         # 获取镜像所有权元数据
         meta_rows = conn.execute(
             "SELECT image_ref, owner_user_id FROM docker_images_meta WHERE server_id = ?", (server_id,)
@@ -1138,53 +1469,33 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
                 ).fetchall():
                     user_accessible_refs.add(r["resource_ref"])
         view_all = user.role == "admin" or perms.get("img_view_all", False) or perms.get("ctr_view_all", False)
-
-    client = _ssh_connect(row)
-    try:
-        stdout, stderr, code = _ssh_exec(
-            client,
-            'docker images --format \'{"id":"{{.ID}}","repo":"{{.Repository}}","tag":"{{.Tag}}","size":"{{.Size}}","created":"{{.CreatedAt}}"}\' ',
-        )
-        # 获取服务器上所有容器引用的镜像（不受权限过滤），用于判断镜像是否被使用
-        ctr_stdout, _, _ = _ssh_exec(
-            client,
-            "docker ps -a --format '{{.Image}}'",
-        )
-    finally:
-        client.close()
-
-    # 构建被容器使用的镜像引用集合（所有容器，不受权限过滤）
-    used_image_refs: set[str] = set()
-    for line in ctr_stdout.strip().splitlines():
-        ref = line.strip()
-        if ref:
-            used_image_refs.add(ref)
+        cache_rows = conn.execute(
+            "SELECT * FROM docker_df_images WHERE server_id=? ORDER BY repository, tag",
+            (server_id,),
+        ).fetchall()
 
     images = []
-    for line in stdout.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            img = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
+    for cache in cache_rows:
         # 查找所有者：优先用 repo:tag 匹配，其次用 image id 匹配
-        ref_full = f"{img.get('repo', '')}:{img.get('tag', '')}"
-        ref_candidates = _resource_ref_candidates("image", ref_full) + _resource_ref_candidates("image", img.get("id", ""))
+        ref_full = cache["image_ref"]
+        ref_candidates = _resource_ref_candidates("image", ref_full) + _resource_ref_candidates("image", cache["image_id"])
         owner = next((meta_map.get(ref) for ref in ref_candidates if meta_map.get(ref)), None)
-        img["ownerUserId"] = owner  # 前端字段（第一个所有者）
-        img["platformManaged"] = owner is not None or any(ref in user_accessible_refs for ref in ref_candidates)
+        img = {
+            "id": cache["image_id"],
+            "repo": cache["repository"],
+            "tag": cache["tag"],
+            "size": cache["size"],
+            "created": cache["created"],
+            "sharedSize": cache["shared_size"],
+            "uniqueSize": cache["unique_size"],
+            "containers": cache["containers"],
+            "ownerUserId": owner,
+            "platformManaged": owner is not None or any(ref in user_accessible_refs for ref in ref_candidates),
+        }
         # 当前用户是否可管理该镜像（删除/复制）：全局管理权 或 owner 角色。creator 不拥有管理权
         img["canManage"] = has_img_manage_all or any(ref in user_managed_refs for ref in ref_candidates)
         # 该镜像是否被服务器上任意容器使用（不受权限过滤，用于禁用删除按钮）
-        img_id_short = (img.get("id", "") or "")[:12]
-        img["inUse"] = (
-            ref_full in used_image_refs
-            or (img.get("tag", "") == "latest" and img.get("repo", "") in used_image_refs)
-            or (img_id_short and img_id_short in used_image_refs)
-        )
+        img["inUse"] = int(cache["containers"] or 0) > 0
 
         # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）
         if view_all:
@@ -1223,6 +1534,7 @@ def pull_image(server_id: str, image_ref: str, user: User) -> dict[str, Any]:
     with get_connection() as conn:
         _record_resource_creator(conn, server_id, "image", image_ref, user.id)
 
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "output": stdout + stderr}
 
 
@@ -1261,6 +1573,7 @@ def delete_image(server_id: str, image_ref: str, user: User, force: bool = False
     # 清除平台元数据
     with get_connection() as conn:
         _delete_resource_metadata(conn, server_id, "image", _resource_ref_candidates("image", normalized_ref))
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "output": stdout + stderr}
 
 
@@ -1353,6 +1666,7 @@ def copy_image(src_server_id: str, dst_server_id: str, image_ref: str, user: Use
         with get_connection() as conn:
             _record_resource_creator(conn, dst_server_id, "image", image_ref_norm, user.id)
 
+        _refresh_docker_df_cache_best_effort(dst_server_id)
         return {
             "success": True,
             "imageRef": image_ref,
@@ -1391,23 +1705,11 @@ def _calc_user_container_usage(
     ).fetchall():
         user_qh_ctr_refs.add(r["resource_ref"])
 
-    # SSH 获取服务器上全部容器数量
-    ctr_used_total = 0
+    ctr_used_total = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM docker_df_containers WHERE server_id=?",
+        (server_row["id"],),
+    ).fetchone()["cnt"]
     ctr_used_self = len(user_qh_ctr_refs)
-    try:
-        ctr_client = _ssh_connect(server_row)
-        try:
-            ctr_out, _, ctr_rc = _ssh_exec(
-                ctr_client,
-                "docker ps -a --format '{{.ID}}'",
-                timeout=15,
-            )
-        finally:
-            ctr_client.close()
-        if ctr_rc == 0:
-            ctr_used_total = len([l for l in ctr_out.strip().splitlines() if l.strip()])
-    except ToolboxError:
-        pass  # SSH 连接失败时静默，不影响其他概览数据
 
     ctr_remaining = max(0, ctr_quota_num - ctr_used_self) if ctr_quota_num > 0 else None
     return {
@@ -1768,7 +2070,6 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
         perms = _get_user_perms(conn, server_id, user)
         if user.role != "admin" and not perms.get("ctr_use") and not perms.get("ctr_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看容器的权限", status_code=403, tool_id=TOOL_ID)
-        row = _get_server_row(conn, server_id)
         # 获取容器所有权元数据
         meta_rows = conn.execute(
             "SELECT container_ref, owner_user_id FROM docker_containers_meta WHERE server_id = ?", (server_id,)
@@ -1782,50 +2083,45 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
         ).fetchall():
             user_accessible_refs.add(r["resource_ref"])
         view_all = user.role == "admin" or perms.get("ctr_view_all", False)
-
-    client = _ssh_connect(row)
-    try:
-        flag = "-a " if all_containers else ""
-        stdout, stderr, code = _ssh_exec(
-            client,
-            f'docker ps {flag}--format \'{{{{json .}}}}\' ',
-        )
-    finally:
-        client.close()
+        cache_rows = conn.execute(
+            "SELECT * FROM docker_df_containers WHERE server_id=? ORDER BY names",
+            (server_id,),
+        ).fetchall()
 
     containers = []
-    cache_updates: list[tuple[str, str, str, str]] = []  # (container_ref, resource_type, resource_ref, now)
+    cache_updates: list[tuple[str, str, str, str]] = []
     now_str = _now()
-    for line in stdout.strip().splitlines():
-        line = line.strip()
-        if not line:
+    for cache in cache_rows:
+        status = cache["status"] or ""
+        if not all_containers and not status.lower().startswith("up"):
             continue
-        try:
-            ctr = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        # 查找所有者：先用 Names 匹配，再用 ID 前缀匹配
-        ctr_name = ctr.get("Names", "").lstrip("/")
-        ctr_id_short = ctr.get("ID", "")[:12]
+        ctr_name = cache["names"] or cache["container_id"][:12]
+        ctr_id_short = cache["container_id"][:12]
         ref = ctr_name or ctr_id_short
         owner = meta_map.get(ctr_name) or meta_map.get(ctr_id_short)
-        ctr["ownerUserId"] = owner  # 前端字段
-        ctr["platformManaged"] = owner is not None or ref in user_accessible_refs
+        ctr = {
+            "ID": ctr_id_short,
+            "Names": ctr_name,
+            "Image": cache["image"],
+            "Command": cache["command"],
+            "Status": status,
+            "State": status.split(" ", 1)[0].lower() if status else "",
+            "Ports": "",
+            "CreatedAt": cache["created"],
+            "Size": cache["size"],
+            "LocalVolumes": cache["local_volumes"],
+            "ownerUserId": owner,
+            "platformManaged": owner is not None or ref in user_accessible_refs,
+        }
 
-        # 收集容器-镜像/卷关联，用于角色继承缓存
-        img_ref = ctr.get("Image", "")
-        if ref and img_ref:
-            cache_updates.append((ref, "image", img_ref, now_str))
-        # Mounts 字段（docker ps --format 默认不含 Mounts，需要 docker inspect）
-        # 此处仅缓存镜像关联；卷关联在 get_container_detail 中更新
+        if ref and cache["image"]:
+            cache_updates.append((ref, "image", cache["image"], now_str))
 
         if view_all:
             containers.append(ctr)
-        elif ref in user_accessible_refs or owner == user.id:
+        elif ref in user_accessible_refs or ctr_id_short in user_accessible_refs or owner == user.id:
             containers.append(ctr)
 
-    # 更新容器资源关联缓存（镜像关联）
     if cache_updates:
         with get_connection() as conn:
             for container_ref, rtype, rref, ts in cache_updates:
@@ -1835,6 +2131,13 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
                        VALUES (?, ?, ?, ?, ?)""",
                     (server_id, container_ref, rtype, rref, ts),
                 )
+                if rtype == "image":
+                    conn.execute(
+                        """INSERT OR REPLACE INTO docker_container_resource_cache
+                           (server_id, container_ref, resource_type, resource_ref, updated_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (server_id, container_ref, rtype, _normalize_image_ref(rref), ts),
+                    )
 
     return containers
 
@@ -2098,6 +2401,7 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
         _record_resource_creator(conn, server_id, "container", container_id_short, user.id)
     _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "containerId": container_id_full, "command": full_cmd}
 
 
@@ -2180,6 +2484,7 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
         _record_resource_creator(conn, server_id, "container", container_id_short, user.id)
     _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "containerId": container_id_full, "command": cmd}
 
 
@@ -2276,6 +2581,7 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
                 _record_resource_creator(conn, server_id, "container", ref, user.id)
     _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "output": stdout + stderr, "projectName": project_name}
 
 
@@ -2334,6 +2640,7 @@ def container_action(server_id: str, container_id: str, action: str, user: User)
         with get_connection() as conn:
             _delete_resource_metadata(conn, server_id, "container", cleanup_refs)
 
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "action": action, "containerId": container_id}
 
 
@@ -2789,13 +3096,12 @@ def _calc_user_volume_usage(
         ).fetchone()
         vol_qh_counts[ref] = max(1, cnt_row["cnt"])
 
-    # 从 _meta 表获取卷大小
     vol_used_self_gb = 0.0
     vol_used_total_gb = 0.0
     vol_count_self = len(user_qh_vol_refs)
     vol_count_total = 0
     all_vols = conn.execute(
-        "SELECT volume_name, size_gb FROM docker_volumes_meta WHERE server_id=?",
+        "SELECT volume_name, size_gb FROM docker_df_volumes WHERE server_id=?",
         (server_row["id"],),
     ).fetchall()
     for r in all_vols:
@@ -2836,82 +3142,6 @@ def _enforce_volume_quota(
         )
 
 
-def _measure_volume_sizes(row: sqlite3.Row) -> dict[str, float]:
-    """通过 SSH 测量服务器上所有 Docker 卷的实际磁盘占用大小。
-
-    使用 ``docker volume ls`` + ``docker volume inspect`` + ``du -sk`` 组合命令，
-    一次性获取所有卷的实际占用空间（KB），转换为 GB 返回。
-
-    Args:
-        row: docker_servers 表行
-
-    Returns:
-        ``{volume_name: size_gb}`` 字典。SSH 失败时返回空字典。
-    """
-    client = _ssh_connect(row)
-    try:
-        # 一次性测量所有卷的磁盘占用（du -sk 输出 KB）
-        cmd = (
-            "docker volume ls --format '{{.Name}}' | while IFS= read -r name; do "
-            'mp=$(docker volume inspect "$name" --format \'{{.Mountpoint}}\' 2>/dev/null); '
-            'size=$(du -sk "$mp" 2>/dev/null | awk \'{print $1}\'); '
-            'echo "${name}|${size:-0}"; '
-            "done"
-        )
-        stdout, stderr, code = _ssh_exec(client, cmd, timeout=120)
-    finally:
-        client.close()
-
-    if code != 0:
-        return {}
-
-    sizes: dict[str, float] = {}
-    for line in stdout.strip().splitlines():
-        line = line.strip()
-        if not line or "|" not in line:
-            continue
-        parts = line.split("|", 1)
-        if len(parts) != 2:
-            continue
-        name, size_kb_str = parts[0].strip(), parts[1].strip()
-        if not name:
-            continue
-        try:
-            size_kb = float(size_kb_str)
-        except ValueError:
-            continue
-        sizes[name] = size_kb / (1024 * 1024)  # KB → GB
-    return sizes
-
-
-def refresh_volume_sizes(server_id: str, user: User) -> dict[str, Any]:
-    """刷新服务器上所有卷的实际大小并写入数据库。
-
-    管理员或拥有卷查看/管理权限的用户可调用。
-    返回 ``{serverId, sizes, count}``。
-    """
-    init_docker_database()
-    with get_connection() as conn:
-        _require_server_visible(conn, server_id, user)
-        if user.role != "admin":
-            perms = _get_user_perms(conn, server_id, user)
-            if not (perms.get("vol_use") or perms.get("vol_view_all") or perms.get("vol_manage_all")):
-                raise ToolboxError("PERMISSION_DENIED", "您没有刷新卷大小的权限", status_code=403, tool_id=TOOL_ID)
-        row = _get_server_row(conn, server_id)
-
-    sizes = _measure_volume_sizes(row)
-
-    # 更新数据库中所有平台管理卷的大小
-    with get_connection() as conn:
-        for vname, size_gb in sizes.items():
-            conn.execute(
-                "UPDATE docker_volumes_meta SET size_gb = ? WHERE server_id = ? AND volume_name = ?",
-                (size_gb, server_id, vname),
-            )
-
-    return {"serverId": server_id, "sizes": sizes, "count": len(sizes)}
-
-
 def list_volumes(server_id: str, user: User) -> dict[str, Any]:
     """列出服务器上的卷，附加平台元数据，按所有权/角色过滤（对齐镜像 list_images 模式）"""
     init_docker_database()
@@ -2921,12 +3151,11 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
         # 需要 vol_use 或 vol_view_all 或管理员
         if user.role != "admin" and not perms.get("vol_use") and not perms.get("vol_view_all"):
             raise ToolboxError("PERMISSION_DENIED", "您没有查看卷的权限", status_code=403, tool_id=TOOL_ID)
-        row = _get_server_row(conn, server_id)
-
         # 获取当前用户配额信息（使用 quota_holder 均分逻辑）
         if user.role == "admin":
             quota = {"volumeTotalGb": None, "volumeUsedGb": None}
         else:
+            row = _get_server_row(conn, server_id)
             vol_usage = _calc_user_volume_usage(conn, row, user)
             quota = {"volumeTotalGb": vol_usage["quotaGb"], "volumeUsedGb": vol_usage["usedSelfGb"]}
 
@@ -2974,50 +3203,30 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
         has_vol_manage_all = user.role == "admin" or bool(perms.get("vol_manage_all"))
         # view_all：管理员、vol_view_all、vol_manage_all（管理权自动包含查看权）、ctr_view_all
         view_all = user.role == "admin" or perms.get("vol_view_all", False) or perms.get("vol_manage_all", False) or perms.get("ctr_view_all", False)
-
-    # 从服务器获取实际卷列表
-    client = _ssh_connect(row)
-    try:
-        stdout, stderr, code = _ssh_exec(
-            client,
-            'docker volume ls --format \'{"name":"{{.Name}}","driver":"{{.Driver}}","mountpoint":"{{.Mountpoint}}"}\'',
-        )
-    finally:
-        client.close()
-
-    # 测量所有卷的实际磁盘占用大小（du -sk）
-    actual_sizes = _measure_volume_sizes(row)
-    # 同步更新数据库中平台管理卷的大小（供配额计算使用）
-    if actual_sizes:
-        with get_connection() as conn:
-            for vname, size_gb in actual_sizes.items():
-                conn.execute(
-                    "UPDATE docker_volumes_meta SET size_gb = ? WHERE server_id = ? AND volume_name = ?",
-                    (size_gb, server_id, vname),
-                )
+        cache_rows = conn.execute(
+            "SELECT * FROM docker_df_volumes WHERE server_id=? ORDER BY volume_name",
+            (server_id,),
+        ).fetchall()
 
     volumes = []
-    for line in stdout.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            vol = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        vname = vol.get("name", "")
-        # 优先使用实测大小，回退到数据库记录
-        measured_size = actual_sizes.get(vname)
+    for cache in cache_rows:
+        vname = cache["volume_name"]
+        vol = {
+            "name": vname,
+            "driver": "local",
+            "mountpoint": "",
+            "links": cache["links"],
+            "size": cache["size"],
+        }
         if vname in meta_map:
             m = meta_map[vname]
             vol["ownerUserId"] = m["owner_user_id"]  # 前端字段
-            vol["sizeGb"] = measured_size if measured_size is not None else m["size_gb"]
+            vol["sizeGb"] = cache["size_gb"]
             vol["createdAt"] = m["created_at"]
             vol["platformManaged"] = True
         else:
             vol["ownerUserId"] = None
-            vol["sizeGb"] = measured_size
+            vol["sizeGb"] = cache["size_gb"]
             vol["platformManaged"] = vname in user_accessible_vols
 
         # 当前用户是否可管理该卷（删除）：全局管理权 或 owner 角色。creator 不拥有管理权
@@ -3152,7 +3361,7 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
 def create_volume(server_id: str, name: str, user: User) -> dict[str, Any]:
     """创建 Docker 卷（含权限与配额校验，对齐镜像 pull_image 模式）
 
-    卷大小由 list_volumes / refresh_volume_sizes 通过 ``du`` 实测，创建时不预设。
+    卷大小由 docker system df -v 缓存维护，创建时不预设。
     """
     init_docker_database()
     with get_connection() as conn:
@@ -3176,11 +3385,12 @@ def create_volume(server_id: str, name: str, user: User) -> dict[str, Any]:
         raise ToolboxError("CREATE_VOLUME_FAILED", f"创建卷失败: {stderr.strip()}", status_code=502, tool_id=TOOL_ID)
 
     # 记录创建者+所有者（对齐镜像 pull_image 中的 _record_resource_creator）
-    # size_gb 由 list_volumes / refresh_volume_sizes 通过 du 实测填充，此处不预设
+    # size_gb 由 docker system df -v 缓存填充，此处不预设。
     with get_connection() as conn:
         _record_resource_creator(conn, server_id, "volume", name, user.id)
 
     now = _now()
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "volumeName": name, "serverId": server_id, "createdAt": now}
 
 
@@ -3219,6 +3429,7 @@ def delete_volume(server_id: str, volume_name: str, user: User) -> dict[str, Any
     with get_connection() as conn:
         _delete_resource_metadata(conn, server_id, "volume", _resource_ref_candidates("volume", volume_name))
 
+    _refresh_docker_df_cache_best_effort(server_id)
     return {"success": True, "volumeName": volume_name}
 
 
@@ -3362,11 +3573,12 @@ def copy_volume(
             dst_client.close()
 
     # 记录目标卷创建者+所有者（对齐镜像 copy_image 中的 _record_resource_creator）
-    # size_gb 由 list_volumes / refresh_volume_sizes 通过 du 实测填充，此处不预设
+    # size_gb 由 docker system df -v 缓存填充，此处不预设。
     with get_connection() as conn:
         _record_resource_creator(conn, dst_server_id, "volume", dst_volume_name, user.id)
 
     now = _now()
+    _refresh_docker_df_cache_best_effort(dst_server_id)
     return {
         "success": True,
         "srcServerId": src_server_id,
@@ -3428,14 +3640,14 @@ def _user_has_resource_access(conn: sqlite3.Connection, server_id: str, resource
 def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
     """
     列出服务器上的全部容器、镜像、卷，并附上平台侧多角色信息（仅管理员）。
-    通过 SSH 实时拉取列表，再与本地元数据合并。
+    使用 docker system df -v 缓存，再与本地元数据合并。
     """
     init_docker_database()
     if user.role != "admin":
         raise ToolboxError("ADMIN_REQUIRED", "仅管理员可以查看资源所有者信息", status_code=403, tool_id=TOOL_ID)
 
     with get_connection() as conn:
-        row = _get_server_row(conn, server_id)
+        _get_server_row(conn, server_id)
 
         # 拉取新的多角色表数据
         role_rows = conn.execute(
@@ -3464,6 +3676,9 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
                     conn.execute("SELECT container_ref, owner_user_id FROM docker_containers_meta WHERE server_id=?", (server_id,)).fetchall()}
         vol_meta = {r["volume_name"]: r["owner_user_id"] for r in
                     conn.execute("SELECT volume_name, owner_user_id FROM docker_volumes_meta WHERE server_id=?", (server_id,)).fetchall()}
+        ctr_rows = conn.execute("SELECT * FROM docker_df_containers WHERE server_id=? ORDER BY names", (server_id,)).fetchall()
+        img_rows = conn.execute("SELECT * FROM docker_df_images WHERE server_id=? ORDER BY repository, tag", (server_id,)).fetchall()
+        vol_rows = conn.execute("SELECT * FROM docker_df_volumes WHERE server_id=? ORDER BY volume_name", (server_id,)).fetchall()
 
     def _merge_roles(rtype: str, ref: str, legacy_owner: str | None) -> dict:
         """合并新角色表和旧 owner 字段"""
@@ -3474,53 +3689,49 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
         platform_managed = bool(base["ownerUserIds"] or base["viewerUserIds"] or base["creatorUserId"] or legacy_owner)
         return {**base, "platformManaged": platform_managed}
 
-    client = _ssh_connect(row)
-    try:
-        ctr_out, _, _ = _ssh_exec(client, "docker ps -a --format '{{json .}}'")
-        img_out, _, _ = _ssh_exec(
-            client,
-            'docker images --format \'{"id":"{{.ID}}","repo":"{{.Repository}}","tag":"{{.Tag}}","size":"{{.Size}}","created":"{{.CreatedAt}}"}\'',
-        )
-        vol_out, _, _ = _ssh_exec(client, "docker volume ls --format '{{.Name}}'")
-    finally:
-        client.close()
-
-    def _parse_jsonlines(text: str) -> list[dict]:
-        result = []
-        for line in text.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                result.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return result
-
     containers = []
-    for ctr in _parse_jsonlines(ctr_out):
-        name = ctr.get("Names", "").lstrip("/")
-        id_short = ctr.get("ID", "")[:12]
+    for row in ctr_rows:
+        name = row["names"] or row["container_id"][:12]
+        id_short = row["container_id"][:12]
         ref = name or id_short
         legacy_owner = ctr_meta.get(name) or ctr_meta.get(id_short)
         roles = _merge_roles("container", ref, legacy_owner)
-        containers.append({**ctr, **roles})
+        containers.append({
+            "ID": id_short,
+            "Names": name,
+            "Image": row["image"],
+            "Command": row["command"],
+            "Status": row["status"],
+            "State": row["status"].split(" ", 1)[0].lower() if row["status"] else "",
+            "CreatedAt": row["created"],
+            "Size": row["size"],
+            "LocalVolumes": row["local_volumes"],
+            **roles,
+        })
 
     images = []
-    for img in _parse_jsonlines(img_out):
-        ref_full = f"{img.get('repo', '')}:{img.get('tag', '')}"
-        legacy_owner = img_meta.get(ref_full) or img_meta.get(img.get("id", ""))
+    for row in img_rows:
+        ref_full = row["image_ref"]
+        legacy_owner = img_meta.get(ref_full) or img_meta.get(row["image_id"])
         roles = _merge_roles("image", ref_full, legacy_owner)
-        images.append({**img, **roles})
+        images.append({
+            "id": row["image_id"],
+            "repo": row["repository"],
+            "tag": row["tag"],
+            "size": row["size"],
+            "created": row["created"],
+            "sharedSize": row["shared_size"],
+            "uniqueSize": row["unique_size"],
+            "containers": row["containers"],
+            **roles,
+        })
 
     volumes = []
-    for line in vol_out.strip().splitlines():
-        name = line.strip()
-        if not name:
-            continue
+    for row in vol_rows:
+        name = row["volume_name"]
         legacy_owner = vol_meta.get(name)
         roles = _merge_roles("volume", name, legacy_owner)
-        volumes.append({"name": name, **roles})
+        volumes.append({"name": name, "size": row["size"], "links": row["links"], **roles})
 
     return {"serverId": server_id, "containers": containers, "images": images, "volumes": volumes}
 

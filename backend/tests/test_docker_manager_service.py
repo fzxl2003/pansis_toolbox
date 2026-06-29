@@ -51,6 +51,10 @@ def docker_manager_test_data() -> None:
 def _cleanup() -> None:
     with get_connection() as conn:
         for table, column in (
+            ("docker_df_cache", "server_id"),
+            ("docker_df_images", "server_id"),
+            ("docker_df_containers", "server_id"),
+            ("docker_df_volumes", "server_id"),
             ("docker_container_resource_cache", "server_id"),
             ("docker_resource_roles", "server_id"),
             ("docker_user_perms", "server_id"),
@@ -67,10 +71,63 @@ def _user(uid: str = USER_A) -> User:
     return User(id=uid, username=uid, display_name=uid, role="user")
 
 
+def _admin() -> User:
+    return User(id="admin", username="admin", display_name="Admin", role="admin")
+
+
 def _set_perms(server_id: str, user_id: str, **overrides: Any) -> None:
     perms = dict(service._PERMS_DEFAULTS)
     perms.update(overrides)
     service.set_user_perms(server_id, user_id, perms, User(id="admin", username="admin", display_name="Admin", role="admin"))
+
+
+DF_SAMPLE = """
+Images space usage:
+
+REPOSITORY          TAG       IMAGE ID       CREATED        SIZE      SHARED SIZE   UNIQUE SIZE   CONTAINERS
+nginx               latest    abcdef123456   2 weeks ago    187MB     0B            187MB         1
+private/app         1         deadbeef0000   3 days ago     1.2GB     100MB         1.1GB         0
+
+Containers space usage:
+
+CONTAINER ID   IMAGE        COMMAND                  LOCAL VOLUMES   SIZE      CREATED        STATUS        NAMES
+abc123def456   nginx        "nginx -g daemon off;"   1               12.3MB    2 hours ago    Up 2 hours    web
+
+Local Volumes space usage:
+
+VOLUME NAME   LINKS     SIZE
+dataset       1         2.5GB
+"""
+
+
+def test_docker_df_refresh_populates_cache_and_lists_without_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
+    monkeypatch.setattr(service, "_ssh_exec", lambda client, cmd, timeout=60: (DF_SAMPLE, "", 0))
+
+    result = service.refresh_docker_df_cache(SERVER_A, _admin())
+
+    assert result["images"] == 2
+    assert result["containers"] == 1
+    assert result["volumes"] == 1
+
+    def fail_connect(row: Any) -> FakeSshClient:
+        raise AssertionError("list calls should read docker system df cache without SSH")
+
+    monkeypatch.setattr(service, "_ssh_connect", fail_connect)
+
+    images = service.list_images(SERVER_A, _admin())
+    containers = service.list_containers(SERVER_A, _admin())
+    volumes = service.list_volumes(SERVER_A, _admin())["volumes"]
+
+    assert [(img["repo"], img["tag"], img["containers"]) for img in images] == [
+        ("nginx", "latest", 1),
+        ("private/app", "1", 0),
+    ]
+    assert containers[0]["Names"] == "web"
+    assert containers[0]["Image"] == "nginx"
+    assert volumes[0]["name"] == "dataset"
+    assert volumes[0]["links"] == 1
+    assert volumes[0]["sizeGb"] == pytest.approx(2.5)
 
 
 def test_resource_lists_require_server_visibility() -> None:

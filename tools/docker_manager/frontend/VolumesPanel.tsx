@@ -20,7 +20,6 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
-  const [refreshingSizes, setRefreshingSizes] = useState(false);
   // 卷复制状态
   const [copyTarget, setCopyTarget] = useState<DockerVolume | null>(null);
   const [copyDstServerId, setCopyDstServerId] = useState<string>('');
@@ -96,17 +95,17 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
     }
   }
 
-  async function doRefreshSizes() {
+  async function doRefresh() {
     if (!serverId) return;
-    setRefreshingSizes(true);
+    setLoading(true);
     clearError();
     try {
-      await apiPost(`${API}/servers/${serverId}/volumes/refresh-sizes`, {});
-      void load(serverId);
+      await apiPost(`${API}/servers/${serverId}/df-cache/refresh`, {});
+      await load(serverId);
     } catch (e) {
       setError(e);
     } finally {
-      setRefreshingSizes(false);
+      setLoading(false);
     }
   }
 
@@ -207,11 +206,7 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
             <Plus size={14} /> 创建卷
           </button>
         )}
-        <button className="btn" onClick={() => serverId && load(serverId)} disabled={loading}><RefreshCw size={14} /> 刷新</button>
-        <button className="btn" onClick={doRefreshSizes} disabled={refreshingSizes || loading}
-          title="通过 du 命令实测所有卷的实际磁盘占用大小">
-          {refreshingSizes ? <Spin /> : <HardDrive size={14} />} 刷新大小
-        </button>
+        <button className="btn" onClick={doRefresh} disabled={loading}><RefreshCw size={14} /> 刷新</button>
       </div>
 
       {/* 卷配额超限提醒 */}

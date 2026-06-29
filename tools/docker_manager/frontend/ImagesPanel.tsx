@@ -177,10 +177,20 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
     setServerOverview(null);
   }
 
-  function doRefresh() {
+  async function doRefresh() {
     if (!serverId) return;
-    void loadImages(serverId);
-    void loadContainers(serverId);
+    setLoading(true);
+    setContainersLoading(true);
+    clearError();
+    try {
+      await apiPost(`${API}/servers/${serverId}/df-cache/refresh`, {});
+      await Promise.all([loadImages(serverId), loadContainers(serverId)]);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
+      setContainersLoading(false);
+    }
   }
 
   // ---- 按镜像分组的容器视图 ----

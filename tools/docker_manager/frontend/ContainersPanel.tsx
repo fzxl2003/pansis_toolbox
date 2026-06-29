@@ -1218,6 +1218,20 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
 
   useEffect(() => { if (serverId) void load(serverId); }, [serverId, load]);
 
+  async function doRefresh() {
+    if (!serverId) return;
+    setLoading(true);
+    clearError();
+    try {
+      await apiPost(`${API}/servers/${serverId}/df-cache/refresh`, {});
+      await load(serverId);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function doAction(containerId: string, containerName: string, action: string) {
     if (!serverId) return;
     if (action === 'remove' && !confirm(`确定删除容器 ${containerName}？`)) return;
@@ -1340,7 +1354,7 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
               <button className="btn btn-primary" onClick={() => setCreateMode('template')}><ClipboardList size={14} /> 从模板创建</button>
             </>
           )}
-          <button className="btn" onClick={() => serverId && load(serverId)} disabled={loading}><RefreshCw size={14} /> 刷新</button>
+          <button className="btn" onClick={doRefresh} disabled={loading}><RefreshCw size={14} /> 刷新</button>
         </div>
       )}
 

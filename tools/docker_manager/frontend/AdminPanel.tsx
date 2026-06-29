@@ -254,6 +254,20 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     }
   }, [clearAssignError, setAssignError]);
 
+  const refreshResources = useCallback(async (serverId: string) => {
+    setResourcesLoading(true);
+    clearAssignError();
+    try {
+      await apiPost(`${API}/servers/${serverId}/df-cache/refresh`, {});
+      const r = await apiGet<ServerResources>(`${API}/servers/${serverId}/resources`);
+      setResources(r);
+    } catch (e) {
+      setAssignError(e);
+    } finally {
+      setResourcesLoading(false);
+    }
+  }, [clearAssignError, setAssignError]);
+
   // ─── 加载权限列表 ─────────────────────────────────────────
   const loadPerms = useCallback(async (serverId: string) => {
     try {
@@ -710,7 +724,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 <button
                   className="btn"
                   style={{ fontSize: 12, marginLeft: 'auto' }}
-                  onClick={() => panelServer && loadResources(panelServer.id)}
+                  onClick={() => panelServer && refreshResources(panelServer.id)}
                   disabled={resourcesLoading}
                 >
                   <RefreshCw size={12} /> 刷新

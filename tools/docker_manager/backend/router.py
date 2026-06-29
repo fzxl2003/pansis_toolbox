@@ -44,9 +44,9 @@ from tools.docker_manager.backend.service import (
     list_templates,
     list_volumes,
     pull_image,
+    refresh_docker_df_cache,
     rescan_server_cuda,
     get_server_resource_overview,
-    refresh_volume_sizes,
     set_resource_viewers,
     set_user_perms,
     update_template,
@@ -400,11 +400,11 @@ def copy_volume_route(request: Request, payload: CopyVolumePayload) -> dict:
     )
 
 
-@router.post("/servers/{server_id}/volumes/refresh-sizes")
-def refresh_volume_sizes_route(request: Request, server_id: str) -> dict:
-    """刷新服务器上所有卷的实际磁盘占用大小（du -sk 实测）"""
+@router.post("/servers/{server_id}/df-cache/refresh")
+def refresh_df_cache_route(request: Request, server_id: str) -> dict:
+    """刷新 docker system df -v 缓存（镜像 / 容器 / 卷）。"""
     user = require_user(request)
-    return refresh_volume_sizes(server_id, user)
+    return refresh_docker_df_cache(server_id, user)
 
 
 # ==============================================================

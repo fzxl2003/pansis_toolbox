@@ -372,6 +372,33 @@ def test_create_container_rejects_missing_named_volume_without_create_permission
     assert "创建卷" in exc.value.message
 
 
+def test_create_container_rejects_frontend_volume_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service, "_ssh_connect", lambda row: FakeSshClient())
+
+    with pytest.raises(ToolboxError) as exc:
+        service.create_container_run(
+            SERVER_A,
+            {"image": "private/app:1", "name": "trainer", "volumes": ["__new__:/tmp"]},
+            _admin(),
+        )
+
+    assert exc.value.status_code == 400
+    assert "无效的卷名称" in exc.value.message
+
+
+def test_copy_volume_requires_target_create_permission() -> None:
+    _set_perms(SERVER_A, USER_A, server_visible=True, vol_use=True, vol_copy=True)
+    _set_perms(SERVER_B, USER_A, server_visible=True, vol_use=True, vol_copy=True, vol_create=False)
+    with get_connection() as conn:
+        service._record_resource_creator(conn, SERVER_A, "volume", "dataset", USER_A)
+
+    with pytest.raises(ToolboxError) as exc:
+        service.copy_volume(SERVER_A, "dataset", SERVER_B, "dataset-copy", _user())
+
+    assert exc.value.status_code == 403
+    assert "创建卷权限" in exc.value.message
+
+
 def test_create_container_records_auto_pulled_image_and_created_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_perms(
         SERVER_A,

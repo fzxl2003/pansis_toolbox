@@ -225,7 +225,8 @@ function buildDockerCmd(p: {
     if (m.type === 'bind') {
       if (m.source && m.target) parts.push('-v', `${m.source}:${m.target}${m.ro ? ':ro' : ''}`);
     } else {
-      const volName = m.source || m.newVolName;
+      const volName = m.source === '__new__' ? m.newVolName : m.source;
+      if (volName.startsWith('__') && volName.endsWith('__')) continue;
       if (volName && m.target) parts.push('-v', `${volName}:${m.target}${m.ro ? ':ro' : ''}`);
     }
   }
@@ -386,6 +387,146 @@ function CrossServerImageModal({
   );
 }
 
+function CrossServerVolumeModal({
+  servers,
+  me,
+  currentServerId,
+  currentServerName,
+  volQuotaExhausted,
+  onClose,
+  onCopied,
+}: {
+  servers: DmServer[];
+  me: AuthUser;
+  currentServerId: string;
+  currentServerName: string;
+  volQuotaExhausted: boolean;
+  onClose: () => void;
+  onCopied: (volumeName: string) => void;
+}) {
+  const [selectedSrcId, setSelectedSrcId] = useState<string | null>(null);
+  const [volumes, setVolumes] = useState<DockerVolume[]>([]);
+  const [selectedVolume, setSelectedVolume] = useState('');
+  const [dstName, setDstName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [error, setError, clearError] = useErrorMsg();
+
+  const canCopyServer = (sid: string) => {
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || (!!s?.perms?.vol_copy && !!s?.perms?.vol_create);
+  };
+
+  const srcServers = servers.filter((s) => canCopyServer(s.id));
+
+  async function selectSrc(sid: string) {
+    setSelectedSrcId(sid);
+    setSelectedVolume('');
+    setDstName('');
+    setVolumes([]);
+    clearError();
+    setLoading(true);
+    try {
+      const r = await apiGet<{ volumes: DockerVolume[] }>(`${API}/servers/${sid}/volumes`);
+      setVolumes(r.volumes ?? []);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function doCopy() {
+    if (!selectedSrcId || !selectedVolume || !dstName.trim()) return;
+    setCopying(true);
+    clearError();
+    try {
+      await apiPost(`${API}/volumes/copy`, {
+        srcServerId: selectedSrcId,
+        srcVolumeName: selectedVolume,
+        dstServerId: currentServerId,
+        dstVolumeName: dstName.trim(),
+      });
+      onCopied(dstName.trim());
+    } catch (e) {
+      setError(e);
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  const srcServer = servers.find((s) => s.id === selectedSrcId);
+  const sameNameOnSameServer = selectedSrcId === currentServerId && selectedVolume === dstName.trim();
+
+  return (
+    <Modal title="复制卷到当前服务器" onClose={onClose} wide
+      foot={
+        selectedSrcId ? (
+          <>
+            <button className="btn" onClick={() => { setSelectedSrcId(null); setVolumes([]); clearError(); }}>← 返回服务器列表</button>
+            <button className="btn" onClick={onClose}>取消</button>
+            <button className="btn btn-primary" onClick={doCopy}
+              disabled={copying || volQuotaExhausted || !selectedVolume || !dstName.trim() || sameNameOnSameServer}>
+              {copying ? <Spin /> : <Copy size={14} />} 复制并使用
+            </button>
+          </>
+        ) : (
+          <button className="btn btn-primary" onClick={onClose}>关闭</button>
+        )
+      }>
+      {error && <Alert type="error">{error}</Alert>}
+      {volQuotaExhausted && <Alert type="error">当前服务器卷空间配额已用满，无法接收复制卷。</Alert>}
+      {!selectedSrcId ? (
+        <div>
+          <Alert type="info">选择源服务器，可以本地复制当前服务器上的卷，也可以从其他服务器复制到当前服务器（{currentServerName}）。</Alert>
+          {srcServers.length === 0 ? (
+            <div className="dm-empty"><HardDrive size={32} /> 暂无可复制卷的服务器（需要卷复制和创建卷权限）</div>
+          ) : (
+            <div className="dm-table">
+              <div className="dm-table-header" style={{ gridTemplateColumns: '2fr 1.5fr auto' }}>
+                <span>服务器</span><span>地址</span><span>操作</span>
+              </div>
+              {srcServers.map((s) => (
+                <div key={s.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1.5fr auto' }}>
+                  <span style={{ fontWeight: 600 }}>{s.name}{s.id === currentServerId ? '（本地）' : ''}</span>
+                  <span style={{ color: '#526071', fontFamily: 'monospace', fontSize: 13 }}>{s.host}:{s.port}</span>
+                  <span><button className="btn" style={{ fontSize: 12 }} onClick={() => selectSrc(s.id)}>选择</button></span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ fontSize: 13, color: '#526071' }}>
+            源服务器：<strong>{srcServer?.name}</strong>（{srcServer?.host}:{srcServer?.port}） → 目标：<strong>{currentServerName}</strong>
+          </div>
+          {loading ? (
+            <div className="dm-empty"><Spin /> 加载卷列表中…</div>
+          ) : volumes.length === 0 ? (
+            <div className="dm-empty"><HardDrive size={32} /> 该服务器暂无可复制的卷</div>
+          ) : (
+            <>
+              <Field label="源卷">
+                <select value={selectedVolume} onChange={(e) => {
+                  setSelectedVolume(e.target.value);
+                  setDstName(e.target.value ? `${e.target.value}-copy` : '');
+                }}>
+                  <option value="">— 选择源卷 —</option>
+                  {volumes.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+                </select>
+              </Field>
+              <Field label="目标卷名称">
+                <input value={dstName} onChange={(e) => setDstName(e.target.value)} placeholder="new-volume-name" />
+              </Field>
+            </>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 // ---- RunCreateModal ----
 
 export function RunCreateModal({ serverId, servers, me, quota, serverOverview, onClose, onSuccess }: {
@@ -415,6 +556,7 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
   const [mounts, setMounts] = useState<MountEntry[]>([mkMount()]);
   const [envs, setEnvs]     = useState<EnvEntry[]>([mkEnv()]);
   const [availVolumes, setAvailVolumes] = useState<DockerVolume[]>([]);
+  const [volumeCopyMountId, setVolumeCopyMountId] = useState<number | null>(null);
 
   // ---------- CUDA ----------
   const [selectedGpuIndices, setSelectedGpuIndices] = useState<number[]>([]);
@@ -433,6 +575,8 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
   // 权限判断
   const canPull = me.role === 'admin' || !!quota?.img_pull;
   const canCopyCurrent = me.role === 'admin' || !!quota?.img_copy;
+  const canCreateVolume = me.role === 'admin' || !!quota?.vol_create;
+  const canCopyVolume = me.role === 'admin' || (!!quota?.vol_copy && !!quota?.vol_create);
 
   // 镜像配额是否已用满（remainingGb=null 表示不限）
   const imgQuotaExhausted =
@@ -441,6 +585,8 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
   // 容器配额是否已用满（remaining=null 表示不限）
   const ctrQuotaExhausted =
     serverOverview?.container?.remaining != null && serverOverview.container.remaining <= 0;
+  const volQuotaExhausted =
+    serverOverview?.volume?.remainingGb != null && serverOverview.volume.remainingGb <= 0;
 
   const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
   const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
@@ -495,7 +641,8 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
         if (m.type === 'bind') {
           return m.source && m.target ? [`${m.source}:${m.target}${m.ro ? ':ro' : ''}`] : [];
         } else {
-          const v = m.source || m.newVolName;
+          const v = m.source === '__new__' ? m.newVolName : m.source;
+          if (v.startsWith('__') && v.endsWith('__')) return [];
           return v && m.target ? [`${v}:${m.target}${m.ro ? ':ro' : ''}`] : [];
         }
       });
@@ -528,7 +675,25 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
     setImageMode('select');
   }
 
-  const canSubmitGui = imageMode === 'input' ? !!imageInput.trim() : !!image;
+  function handleVolumeCopied(volumeName: string) {
+    setVolumeCopyMountId((mountId) => {
+      if (mountId !== null) {
+        setMounts((prev) => prev.map((m) => m.id === mountId ? { ...m, type: 'volume', source: volumeName, newVolName: '' } : m));
+      }
+      return null;
+    });
+    setAvailVolumes((prev) => prev.some((v) => v.name === volumeName)
+      ? prev
+      : [...prev, { name: volumeName, driver: 'local', mountpoint: '', platformManaged: true }]);
+  }
+
+  const hasInvalidMount = mounts.some((m) => {
+    if (!m.target && (m.source || m.newVolName)) return true;
+    if (m.type === 'volume' && m.source === '__new__') return !m.newVolName.trim() || !canCreateVolume || volQuotaExhausted;
+    if (m.type === 'volume' && m.source === '__copy__') return true;
+    return false;
+  });
+  const canSubmitGui = (imageMode === 'input' ? !!imageInput.trim() : !!image) && !hasInvalidMount;
 
   // ---------- 渲染 ----------
   return (
@@ -744,17 +909,28 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
                       />
                     </Field>
                   ) : (
-                    <Field label="卷名称 *" style={{ width: 160, flexShrink: 0 }}>
+                    <Field label="卷名称 *" style={{ width: 220, flexShrink: 0 }}>
                       <select
                         value={m.source}
-                        onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value, newVolName: '' } : x))}
+                        onChange={e => {
+                          if (e.target.value === '__copy__') {
+                            setVolumeCopyMountId(m.id);
+                            return;
+                          }
+                          setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value, newVolName: '' } : x));
+                        }}
                         style={{ width: '100%' }}
                       >
                         <option value="">— 选择已有卷 —</option>
                         {availVolumes.map(v => (
                           <option key={v.name} value={v.name}>{v.name}</option>
                         ))}
-                        <option value="__new__">+ 新建卷…</option>
+                        {canCopyVolume && (
+                          <option value="__copy__" disabled={volQuotaExhausted}>⟳ 复制卷到当前服务器…</option>
+                        )}
+                        {canCreateVolume && (
+                          <option value="__new__" disabled={volQuotaExhausted}>+ 新建卷…</option>
+                        )}
                       </select>
                       {m.source === '__new__' && (
                         <input
@@ -762,6 +938,9 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
                           value={m.newVolName} placeholder="new-volume-name"
                           onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, newVolName: e.target.value } : x))}
                         />
+                      )}
+                      {!canCreateVolume && availVolumes.length === 0 && (
+                        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>您没有创建卷权限，只能使用已有可见卷。</div>
                       )}
                     </Field>
                   )}
@@ -897,6 +1076,17 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
         imgQuotaExhausted={imgQuotaExhausted}
         onClose={() => setShowCrossServer(false)}
         onCopied={handleCrossServerCopied}
+      />
+    )}
+    {volumeCopyMountId !== null && (
+      <CrossServerVolumeModal
+        servers={servers}
+        me={me}
+        currentServerId={serverId}
+        currentServerName={servers.find(s => s.id === serverId)?.name ?? serverId}
+        volQuotaExhausted={volQuotaExhausted}
+        onClose={() => setVolumeCopyMountId(null)}
+        onCopied={handleVolumeCopied}
       />
     )}
     </>

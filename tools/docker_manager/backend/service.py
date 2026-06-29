@@ -2303,13 +2303,18 @@ def _plan_container_image_usage(
     user: User,
 ) -> list[str]:
     """Validate images used by a new container and return auto-pulled refs to record after success."""
+    normalized_refs: list[str] = []
+    for image_ref in [ref for ref in image_refs if ref.strip()]:
+        normalized_ref = _normalize_image_ref(image_ref)
+        if normalized_ref.startswith("__") and normalized_ref.endswith("__"):
+            raise ToolboxError("INVALID_IMAGE", f"无效的镜像名称: {normalized_ref}", status_code=400, tool_id=TOOL_ID)
+        normalized_refs.append(normalized_ref)
     if user.role == "admin":
         return []
     perms = _get_user_perms(conn, server_row["id"], user)
     can_use_images = bool(perms.get("img_use") or perms.get("img_view_all") or perms.get("img_manage_all"))
     pulled_refs: list[str] = []
-    for image_ref in [ref for ref in image_refs if ref.strip()]:
-        normalized_ref = _normalize_image_ref(image_ref)
+    for normalized_ref in normalized_refs:
         exists = _remote_docker_resource_exists(server_row, "image", normalized_ref)
         can_access_existing = (
             perms.get("img_view_all")
@@ -2341,12 +2346,15 @@ def _plan_container_volume_usage(
     user: User,
 ) -> list[str]:
     """Validate named/anonymous Docker volumes and return newly created named volumes to record."""
+    volume_sources = [_volume_source_from_spec(spec) for spec in volume_specs]
+    for kind, source in volume_sources:
+        if kind not in {"none", "bind"} and source.startswith("__") and source.endswith("__"):
+            raise ToolboxError("INVALID_VOLUME", f"无效的卷名称: {source}", status_code=400, tool_id=TOOL_ID)
     if user.role == "admin":
         return []
     perms = _get_user_perms(conn, server_row["id"], user)
     created_named_volumes: list[str] = []
-    for spec in volume_specs:
-        kind, source = _volume_source_from_spec(spec)
+    for kind, source in volume_sources:
         if kind in {"none", "bind"}:
             continue
         if kind == "anonymous":
@@ -2434,8 +2442,8 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
-            images_to_record = _plan_container_image_usage(conn, row, [image_ref], user)
-            volumes_to_record = _plan_container_volume_usage(conn, row, params.get("volumes", []), user)
+        images_to_record = _plan_container_image_usage(conn, row, [image_ref], user)
+        volumes_to_record = _plan_container_volume_usage(conn, row, params.get("volumes", []), user)
 
     # 构建 docker run 命令
     cmd_parts = ["docker", "run", "-d"]
@@ -2541,8 +2549,8 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
-            images_to_record = _plan_container_image_usage(conn, row, [raw_image], user)
-            volumes_to_record = _plan_container_volume_usage(conn, row, raw_volume_specs, user)
+        images_to_record = _plan_container_image_usage(conn, row, [raw_image], user)
+        volumes_to_record = _plan_container_volume_usage(conn, row, raw_volume_specs, user)
 
     client = _ssh_connect(row)
     try:
@@ -2609,8 +2617,8 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
-            images_to_record = _plan_container_image_usage(conn, row, compose_resources["images"], user)
-            volumes_to_record = _plan_container_volume_usage(conn, row, compose_resources["volumeSpecs"], user)
+        images_to_record = _plan_container_image_usage(conn, row, compose_resources["images"], user)
+        volumes_to_record = _plan_container_volume_usage(conn, row, compose_resources["volumeSpecs"], user)
 
     tmp_dir = f"/tmp/.docker_manager_{uuid.uuid4().hex[:8]}"
     compose_file = f"{tmp_dir}/docker-compose.yml"
@@ -3565,6 +3573,13 @@ def copy_volume(
                     "PERMISSION_DENIED",
                     "您在目标服务器没有「跨服务器复制卷」权限",
                     status_code=403, tool_id=TOOL_ID,
+                )
+            if not dst_perms.get("vol_create"):
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "复制卷会在目标服务器创建新卷，您没有目标服务器的创建卷权限",
+                    status_code=403,
+                    tool_id=TOOL_ID,
                 )
             can_view_source = (
                 src_perms.get("vol_view_all")

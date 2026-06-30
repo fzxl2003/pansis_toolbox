@@ -8,12 +8,17 @@ import {
   Box,
   CheckCircle,
   ClipboardList,
+  Code,
   Cpu,
   Database,
+  Eye,
   FileText,
   HardDrive,
   Image,
   Info,
+  Layers,
+  Globe,
+  Lock,
   Pencil,
   Plus,
   RefreshCw,
@@ -26,7 +31,8 @@ import {
 } from 'lucide-react';
 import { apiDelete, apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
 import { Alert, Field, Modal, ResourceLoadingWrapper, SkeletonRows, Spin, TruncText } from './components';
-import { API, containerStateClass, renderMarkdown, useErrorMsg } from './utils';
+import { TemplateEditorModal, TemplateRolesModal } from './TemplatesPanel';
+import { API, containerStateClass, useErrorMsg } from './utils';
 import {
   DEFAULT_PERMS,
   type DmServer,
@@ -241,6 +247,30 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [scanningCuda, setScanningCuda] = useState<string | null>(null);
 
   // ─── 加载服务器资源 ───────────────────────────────────────
+  async function togglePublic(resourceType: 'container' | 'image' | 'volume', resourceRef: string, current: boolean) {
+    if (!panelServer) return;
+    clearError();
+    try {
+      await apiPut(`${API}/servers/${panelServer.id}/resource-public`, {
+        resourceType, resourceRef, isPublic: !current,
+      });
+      setResources(prev => {
+        if (!prev) return prev;
+        const update = <T extends { isPublic?: boolean }>(arr: T[], ref: string, refFn: (item: T) => string) =>
+          arr.map(item => refFn(item) === ref ? { ...item, isPublic: !current } : item);
+        if (resourceType === 'container') {
+          return { ...prev, containers: update(prev.containers, resourceRef, c => (c.Names ?? '').replace(/^\//, '') || (c.ID ?? '')) };
+        } else if (resourceType === 'image') {
+          return { ...prev, images: update(prev.images, resourceRef, i => `${i.repo}:${i.tag}`) };
+        } else {
+          return { ...prev, volumes: update(prev.volumes, resourceRef, v => v.name) };
+        }
+      });
+    } catch (e) {
+      setError(e);
+    }
+  }
+
   const loadResources = useCallback(async (serverId: string) => {
     setResourcesLoading(true);
     clearAssignError();
@@ -758,7 +788,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                         const ownerList = (ctr.ownerUserIds ?? []).map((id) => users.find((u) => u.userId === id)).filter(Boolean) as ServerPermEntry[];
                         return (
                           <div key={ref} className="dm-table-row" style={{ gridTemplateColumns: '1.5fr 1.5fr 1fr 1.5fr 1.5fr auto' }}>
-                            <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={ref} /></span>
+                            <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}><TruncText text={ref} />{ctr.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}</span>
                             <span style={{ fontSize: 12, color: '#526071', minWidth: 0 }}><TruncText text={ctr.Image ?? ''} /></span>
                             <span>
                               <span className={`dm-status ${containerStateClass(ctr.State ?? ctr.Status)}`}>
@@ -776,7 +806,15 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                                 ? ownerList.map((u) => <span key={u.userId} className="dm-role-tag owner">{u.displayName}</span>)
                                 : <span style={{ fontSize: 12, color: '#94a3b8' }}>未分配</span>}
                             </span>
-                            <span>
+                            <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                              <button
+                                className={`dm-btn-icon${ctr.isPublic ? ' active' : ''}`}
+                                title={ctr.isPublic ? '取消公开' : '设为公开'}
+                                style={ctr.isPublic ? { color: '#059669' } : undefined}
+                                onClick={() => void togglePublic('container', ref, !!ctr.isPublic)}
+                              >
+                                <Globe size={13} />
+                              </button>
                               <button
                                 className="btn"
                                 style={{ fontSize: 11, padding: '3px 8px' }}
@@ -806,7 +844,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                         const ownerList = (img.ownerUserIds ?? []).map((id) => users.find((u) => u.userId === id)).filter(Boolean) as ServerPermEntry[];
                         return (
                           <div key={img.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 1fr 1.5fr 1.5fr auto' }}>
-                            <span style={{ fontFamily: 'monospace', fontSize: 12, minWidth: 0 }}><TruncText text={img.repo} /></span>
+                            <span style={{ fontFamily: 'monospace', fontSize: 12, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}><TruncText text={img.repo} />{img.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}</span>
                             <span><code style={{ background: '#f1f5f9', padding: '2px 5px', borderRadius: 3, fontSize: 12 }}>{img.tag}</code></span>
                             <span style={{ fontSize: 12, color: '#526071' }}>{img.size}</span>
                             <span>
@@ -819,7 +857,15 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                                 ? ownerList.map((u) => <span key={u.userId} className="dm-role-tag owner">{u.displayName}</span>)
                                 : <span style={{ fontSize: 12, color: '#94a3b8' }}>未分配</span>}
                             </span>
-                            <span>
+                            <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                              <button
+                                className={`dm-btn-icon${img.isPublic ? ' active' : ''}`}
+                                title={img.isPublic ? '取消公开' : '设为公开'}
+                                style={img.isPublic ? { color: '#059669' } : undefined}
+                                onClick={() => void togglePublic('image', ref, !!img.isPublic)}
+                              >
+                                <Globe size={13} />
+                              </button>
                               <button
                                 className="btn"
                                 style={{ fontSize: 11, padding: '3px 8px' }}
@@ -848,7 +894,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                         const ownerList = (vol.ownerUserIds ?? []).map((id) => users.find((u) => u.userId === id)).filter(Boolean) as ServerPermEntry[];
                         return (
                           <div key={vol.name} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1.5fr 1.5fr auto' }}>
-                            <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={vol.name} /></span>
+                            <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}><TruncText text={vol.name} />{vol.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}</span>
                             <span>
                               {creator
                                 ? <span className="dm-role-tag creator">{creator.displayName}</span>
@@ -859,7 +905,15 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                                 ? ownerList.map((u) => <span key={u.userId} className="dm-role-tag owner">{u.displayName}</span>)
                                 : <span style={{ fontSize: 12, color: '#94a3b8' }}>未分配</span>}
                             </span>
-                            <span>
+                            <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                              <button
+                                className={`dm-btn-icon${vol.isPublic ? ' active' : ''}`}
+                                title={vol.isPublic ? '取消公开' : '设为公开'}
+                                style={vol.isPublic ? { color: '#059669' } : undefined}
+                                onClick={() => void togglePublic('volume', vol.name, !!vol.isPublic)}
+                              >
+                                <Globe size={13} />
+                              </button>
                               <button
                                 className="btn"
                                 style={{ fontSize: 11, padding: '3px 8px' }}
@@ -1477,27 +1531,24 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
 }
 
 // ============================================================
-// AdminTemplatesPanel
+// AdminTemplatesPanel — 管理员模板管理
+// 使用共享的 TemplateEditorModal 和 TemplateRolesModal 组件
 // ============================================================
 
 export function AdminTemplatesPanel() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
-  const [showCreate, setShowCreate] = useState(false);
-  const [editing, setEditing] = useState<TemplateDetail | null>(null);
-  const [form, setForm] = useState({
-    name: '', description: '', category: 'general',
-    docContent: '', configStr: '{}', isPublic: true,
-  });
-  const [saving, setSaving] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
+  const [editingTarget, setEditingTarget] = useState<TemplateDetail | null>(null);
+  const [rolesTarget, setRolesTarget] = useState<Template | null>(null);
   const [successMsg, setSuccessMsg] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
     clearError();
     try {
-      const r = await apiGet<{ templates: Template[] }>(`${API}/templates`);
+      const r = await apiGet<{ templates: Template[] }>(`${API}/templates/all-admin`);
       setTemplates(r.templates);
     } catch (e) {
       setError(e);
@@ -1509,65 +1560,25 @@ export function AdminTemplatesPanel() {
   useEffect(() => { void load(); }, [load]);
 
   function openCreate() {
-    setForm({ name: '', description: '', category: 'general', docContent: '', configStr: '{}', isPublic: true });
-    setEditing(null);
-    setShowCreate(true);
+    setEditingTarget(null);
+    setShowEditor(true);
     setSuccessMsg('');
   }
 
-  async function openEdit(id: string) {
+  async function openEdit(t: Template) {
     clearError();
     try {
-      const r = await apiGet<{ template: TemplateDetail }>(`${API}/templates/${id}`);
-      const t = r.template;
-      setForm({
-        name: t.name, description: t.description, category: t.category,
-        docContent: t.docContent, configStr: JSON.stringify(t.config, null, 2), isPublic: t.isPublic,
-      });
-      setEditing(t);
-      setShowCreate(true);
+      const r = await apiGet<{ template: TemplateDetail }>(`${API}/templates/${t.id}`);
+      setEditingTarget(r.template);
+      setShowEditor(true);
       setSuccessMsg('');
     } catch (e) {
       setError(e);
     }
   }
 
-  async function doSave() {
-    setSaving(true);
-    clearError();
-    let config: Record<string, unknown> = {};
-    try {
-      config = JSON.parse(form.configStr || '{}');
-    } catch {
-      setError(new Error('配置 JSON 格式错误'));
-      setSaving(false);
-      return;
-    }
-    try {
-      if (editing) {
-        await apiPut(`${API}/templates/${editing.id}`, {
-          name: form.name, description: form.description, category: form.category,
-          docContent: form.docContent, config, isPublic: form.isPublic,
-        });
-        setSuccessMsg('模板更新成功！');
-      } else {
-        await apiPost(`${API}/templates`, {
-          name: form.name, description: form.description, category: form.category,
-          docContent: form.docContent, config, isPublic: form.isPublic,
-        });
-        setSuccessMsg('模板创建成功！');
-      }
-      void load();
-      setShowCreate(false);
-    } catch (e) {
-      setError(e);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function doDelete(id: string, name: string) {
-    if (!confirm(`确定删除模板 ${name}？`)) return;
+    if (!confirm(`确定删除模板「${name}」？此操作不可恢复。`)) return;
     clearError();
     try {
       await apiDelete(`${API}/templates/${id}`);
@@ -1576,9 +1587,6 @@ export function AdminTemplatesPanel() {
       setError(e);
     }
   }
-
-  const f = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
-    setForm((p) => ({ ...p, [k]: e.target.type === 'checkbox' ? (e.target as HTMLInputElement).checked : e.target.value }));
 
   return (
     <div style={{ display: 'grid', gap: 20 }}>
@@ -1593,19 +1601,35 @@ export function AdminTemplatesPanel() {
       {loading ? <div className="dm-empty"><Spin /> 加载中…</div> :
        templates.length === 0 ? <div className="dm-empty"><ClipboardList size={32} /> 暂无模板</div> : (
         <div className="dm-table">
-          <div className="dm-table-header" style={{ gridTemplateColumns: '2fr 1.5fr 1fr 1fr auto' }}>
-            <span>模板名称</span><span>分类</span><span>可见性</span><span>更新时间</span><span>操作</span>
+          <div className="dm-table-header" style={{ gridTemplateColumns: '2fr 1fr 0.8fr 0.8fr 1fr 0.8fr auto' }}>
+            <span>模板名称</span><span>分类</span><span>类型</span><span>可见性</span><span>创建者</span><span>更新时间</span><span>操作</span>
           </div>
           {templates.map((t) => (
-            <div key={t.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1.5fr 1fr 1fr auto' }}>
-              <span style={{ fontWeight: 600 }}>{t.name}</span>
-              <span><span className="dm-category-tag">{t.category}</span></span>
-              <span style={{ color: t.isPublic ? '#065f46' : '#91400e', fontSize: 12 }}>
-                {t.isPublic ? '公开' : '私有'}
+            <div key={t.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 0.8fr 0.8fr 1fr 0.8fr auto' }}>
+              <span style={{ fontWeight: 600, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <TruncText text={t.name} />
+                {(t.variables?.length ?? 0) > 0 && (
+                  <span className="dm-var-count-badge" title={`${t.variables.length} 个变量`}>
+                    <Code size={10} /> {t.variables.length}
+                  </span>
+                )}
               </span>
+              <span><span className="dm-category-tag">{t.category}</span></span>
+              <span>
+                {t.deployType === 'compose'
+                  ? <span className="dm-deploy-tag compose"><Layers size={11} /> compose</span>
+                  : <span className="dm-deploy-tag run"><Code size={11} /> run</span>}
+              </span>
+              <span>
+                {t.isPublic
+                  ? <span style={{ color: '#065f46', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 3 }}><Eye size={11} /> 公开</span>
+                  : <span style={{ color: '#92400e', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 3 }}><Lock size={11} /> 私有</span>}
+              </span>
+              <span style={{ fontSize: 12, color: '#526071' }}>{t.creatorName ?? '—'}</span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>{t.updatedAt.slice(0, 10)}</span>
               <span style={{ display: 'flex', gap: 4 }}>
-                <button className="dm-btn-icon" title="编辑" onClick={() => openEdit(t.id)}><Pencil size={13} /></button>
+                <button className="dm-btn-icon" title="编辑" onClick={() => openEdit(t)}><Pencil size={13} /></button>
+                <button className="dm-btn-icon" title="管理角色" onClick={() => setRolesTarget(t)}><Users size={13} /></button>
                 <button className="dm-btn-icon danger" title="删除" onClick={() => doDelete(t.id, t.name)}><Trash2 size={13} /></button>
               </span>
             </div>
@@ -1613,49 +1637,25 @@ export function AdminTemplatesPanel() {
         </div>
       )}
 
-      {showCreate && (
-        <Modal title={editing ? `编辑模板 — ${editing.name}` : '创建模板'} onClose={() => setShowCreate(false)} wide
-          foot={
-            <>
-              <button className="btn" onClick={() => setShowCreate(false)}>取消</button>
-              <button className="btn btn-primary" onClick={doSave} disabled={saving || !form.name.trim()}>
-                {saving ? <Spin /> : <CheckCircle size={14} />} {editing ? '保存更改' : '创建'}
-              </button>
-            </>
-          }>
-          {error && <Alert type="error">{error}</Alert>}
-          <div className="dm-form-grid">
-            <Field label="模板名称 *"><input value={form.name} onChange={f('name')} placeholder="Jupyter Notebook" required /></Field>
-            <Field label="分类"><input value={form.category} onChange={f('category')} placeholder="ml / web / database / general" /></Field>
-            <Field label="描述" full><input value={form.description} onChange={f('description')} placeholder="简短说明" /></Field>
-          </div>
-          <div>
-            <label className="dm-form-check">
-              <input type="checkbox" checked={form.isPublic} onChange={f('isPublic')} />
-              公开（所有用户可见）
-            </label>
-          </div>
-          <Field label="说明文档（Markdown）" full>
-            <textarea className="mono" value={form.docContent} onChange={f('docContent')}
-              placeholder={"## Jupyter Notebook\n\n使用说明...\n\n### 端口\n\n- `8888` — Jupyter Web 界面"} style={{ minHeight: 200 }} />
-          </Field>
-          {form.docContent && (
-            <details style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 12px' }}>
-              <summary style={{ cursor: 'pointer', fontSize: 13, color: '#526071' }}>预览 Markdown</summary>
-              <div className="dm-md-preview" style={{ marginTop: 10 }}
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(form.docContent) }} />
-            </details>
-          )}
-          <Field label="容器配置（JSON）" full>
-            <textarea className="mono" value={form.configStr} onChange={f('configStr')}
-              placeholder={'{\n  "type": "run",\n  "image": "jupyter/base-notebook",\n  "ports": ["8888:8888"]\n}'}
-              style={{ minHeight: 160 }} />
-          </Field>
-          <Alert type="info">
-            配置支持 <code>type: "run"</code>（docker run）或 <code>type: "compose"</code>（docker compose，需 <code>composeYaml</code> 字段）。
-            字符串和数值类型的配置项会在用户创建容器时作为可覆盖参数显示。
-          </Alert>
-        </Modal>
+      {/* 共享的模板编辑器 */}
+      {showEditor && (
+        <TemplateEditorModal
+          editing={editingTarget}
+          onClose={() => { setShowEditor(false); setEditingTarget(null); }}
+          onSaved={() => {
+            setSuccessMsg(editingTarget ? '模板更新成功！' : '模板创建成功！');
+            void load();
+          }}
+        />
+      )}
+
+      {/* 共享的模板角色管理弹窗 */}
+      {rolesTarget && (
+        <TemplateRolesModal
+          template={rolesTarget}
+          onClose={() => setRolesTarget(null)}
+          onSaved={() => void load()}
+        />
       )}
     </div>
   );

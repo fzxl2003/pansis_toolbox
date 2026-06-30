@@ -6,11 +6,14 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Box,
   CheckCircle,
+  ChevronRight,
   ClipboardList,
+  Code,
   Copy,
   Cpu,
   Database,
   FileText,
+  Folder,
   Globe,
   HardDrive,
   Image,
@@ -30,7 +33,22 @@ import {
 import { apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
 import { Alert, Field, Modal, ResourceUsagePanel, ServerSelector, Spin, TruncText } from './components';
-import { API, containerStateClass, formatSize, parseContainerStatus, renderMarkdown, useErrorMsg } from './utils';
+import {
+  API,
+  containerStateClass,
+  docReferencedVariables,
+  extractPathPrefix,
+  filterMatchesValue,
+  filterSummary,
+  formatSize,
+  parseContainerStatus,
+  parseNumberRange,
+  renderMarkdownInline,
+  splitDocByVariables,
+  splitDocIntoBlocks,
+  useErrorMsg,
+  validateVariableValue,
+} from './utils';
 import type {
   ContainerDetail,
   CreateMode,
@@ -38,9 +56,11 @@ import type {
   DockerContainer,
   DockerImage,
   DockerVolume,
+  GpuInfo,
   ServerResourceOverview,
   Template,
   TemplateDetail,
+  TemplateVariable,
   UserPerms,
 } from './types';
 
@@ -203,12 +223,32 @@ function mkPort(): PortEntry  { return { id: uid(), host: '', container: '', pro
 function mkMount(): MountEntry { return { id: uid(), type: 'bind', source: '', target: '', ro: false, newVolName: '' }; }
 function mkEnv(): EnvEntry    { return { id: uid(), key: '', value: '' }; }
 
+// 判断卷是否为 viewer-only（仅有查看权、非所有者），此时挂载必须只读
+function isViewerOnlyVolume(volName: string, volumes: DockerVolume[]): boolean {
+  if (!volName || volName.startsWith('__')) return false;
+  const vol = volumes.find(v => v.name === volName);
+  return !!vol && vol.canManage === false;
+}
+
+// 将路径白名单（前缀列表）转为结构化筛选 JSON，供 HostPathPickerModal 使用
+function buildWhitelistFilter(whitelist: string[] | undefined): string {
+  if (!whitelist || whitelist.length === 0) return '';
+  const groups = whitelist
+    .map(w => w.trim().replace(/\/+$/, ''))
+    .filter(Boolean)
+    .map(w => ({ conditions: [{ op: 'match', pattern: w + '/*' }] }));
+  return groups.length > 0 ? JSON.stringify({ groups }) : '';
+}
+
 // 将界面表单组装成 docker run 命令字符串（单向，仅用于预览/命令行模式）
 function buildDockerCmd(p: {
   image: string; name: string; restart: string; network: string; command: string;
   ports: PortEntry[]; mounts: MountEntry[]; envs: EnvEntry[];
   gpus: string; extra_args: string;
+  volumes: DockerVolume[];
 }): string {
+  // 先收集需要显式创建的新卷
+  const createCmds: string[] = [];
   const parts: string[] = ['docker', 'run', '-d'];
   if (p.name)    parts.push('--name', p.name);
   if (p.restart) parts.push('--restart', p.restart);
@@ -227,7 +267,13 @@ function buildDockerCmd(p: {
     } else {
       const volName = m.source === '__new__' ? m.newVolName : m.source;
       if (volName.startsWith('__') && volName.endsWith('__')) continue;
-      if (volName && m.target) parts.push('-v', `${volName}:${m.target}${m.ro ? ':ro' : ''}`);
+      if (volName && m.target) {
+        // 新卷需先创建
+        if (m.source === '__new__' && volName.trim()) {
+          createCmds.push(`docker volume create ${volName.trim()}`);
+        }
+        parts.push('-v', `${volName}:${m.target}${m.ro ? ':ro' : ''}`);
+      }
     }
   }
   for (const e of p.envs) {
@@ -237,7 +283,9 @@ function buildDockerCmd(p: {
   if (p.extra_args) parts.push(...p.extra_args.trim().split(/\s+/));
   if (p.image) parts.push(p.image);
   if (p.command) parts.push(...p.command.trim().split(/\s+/));
-  return parts.join(' ');
+  const runCmd = parts.join(' ');
+  // 显示时合并为一条命令（用 && 连接）
+  return createCmds.length > 0 ? [...createCmds, runCmd].join(' && ') : runCmd;
 }
 
 // ---- CrossServerImageModal ----
@@ -557,6 +605,7 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
   const [envs, setEnvs]     = useState<EnvEntry[]>([mkEnv()]);
   const [availVolumes, setAvailVolumes] = useState<DockerVolume[]>([]);
   const [volumeCopyMountId, setVolumeCopyMountId] = useState<number | null>(null);
+  const [pathPickerMountId, setPathPickerMountId] = useState<number | null>(null);
 
   // ---------- CUDA ----------
   const [selectedGpuIndices, setSelectedGpuIndices] = useState<number[]>([]);
@@ -622,6 +671,7 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
       image: imageMode === 'input' ? imageInput : image,
       name, restart, network, command,
       ports, mounts, envs, gpus, extra_args: extraArgs,
+      volumes: availVolumes,
     });
     setCliCmd(cmd);
     setMode('cli');
@@ -643,6 +693,7 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
         } else {
           const v = m.source === '__new__' ? m.newVolName : m.source;
           if (v.startsWith('__') && v.endsWith('__')) return [];
+          // viewer-only 卷不强制只读，由后端校验是否已设只读
           return v && m.target ? [`${v}:${m.target}${m.ro ? ':ro' : ''}`] : [];
         }
       });
@@ -691,6 +742,8 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
     if (!m.target && (m.source || m.newVolName)) return true;
     if (m.type === 'volume' && m.source === '__new__') return !m.newVolName.trim() || !canCreateVolume || volQuotaExhausted;
     if (m.type === 'volume' && m.source === '__copy__') return true;
+    // viewer-only 卷必须勾选只读，否则后端会拒绝创建
+    if (m.type === 'volume' && isViewerOnlyVolume(m.source, availVolumes) && !m.ro) return true;
     return false;
   });
   const canSubmitGui = (imageMode === 'input' ? !!imageInput.trim() : !!image) && !hasInvalidMount;
@@ -741,6 +794,11 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
           <div style={{ fontSize: 12, color: '#64748b' }}>
             直接输入完整 <code>docker run</code> 命令（从界面模式同步而来，可手动修改）：
           </div>
+          {availVolumes.some(v => v.canManage === false) && (
+            <Alert type="warning">
+              提示：若命令中挂载了您仅有查看权限的卷（非所有者），必须手动在对应 <code>-v</code> / <code>--mount</code> 项添加 <code>:ro</code> / <code>readonly=true</code> 设置只读，否则将拒绝创建。
+            </Alert>
+          )}
           <textarea
             className="mono"
             value={cliCmd}
@@ -903,10 +961,19 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
                   </Field>
                   {m.type === 'bind' ? (
                     <Field label="宿主机路径 *" style={{ flex: 1, minWidth: 0 }}>
-                      <input
-                        value={m.source} placeholder="/data/myapp"
-                        onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value } : x))}
-                      />
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <input
+                          value={m.source} placeholder="/data/myapp"
+                          onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value } : x))}
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                        <button type="button" className="btn" style={{ flexShrink: 0, fontSize: 12 }}
+                          onClick={() => setPathPickerMountId(m.id)}
+                          title="点选服务器目录"
+                        >
+                          <Folder size={12} /> 点选
+                        </button>
+                      </div>
                     </Field>
                   ) : (
                     <Field label="卷名称 *" style={{ width: 220, flexShrink: 0 }}>
@@ -917,13 +984,14 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
                             setVolumeCopyMountId(m.id);
                             return;
                           }
-                          setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value, newVolName: '' } : x));
+                          const viewerOnly = isViewerOnlyVolume(e.target.value, availVolumes);
+                          setMounts(prev => prev.map((x, j) => j === i ? { ...x, source: e.target.value, newVolName: '', ro: viewerOnly ? true : x.ro } : x));
                         }}
                         style={{ width: '100%' }}
                       >
                         <option value="">— 选择已有卷 —</option>
                         {availVolumes.map(v => (
-                          <option key={v.name} value={v.name}>{v.name}</option>
+                          <option key={v.name} value={v.name}>{v.name}{v.canManage === false ? ' (只读)' : ''}</option>
                         ))}
                         {canCopyVolume && (
                           <option value="__copy__" disabled={volQuotaExhausted}>⟳ 复制卷到当前服务器…</option>
@@ -939,6 +1007,12 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
                           onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, newVolName: e.target.value } : x))}
                         />
                       )}
+                      {isViewerOnlyVolume(m.source, availVolumes) && !m.ro && (
+                        <div style={{ fontSize: 11, color: '#dc2626', marginTop: 4 }}>您仅有此卷的查看权限，必须勾选「只读」才能创建</div>
+                      )}
+                      {isViewerOnlyVolume(m.source, availVolumes) && m.ro && (
+                        <div style={{ fontSize: 11, color: '#92400e', marginTop: 4 }}>您仅有此卷的查看权限，已设为只读挂载</div>
+                      )}
                       {!canCreateVolume && availVolumes.length === 0 && (
                         <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>您没有创建卷权限，只能使用已有可见卷。</div>
                       )}
@@ -953,7 +1027,8 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
                   <Field label="只读" style={{ width: 64, flexShrink: 0 }}>
                     <div style={{ paddingTop: 8 }}>
                       <label className="dm-form-check">
-                        <input type="checkbox" checked={m.ro}
+                        <input type="checkbox"
+                          checked={m.ro}
                           onChange={e => setMounts(prev => prev.map((x, j) => j === i ? { ...x, ro: e.target.checked } : x))}
                         />
                         <span>ro</span>
@@ -1089,6 +1164,18 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
         onCopied={handleVolumeCopied}
       />
     )}
+    {pathPickerMountId !== null && (
+      <HostPathPickerModal
+        serverId={serverId}
+        initialPath={mounts.find(m => m.id === pathPickerMountId)?.source || '/'}
+        filterStr={buildWhitelistFilter(quota?.ctr_path_whitelist)}
+        onSelect={(p) => {
+          setMounts(prev => prev.map(m => m.id === pathPickerMountId ? { ...m, source: p } : m));
+          setPathPickerMountId(null);
+        }}
+        onClose={() => setPathPickerMountId(null)}
+      />
+    )}
     </>
   );
 }
@@ -1142,11 +1229,480 @@ export function ComposeCreateModal({ serverId, serverOverview, onClose, onSucces
         <textarea className="mono" value={yaml} onChange={(e) => setYaml(e.target.value)}
           placeholder={"services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\""} style={{ minHeight: 280 }} />
       </Field>
+      <Alert type="info">
+        提示：若 YAML 中挂载了您仅有查看权限的卷（非所有者），系统将自动在对应挂载项后追加 <code>:ro</code> 强制只读。
+      </Alert>
     </Modal>
   );
 }
 
 // ---- TemplateDeployModal ----
+
+// 宿主机路径选择器弹窗：通过后端 browse-dirs API 逐层浏览服务器目录，类似 VSCode 选择文件夹
+function HostPathPickerModal({
+  serverId,
+  initialPath,
+  filterStr,
+  onSelect,
+  onClose,
+}: {
+  serverId: string;
+  initialPath: string;
+  filterStr: string;
+  onSelect: (path: string) => void;
+  onClose: () => void;
+}) {
+  const [cwd, setCwd] = useState(initialPath || '/');
+  const [dirs, setDirs] = useState<{ name: string; path: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadDir = useCallback((path: string) => {
+    setLoading(true);
+    setError('');
+    apiGet<{ path: string; dirs: { name: string; path: string }[] }>(
+      `${API}/servers/${serverId}/browse-dirs?path=${encodeURIComponent(path)}`,
+    )
+      .then((r) => {
+        setCwd(r.path);
+        setDirs(r.dirs || []);
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : '加载目录失败');
+        setDirs([]);
+      })
+      .finally(() => setLoading(false));
+  }, [serverId]);
+
+  useEffect(() => {
+    loadDir(initialPath || '/');
+  }, [loadDir, initialPath]);
+
+  // 路径面包屑：将 cwd 拆分为可点击的层级
+  const crumbs = cwd.split('/').filter(Boolean);
+
+  // 判断某路径是否符合筛选条件（支持结构化筛选条件和旧文本格式）
+  const pathAllowed = (p: string) => !filterStr || filterMatchesValue(filterStr, p, 'host_path') || filterMatchesValue(filterStr, p + '/', 'host_path') || filterMatchesValue(filterStr, p + '/*', 'host_path');
+
+  return (
+    <Modal title="选择宿主机路径" onClose={onClose} width={560}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {/* 面包屑导航 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', fontSize: 12, color: '#526071' }}>
+          <Folder size={13} />
+          <span
+            style={{ cursor: 'pointer', color: '#2563eb' }}
+            onClick={() => loadDir('/')}
+          >
+            /
+          </span>
+          {crumbs.map((c, i) => {
+            const p = '/' + crumbs.slice(0, i + 1).join('/');
+            return (
+              <span key={p} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                <ChevronRight size={11} style={{ color: '#94a3b8' }} />
+                <span
+                  style={{ cursor: 'pointer', color: '#2563eb' }}
+                  onClick={() => loadDir(p)}
+                >
+                  {c}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+
+        {filterStr && (
+          <div style={{ fontSize: 11, color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 4, padding: '4px 8px' }}>
+            筛选条件：{filterSummary(filterStr, 'host_path')}（仅允许选择匹配的路径）
+          </div>
+        )}
+
+        {error && <Alert type="error">{error}</Alert>}
+
+        {/* 目录列表 */}
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, maxHeight: 320, overflowY: 'auto', background: '#fff' }}>
+          {loading ? (
+            <div style={{ padding: 20, textAlign: 'center' }}><Spin /></div>
+          ) : dirs.length === 0 ? (
+            <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>没有子目录</div>
+          ) : (
+            dirs.map((d) => (
+              <div
+                key={d.path}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 12px',
+                  borderBottom: '1px solid #f1f5f9',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = '#f8fafc'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = ''; }}
+                onClick={() => loadDir(d.path)}
+              >
+                <Folder size={14} style={{ color: '#eab308', flexShrink: 0 }} />
+                <span style={{ fontSize: 13, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                <span style={{ fontSize: 10, color: '#94a3b8', fontFamily: 'monospace' }}>{d.path}</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* 当前路径与操作 */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            className="mono"
+            value={cwd}
+            onChange={(e) => setCwd(e.target.value)}
+            style={{ flex: 1, minWidth: 200 }}
+            placeholder="/path/to/dir"
+          />
+          <button
+            className="btn"
+            onClick={() => loadDir(cwd)}
+          >
+            前往
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+          <button className="btn" onClick={onClose}>取消</button>
+          <button
+            className="btn btn-primary"
+            disabled={!cwd.startsWith('/') || (filterStr && !pathAllowed(cwd))}
+            onClick={() => onSelect(cwd)}
+          >
+            <CheckCircle size={14} /> 选择此路径
+          </button>
+        </div>
+        {filterStr && !pathAllowed(cwd) && cwd.startsWith('/') && (
+          <div style={{ fontSize: 11, color: '#dc2626' }}>当前路径「{cwd}」不在筛选范围「{filterSummary(filterStr, 'host_path')}」内，无法选择。</div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+// 根据变量类型渲染对应的输入控件（筛选条件语义随类型变化）
+function VariableInput({
+  variable,
+  value,
+  onChange,
+  images,
+  volumes,
+  gpus,
+  serverId,
+}: {
+  variable: TemplateVariable;
+  value: string;
+  onChange: (v: string) => void;
+  images: DockerImage[];
+  volumes: DockerVolume[];
+  gpus: GpuInfo[];
+  serverId: string;
+}) {
+  const { type, filter, name, defaultValue } = variable;
+  const filterStr = (filter || '').trim();
+  const [showPathPicker, setShowPathPicker] = useState(false);
+
+  // 镜像选择器：按筛选条件（通配符）过滤下拉选项
+  if (type === 'image') {
+    const filtered = filterStr
+      ? images.filter((img) => filterMatchesValue(filter, `${img.repo}:${img.tag}`, 'image') || filterMatchesValue(filter, img.repo, 'image'))
+      : images;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <select value={value} onChange={(e) => onChange(e.target.value)} style={{ width: '100%' }}>
+          <option value="">— 选择镜像 —</option>
+          {filtered.map((img) => (
+            <option key={`${img.repo}:${img.tag}`} value={`${img.repo}:${img.tag}`}>
+              {img.repo}:{img.tag} ({img.size})
+            </option>
+          ))}
+        </select>
+        {filterStr && (
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>筛选条件：{filterSummary(filter, 'image')}{filtered.length === 0 ? '（暂无匹配镜像）' : `（匹配 ${filtered.length} 个）`}</span>
+        )}
+        {!filterStr && filtered.length === 0 && (
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>暂无可用镜像</span>
+        )}
+      </div>
+    );
+  }
+
+  // 卷选择器：按筛选条件（通配符）过滤下拉选项
+  if (type === 'volume') {
+    const selectedVolViewerOnly = isViewerOnlyVolume(value, volumes);
+    const filtered = filterStr ? volumes.filter((vol) => filterMatchesValue(filter, vol.name, 'volume')) : volumes;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <select value={value} onChange={(e) => onChange(e.target.value)} style={{ width: '100%' }}>
+          <option value="">— 选择卷 —</option>
+          {filtered.map((vol) => (
+            <option key={vol.name} value={vol.name}>{vol.name}{vol.canManage === false ? ' (只读)' : ''}</option>
+          ))}
+        </select>
+        {selectedVolViewerOnly && (
+          <span style={{ fontSize: 11, color: '#92400e' }}>您仅有此卷的查看权限，将强制只读挂载 (:ro)</span>
+        )}
+        {filterStr && (
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>筛选条件：{filterSummary(filter, 'volume')}{filtered.length === 0 ? '（暂无匹配卷）' : `（匹配 ${filtered.length} 个）`}</span>
+        )}
+        {!filterStr && filtered.length === 0 && (
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>暂无可用的卷</span>
+        )}
+      </div>
+    );
+  }
+
+  // GPU 选择器：按筛选条件（通配符匹配 GPU 名称）过滤可选 GPU，复选框多选
+  if (type === 'gpu') {
+    const filtered = filterStr ? gpus.filter((g) => filterMatchesValue(filter, g.name, 'gpu')) : gpus;
+    // 当前选中的索引集合：value 为 "all" 或逗号分隔索引
+    let selectedIdx: number[] = [];
+    if (value.trim().toLowerCase() === 'all') {
+      selectedIdx = filtered.map((g) => g.index);
+    } else if (value) {
+      selectedIdx = value.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && !Number.isNaN(n));
+    }
+    function toggleGpu(idx: number, checked: boolean) {
+      const next = checked
+        ? [...new Set([...selectedIdx, idx])].sort((a, b) => a - b)
+        : selectedIdx.filter((x) => x !== idx);
+      onChange(next.map(String).join(','));
+    }
+    // 全选：输出所有匹配 GPU 的索引（逗号分隔），便于配合 --gpus device={{name}} 使用
+    const selectAll = () => onChange(filtered.map((g) => g.index).join(','));
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {filtered.length > 0 ? (
+          <>
+            <div className="dm-roles-checklist" style={{ maxHeight: 160, overflowY: 'auto' }}>
+              {filtered.map((gpu) => (
+                <label key={gpu.index} className="dm-form-check">
+                  <input
+                    type="checkbox"
+                    checked={selectedIdx.includes(gpu.index)}
+                    onChange={(e) => toggleGpu(gpu.index, e.target.checked)}
+                  />
+                  <span className="dm-cuda-gpu-label">
+                    <strong>GPU {gpu.index}</strong>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>{gpu.name}</span>
+                    <span style={{ color: '#94a3b8', fontSize: 11, marginLeft: 4 }}>{gpu.memoryTotal}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, color: '#94a3b8', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: 11, padding: '2px 8px' }}
+                onClick={selectAll}
+              >
+                全选
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: 11, padding: '2px 8px' }}
+                onClick={() => onChange('')}
+              >
+                清空
+              </button>
+              <span>
+                当前值：<code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 3 }}>{value || '（未选择）'}</code>
+                （部署时替换到 <code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 3 }}>{`{{${name}}}`}</code>，建议配合 <code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 3 }}>{`--gpus device={{${name}}}`}</code> 使用）
+              </span>
+            </div>
+          </>
+        ) : (
+          <span style={{ fontSize: 11, color: '#92400e' }}>
+            {filterStr ? `筛选条件「${filterSummary(filter, 'gpu')}」下暂无匹配的 GPU` : '该服务器暂无可用 GPU'}
+          </span>
+        )}
+        {filterStr && filtered.length > 0 && (
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>筛选条件：{filterSummary(filter, 'gpu')}（匹配 {filtered.length} 个）</span>
+        )}
+      </div>
+    );
+  }
+
+  // 宿主路径选择器：文本框 + 浏览按钮（点选服务器目录），受筛选条件前缀约束
+  if (type === 'host_path') {
+    const err = validateVariableValue(variable, value);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <input
+            className="mono"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={defaultValue || '/host/path'}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button
+            type="button"
+            className="btn"
+            style={{ flexShrink: 0 }}
+            onClick={() => setShowPathPicker(true)}
+          >
+            <Folder size={13} /> 浏览
+          </button>
+        </div>
+        {filterStr && !err && <span style={{ fontSize: 11, color: '#94a3b8' }}>允许范围：{filterSummary(filter, 'host_path')}（受您挂载白名单限制）</span>}
+        {err && <span style={{ fontSize: 11, color: '#dc2626' }}>{err}</span>}
+        {showPathPicker && (
+          <HostPathPickerModal
+            serverId={serverId}
+            initialPath={value || extractPathPrefix(filter)}
+            filterStr={filterStr}
+            onSelect={(p) => { onChange(p); setShowPathPicker(false); }}
+            onClose={() => setShowPathPicker(false)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // 容器内路径：纯文本输入，筛选条件为通配符
+  if (type === 'docker_path') {
+    const err = validateVariableValue(variable, value);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <input
+          className="mono"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={defaultValue || '/container/path'}
+          style={{ width: '100%' }}
+        />
+        {filterStr && !err && <span style={{ fontSize: 11, color: '#94a3b8' }}>须匹配：{filterSummary(filter, 'docker_path')}</span>}
+        {err && <span style={{ fontSize: 11, color: '#dc2626' }}>{err}</span>}
+      </div>
+    );
+  }
+
+  // 下拉选择：筛选条件解析为逗号分隔的允许选项
+  if (type === 'select') {
+    const options = filterStr.split(',').map((s) => s.trim()).filter(Boolean);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <select value={value} onChange={(e) => onChange(e.target.value)} style={{ width: '100%' }}>
+          <option value="">— 选择 —</option>
+          {options.map((opt) => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+        {options.length === 0 && (
+          <span style={{ fontSize: 11, color: '#92400e' }}>未配置允许选项，请在模板中填写筛选条件</span>
+        )}
+      </div>
+    );
+  }
+
+  // 多行文本：筛选条件为通配符，输入须匹配
+  if (type === 'text') {
+    const err = validateVariableValue(variable, value);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <textarea
+          className="mono"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={defaultValue || `请输入 ${name}`}
+          style={{ minHeight: 60, width: '100%' }}
+        />
+        {filterStr && !err && <span style={{ fontSize: 11, color: '#94a3b8' }}>须匹配：{filterSummary(filter, 'text')}</span>}
+        {err && <span style={{ fontSize: 11, color: '#dc2626' }}>{err}</span>}
+      </div>
+    );
+  }
+
+  // 端口号 / 数字：筛选条件为范围约束
+  if (type === 'port' || type === 'number') {
+    const rng = parseNumberRange(filterStr);
+    const isPort = type === 'port';
+    const baseMin = isPort ? 1 : undefined;
+    const baseMax = isPort ? 65535 : undefined;
+    const min = rng?.min ?? baseMin;
+    const max = rng?.max ?? baseMax;
+    const err = validateVariableValue(variable, value);
+    const constraintLabel = filterStr
+      ? `范围：${filterSummary(filter, type)}${isPort ? '（且 1-65535）' : ''}`
+      : isPort ? '范围：1-65535' : '';
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={defaultValue || (isPort ? '如 8080' : '0')}
+          style={{ width: '100%' }}
+        />
+        {constraintLabel && !err && <span style={{ fontSize: 11, color: '#94a3b8' }}>{constraintLabel}</span>}
+        {err && <span style={{ fontSize: 11, color: '#dc2626' }}>{err}</span>}
+      </div>
+    );
+  }
+
+  // 默认：单行文本（筛选条件为通配符，输入须匹配）
+  const err = validateVariableValue(variable, value);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={defaultValue || `请输入 ${name}`}
+        style={{ width: '100%' }}
+      />
+      {filterStr && !err && <span style={{ fontSize: 11, color: '#94a3b8' }}>须匹配：{filterSummary(filter, 'string')}</span>}
+      {err && <span style={{ fontSize: 11, color: '#dc2626' }}>{err}</span>}
+    </div>
+  );
+}
+
+// 统一的变量字段：左上角变量名（蓝色徽标）+ 灰色说明，下方为占满一行的输入控件。
+// 用于说明文档内联渲染与下方变量汇总区，保证视觉一致。
+function VariableField({
+  variable,
+  value,
+  onChange,
+  images,
+  volumes,
+  gpus,
+  serverId,
+}: {
+  variable: TemplateVariable;
+  value: string;
+  onChange: (v: string) => void;
+  images: DockerImage[];
+  volumes: DockerVolume[];
+  gpus: GpuInfo[];
+  serverId: string;
+}) {
+  return (
+    <div className="dm-var-field">
+      <div className="dm-var-field-head">
+        <code className="dm-var-badge">{`{{${variable.name}}}`}</code>
+        {variable.description && <span className="dm-var-desc">{variable.description}</span>}
+      </div>
+      <VariableInput
+        variable={variable}
+        value={value}
+        onChange={onChange}
+        images={images}
+        volumes={volumes}
+        gpus={gpus}
+        serverId={serverId}
+      />
+    </div>
+  );
+}
 
 export function TemplateDeployModal({ serverId, serverOverview, onClose, onSuccess }: {
   serverId: string;
@@ -1157,26 +1713,18 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selected, setSelected] = useState<TemplateDetail | null>(null);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [projectName, setProjectName] = useState('');
   const [loading, setLoading] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
-  // CUDA 挂载选项
-  const [selectedGpuIndices, setSelectedGpuIndices] = useState<number[]>([]);
-  const [cudaMode, setCudaMode] = useState<'none' | 'all' | 'custom'>('none');
+
+  // 服务器上的镜像和卷列表（用于 image/volume 类型变量选择）
+  const [images, setImages] = useState<DockerImage[]>([]);
+  const [volumes, setVolumes] = useState<DockerVolume[]>([]);
 
   const availableGpus = serverOverview?.cuda?.availableGpus ?? [];
-  const hasCuda = (serverOverview?.cuda?.serverHasCuda ?? false) && availableGpus.length > 0;
-
-  // 容器配额是否已用满
   const ctrQuotaExhausted =
     serverOverview?.container?.remaining != null && serverOverview.container.remaining <= 0;
-
-  function buildGpusArg(): string {
-    if (cudaMode === 'none') return '';
-    if (cudaMode === 'all') return 'all';
-    if (selectedGpuIndices.length === 0) return '';
-    return `"device=${selectedGpuIndices.join(',')}"`;
-  }
 
   useEffect(() => {
     setLoading(true);
@@ -1186,20 +1734,34 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
       .finally(() => setLoading(false));
   }, []);
 
+  // 选中模板后加载详情、初始化变量值、拉取镜像/卷列表
   async function selectTemplate(id: string) {
     clearError();
     try {
       const r = await apiGet<{ template: TemplateDetail }>(`${API}/templates/${id}`);
-      setSelected(r.template);
+      const tpl = r.template;
+      setSelected(tpl);
+      // 用变量默认值初始化 overrides
       const initOverrides: Record<string, string> = {};
-      if (r.template.config && typeof r.template.config === 'object') {
-        for (const [k, v] of Object.entries(r.template.config)) {
-          if (typeof v === 'string' || typeof v === 'number') {
-            initOverrides[k] = String(v);
-          }
-        }
+      for (const v of tpl.variables ?? []) {
+        initOverrides[v.name] = v.defaultValue || '';
       }
       setOverrides(initOverrides);
+      setProjectName('');
+
+      // 如果模板包含 image 或 volume 类型变量，预加载镜像/卷列表
+      const hasImageVar = (tpl.variables ?? []).some((v) => v.type === 'image');
+      const hasVolumeVar = (tpl.variables ?? []).some((v) => v.type === 'volume');
+      if (hasImageVar) {
+        apiGet<{ images: DockerImage[] }>(`${API}/servers/${serverId}/images`)
+          .then((r) => setImages(r.images))
+          .catch(() => {});
+      }
+      if (hasVolumeVar) {
+        apiGet<{ volumes: DockerVolume[] }>(`${API}/servers/${serverId}/volumes`)
+          .then((r) => setVolumes(r.volumes ?? []))
+          .catch(() => {});
+      }
     } catch (e) {
       setError(e);
     }
@@ -1207,13 +1769,17 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
 
   async function deploy() {
     if (!selected) return;
+    if (hasInvalidVar) return;
     setDeploying(true);
     clearError();
     try {
+      const payload: Record<string, unknown> = { ...overrides };
+      if (selected.deployType === 'compose' && projectName.trim()) {
+        payload._projectName = projectName.trim();
+      }
       await apiPost(`${API}/servers/${serverId}/containers/from-template`, {
         templateId: selected.id,
-        overrides,
-        gpus: buildGpusArg(),
+        overrides: payload,
       });
       onSuccess();
     } catch (e) {
@@ -1223,6 +1789,33 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
     }
   }
 
+  // 预览替换后的命令（仅用于显示）
+  function previewCommand(): string {
+    if (!selected) return '';
+    let content = selected.rawContent;
+    for (const v of selected.variables ?? []) {
+      const val = overrides[v.name] ?? '';
+      content = content.replace(new RegExp(`\\{\\{${v.name}\\}\\}`, 'g'), val || `{{${v.name}}}`);
+    }
+    return content;
+  }
+
+  const variables = selected?.variables ?? [];
+  // 变量筛选条件校验：拦截不合规输入
+  const invalidVarErrors = variables
+    .map((v) => ({ name: v.name, msg: validateVariableValue(v, overrides[v.name] ?? '') }))
+    .filter((x) => x.msg);
+  const hasInvalidVar = invalidVarErrors.length > 0;
+  // 说明文档中已内联引用的变量名集合（这些变量在文档中直接渲染为控件）
+  const docInlineVarNames = new Set(selected?.docContent ? docReferencedVariables(selected.docContent) : []);
+  const varMap = new Map(variables.map((v) => [v.name, v]));
+  // 文档中引用但未在变量表中声明的占位符（原样提示）
+  const docUnknownVars = selected?.docContent
+    ? splitDocByVariables(selected.docContent).filter((s) => s.type === 'var' && !varMap.has(s.value)).map((s) => (s.type === 'var' ? s.value : ''))
+    : [];
+  // 未在文档中内联的变量 —— 用于决定变量汇总修改区是否默认展开
+  const remainingVars = variables.filter((v) => !docInlineVarNames.has(v.name));
+
   return (
     <Modal title="从模板创建容器" onClose={onClose} wide
       foot={
@@ -1230,17 +1823,26 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
           {selected && <button className="btn" onClick={() => setSelected(null)}>← 返回列表</button>}
           <button className="btn" onClick={onClose}>取消</button>
           {selected && (
-            <button className="btn btn-primary" onClick={deploy} disabled={deploying || ctrQuotaExhausted}>
+            <button className="btn btn-primary" onClick={deploy} disabled={deploying || ctrQuotaExhausted || hasInvalidVar}>
               {deploying ? <Spin /> : <Play size={14} />} 部署
             </button>
           )}
         </>
       }>
       {error && <Alert type="error">{error}</Alert>}
+      {hasInvalidVar && (
+        <Alert type="error">
+          以下变量输入不符合筛选条件，请修正后部署：
+          <ul style={{ margin: '6px 0 0 18px' }}>
+            {invalidVarErrors.map((x) => (
+              <li key={x.name}><code>{`{{${x.name}}}`}</code> — {x.msg}</li>
+            ))}
+          </ul>
+        </Alert>
+      )}
       {ctrQuotaExhausted && (
         <Alert type="error">容器数量配额已用满，无法创建新容器。请删除不再使用的容器或联系管理员调整配额。</Alert>
       )}
-      {/* 资源概览提示条 */}
       {serverOverview && <ResourceOverviewStrip overview={serverOverview} />}
 
       {!selected ? (
@@ -1251,90 +1853,133 @@ export function TemplateDeployModal({ serverId, serverOverview, onClose, onSucce
             <button key={t.id} className="dm-card" style={{ cursor: 'pointer', textAlign: 'left' }} onClick={() => selectTemplate(t.id)}>
               <div className="dm-card-header">
                 <span className="dm-card-title">{t.name}</span>
-                <span className="dm-category-tag">{t.category}</span>
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <span className="dm-category-tag">{t.category}</span>
+                  {t.deployType === 'compose'
+                    ? <span className="dm-deploy-tag compose"><Layers size={10} /> compose</span>
+                    : <span className="dm-deploy-tag run"><Code size={10} /> run</span>}
+                  {t.hasDoc && <FileText size={14} style={{ color: '#94a3b8' }} />}
+                </div>
               </div>
-              <span style={{ color: '#526071', fontSize: 13 }}>{t.description}</span>
+              {t.description && <span style={{ color: '#526071', fontSize: 13 }}>{t.description}</span>}
+              {(t.variables?.length ?? 0) > 0 && (
+                <span style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                  <Code size={10} style={{ verticalAlign: 'middle' }} /> {t.variables.length} 个可配置变量
+                </span>
+              )}
             </button>
           ))}
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 16 }}>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
               <strong style={{ fontSize: 16 }}>{selected.name}</strong>
               <span className="dm-category-tag">{selected.category}</span>
+              {selected.deployType === 'compose'
+                ? <span className="dm-deploy-tag compose"><Layers size={11} /> compose</span>
+                : <span className="dm-deploy-tag run"><Code size={11} /> run</span>}
             </div>
+            {selected.description && <p style={{ color: '#526071', margin: '0 0 10px 0' }}>{selected.description}</p>}
             {selected.docContent && (
-              <div className="dm-md-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(selected.docContent) }} />
+              <div className="dm-md-preview">
+                {splitDocIntoBlocks(selected.docContent).map((blk, bi) => {
+                  if (blk.kind === 'block') {
+                    return <div key={bi} dangerouslySetInnerHTML={{ __html: blk.html }} />;
+                  }
+                  // 行内段落：文本段渲染为段落，变量段渲染为占满一行的统一控件块
+                  const parts: React.ReactNode[] = [];
+                  let textBuf = '';
+                  let keyIdx = 0;
+                  const flushText = () => {
+                    if (textBuf.trim()) {
+                      parts.push(
+                        <p key={`t-${keyIdx++}`} dangerouslySetInnerHTML={{ __html: renderMarkdownInline(textBuf) }} />,
+                      );
+                    }
+                    textBuf = '';
+                  };
+                  blk.segments.forEach((seg) => {
+                    if (seg.type === 'text') {
+                      textBuf += seg.value;
+                    } else {
+                      flushText();
+                      const v = varMap.get(seg.value);
+                      if (!v) {
+                        parts.push(
+                          <code key={`u-${keyIdx++}`} className="dm-md-unknown-var">{`{{${seg.value}}}`}</code>,
+                        );
+                      } else {
+                        parts.push(
+                          <VariableField
+                            key={`v-${keyIdx++}`}
+                            variable={v}
+                            value={overrides[v.name] ?? ''}
+                            onChange={(val) => setOverrides((p) => ({ ...p, [v.name]: val }))}
+                            images={images}
+                            volumes={volumes}
+                            gpus={availableGpus}
+                            serverId={serverId}
+                          />,
+                        );
+                      }
+                    }
+                  });
+                  flushText();
+                  return <div key={bi}>{parts}</div>;
+                })}
+              </div>
+            )}
+            {docUnknownVars.length > 0 && (
+              <Alert type="info">
+                文档中包含未定义的变量占位符：<code>{docUnknownVars.map((n) => `{{${n}}}`).join('、')}</code>，将以原样文本展示，部署时不会替换。
+              </Alert>
             )}
           </div>
-          {Object.keys(overrides).length > 0 && (
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 13, color: '#526071', marginBottom: 8 }}>参数配置</div>
-              <div className="dm-form-grid">
-                {Object.entries(overrides).map(([k, v]) => (
-                  <Field key={k} label={k}>
-                    <input value={v} onChange={(e) => setOverrides((p) => ({ ...p, [k]: e.target.value }))} />
-                  </Field>
+
+          {/* 变量汇总修改区（折叠）：包含所有变量（文档中出现的 + 未在文档中出现的） */}
+          {variables.length > 0 && (
+            <details className="dm-var-summary" open={remainingVars.length > 0}>
+              <summary>
+                <Settings size={13} /> 变量汇总修改（共 {variables.length} 个{remainingVars.length > 0 ? `，含 ${remainingVars.length} 个未在文档中展示` : ''}）
+              </summary>
+              <div className="dm-var-summary-body">
+                {variables.map((v) => (
+                  <VariableField
+                    key={v.name}
+                    variable={v}
+                    value={overrides[v.name] ?? ''}
+                    onChange={(val) => setOverrides((p) => ({ ...p, [v.name]: val }))}
+                    images={images}
+                    volumes={volumes}
+                    gpus={availableGpus}
+                    serverId={serverId}
+                  />
                 ))}
               </div>
-            </div>
+            </details>
           )}
 
-          {/* CUDA 挂载区域 */}
-          {hasCuda ? (
-            <div className="dm-perm-section">
-              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 挂载</div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                <label className="dm-form-check">
-                  <input type="radio" name="tplCudaMode" checked={cudaMode === 'none'} onChange={() => setCudaMode('none')} />
-                  不使用 GPU
-                </label>
-                <label className="dm-form-check">
-                  <input type="radio" name="tplCudaMode" checked={cudaMode === 'all'} onChange={() => { setCudaMode('all'); setSelectedGpuIndices(availableGpus.map(g => g.index)); }} />
-                  使用全部可用 GPU
-                </label>
-                <label className="dm-form-check">
-                  <input type="radio" name="tplCudaMode" checked={cudaMode === 'custom'} onChange={() => setCudaMode('custom')} />
-                  自定义选择
-                </label>
-              </div>
-              {cudaMode === 'custom' && (
-                <div className="dm-roles-checklist">
-                  {availableGpus.map((gpu) => (
-                    <label key={gpu.index} className="dm-form-check">
-                      <input
-                        type="checkbox"
-                        checked={selectedGpuIndices.includes(gpu.index)}
-                        onChange={(e) => {
-                          setSelectedGpuIndices((prev) =>
-                            e.target.checked
-                              ? [...prev, gpu.index].sort((a, b) => a - b)
-                              : prev.filter((i) => i !== gpu.index)
-                          );
-                        }}
-                      />
-                      <span className="dm-cuda-gpu-label">
-                        <strong>GPU {gpu.index}</strong>
-                        <span style={{ color: '#64748b', marginLeft: 4 }}>{gpu.name}</span>
-                        <span style={{ color: '#94a3b8', fontSize: 11, marginLeft: 4 }}>{gpu.memoryTotal}</span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              {cudaMode !== 'none' && (
-                <div style={{ marginTop: 6, fontSize: 12, color: '#64748b' }}>
-                  将使用参数：<code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 3 }}>--gpus {buildGpusArg() || '（未选择）'}</code>
-                </div>
-              )}
-            </div>
-          ) : serverOverview?.cuda?.serverHasCuda && availableGpus.length === 0 ? (
-            <div className="dm-perm-section">
-              <div className="dm-perm-section-title"><Cpu size={13} /> CUDA / GPU 挂载</div>
-              <div style={{ fontSize: 12, color: '#94a3b8' }}>您暂无 GPU 使用权限，请联系管理员分配。</div>
-            </div>
-          ) : null}
+          {/* compose 项目名称 */}
+          {selected.deployType === 'compose' && (
+            <Field label="项目名称（可选）">
+              <input
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="自动生成（默认使用模板名）"
+              />
+            </Field>
+          )}
+
+          {/* 最终命令/配置预览（run 与 compose 均展示） */}
+          {selected.rawContent && (
+            <details className="dm-cmd-preview">
+              <summary>
+                <Code size={12} style={{ verticalAlign: 'middle' }} /> {selected.deployType === 'compose' ? '预览最终 compose 配置' : '预览最终命令'}
+              </summary>
+              <pre className="dm-raw-content-preview" style={{ marginTop: 8 }}>{previewCommand()}</pre>
+            </details>
+          )}
         </div>
       )}
     </Modal>
@@ -1576,8 +2221,9 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
                   </span>
                 </span>
                 {/* 名称 */}
-                <span style={{ fontWeight: 600, minWidth: 0 }}>
+                <span style={{ fontWeight: 600, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
                   <TruncText text={cname(c)} />
+                  {c.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}
                 </span>
                 {/* 端口 */}
                 <span style={{ minWidth: 0 }}>{formatPortTags(c.Ports)}</span>
@@ -1678,7 +2324,9 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
                   <div><span style={{ color: '#94a3b8' }}>短 ID：</span>
                     <span style={{ fontFamily: 'monospace' }}>{detail.shortId}</span></div>
                   <div><span style={{ color: '#94a3b8' }}>镜像：</span>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{detail.image}</span></div>
+                    {detail.platformMeta.canSeeImage
+                      ? <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{detail.image || '—'}</span>
+                      : <span style={{ fontSize: 12, color: '#94a3b8', fontStyle: 'italic' }}>（无镜像查看权限）</span>}</div>
                   <div><span style={{ color: '#94a3b8' }}>状态：</span>
                     <span className={`dm-status ${containerStateClass(detail.status.toLowerCase())}`} style={{ display: 'inline-flex' }}>
                       <span className="dm-status-dot" />{detail.status}
@@ -1828,11 +2476,13 @@ export function ContainersPanel({ servers, me }: { servers: DmServer[]; me: Auth
                             {m.rw ? 'rw' : 'ro'}
                           </span>
                         </div>
-                        {(m.source || m.name) && (
+                        {m.type === 'volume' && !m.canSeeVolume ? (
+                          <div style={{ color: '#94a3b8', marginTop: 3, fontStyle: 'italic', fontSize: 11 }}>（无卷查看权限）</div>
+                        ) : (m.source || m.name) ? (
                           <div style={{ color: '#94a3b8', marginTop: 3, fontFamily: 'monospace', fontSize: 11 }}>
                             {m.name ? `卷: ${m.name}` : `主机: ${m.source}`}
                           </div>
-                        )}
+                        ) : null}
                       </div>
                     ))}
                   </div>

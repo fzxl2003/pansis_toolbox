@@ -138,10 +138,10 @@ export function CopyTruncText({ text, style: extraStyle }: { text: string; style
   );
 }
 
-export function Modal({ title, onClose, children, foot, wide }: { title: string; onClose: () => void; children: ReactNode; foot?: ReactNode; wide?: boolean }) {
+export function Modal({ title, onClose, children, foot, wide, width }: { title: string; onClose: () => void; children: ReactNode; foot?: ReactNode; wide?: boolean; width?: number }) {
   return (
     <div className="dm-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`dm-modal${wide ? ' wide' : ''}`}>
+      <div className={`dm-modal${wide ? ' wide' : ''}`} style={width ? { width } : undefined}>
         <div className="dm-modal-head">
           <h3>{title}</h3>
           <button className="dm-btn-icon" onClick={onClose}><X size={16} /></button>
@@ -153,7 +153,7 @@ export function Modal({ title, onClose, children, foot, wide }: { title: string;
   );
 }
 
-export function Field({ label, children, full, style }: { label: string; children: ReactNode; full?: boolean; style?: CSSProperties }) {
+export function Field({ label, children, full, style }: { label: ReactNode; children: ReactNode; full?: boolean; style?: CSSProperties }) {
   return (
     <div className={`dm-form-field${full ? ' dm-full-col' : ''}`} style={style}>
       <label>{label}</label>

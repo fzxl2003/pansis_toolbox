@@ -228,7 +228,10 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
           </div>
           {volumes.map((v) => (
             <div key={v.name} className="dm-table-row" style={{ gridTemplateColumns: '1.4fr 1fr 1fr 1fr auto' }}>
-              <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><CopyTruncText text={v.name} /></span>
+              <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <CopyTruncText text={v.name} />
+                {v.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}
+              </span>
               <span style={{ color: '#526071' }}>{v.driver}</span>
               <span style={{ color: '#526071' }}>{v.sizeGb != null ? formatSize(v.sizeGb) : '—'}</span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>

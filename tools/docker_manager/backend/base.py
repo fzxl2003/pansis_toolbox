@@ -29,9 +29,9 @@ from backend.app.services.auth_service import User
 TOOL_ID = "docker_manager"
 DF_CACHE_REFRESH_INTERVAL_SECONDS = 10
 
-# 模板 MD 文件存储目录
-TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-TEMPLATES_DIR.mkdir(exist_ok=True)
+# 模板 MD 文件存储目录（放在 storage 数据目录下，不混入代码文件夹）
+TEMPLATES_DIR = get_settings().storage_dir / "data" / "tools" / "docker_manager" / "templates"
+TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ==============================================================
@@ -142,8 +142,26 @@ def init_docker_database() -> None:
                     config_json TEXT NOT NULL DEFAULT '{}',
                     is_public INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    deploy_type TEXT NOT NULL DEFAULT 'run',
+                    raw_content TEXT NOT NULL DEFAULT '',
+                    variables_json TEXT NOT NULL DEFAULT '[]'
                 );
+
+                -- 模板多角色关系表（参照容器资源角色模型）
+                -- 模板不绑定具体服务器，owner 可编辑/删除模板并管理查看者，viewer 可查看并使用模板
+                CREATE TABLE IF NOT EXISTS docker_template_roles (
+                    id TEXT PRIMARY KEY,
+                    template_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,          -- owner | viewer
+                    assigned_at TEXT NOT NULL,
+                    UNIQUE(template_id, user_id, role),
+                    FOREIGN KEY(template_id) REFERENCES docker_templates(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_template_roles_template ON docker_template_roles(template_id);
+                CREATE INDEX IF NOT EXISTS idx_template_roles_user ON docker_template_roles(user_id);
 
                 CREATE TABLE IF NOT EXISTS docker_volumes_meta (
                     id TEXT PRIMARY KEY,
@@ -152,6 +170,7 @@ def init_docker_database() -> None:
                     owner_user_id TEXT NOT NULL,
                     size_gb REAL NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
+                    is_public INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(volume_name, server_id),
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
                 );
@@ -163,6 +182,7 @@ def init_docker_database() -> None:
                     server_id TEXT NOT NULL,
                     owner_user_id TEXT NOT NULL,
                     assigned_at TEXT NOT NULL,
+                    is_public INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(image_ref, server_id),
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
                 );
@@ -174,6 +194,7 @@ def init_docker_database() -> None:
                     server_id TEXT NOT NULL,
                     owner_user_id TEXT NOT NULL,
                     assigned_at TEXT NOT NULL,
+                    is_public INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(container_ref, server_id),
                     FOREIGN KEY(server_id) REFERENCES docker_servers(id)
                 );
@@ -292,6 +313,24 @@ def init_docker_database() -> None:
             df_ctr_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_df_containers)").fetchall()}
             if "ports" not in df_ctr_cols:
                 conn.execute("ALTER TABLE docker_df_containers ADD COLUMN ports TEXT NOT NULL DEFAULT ''")
+            # docker_templates 新列迁移
+            tpl_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_templates)").fetchall()}
+            if "deploy_type" not in tpl_cols:
+                conn.execute("ALTER TABLE docker_templates ADD COLUMN deploy_type TEXT NOT NULL DEFAULT 'run'")
+            if "raw_content" not in tpl_cols:
+                conn.execute("ALTER TABLE docker_templates ADD COLUMN raw_content TEXT NOT NULL DEFAULT ''")
+            if "variables_json" not in tpl_cols:
+                conn.execute("ALTER TABLE docker_templates ADD COLUMN variables_json TEXT NOT NULL DEFAULT '[]'")
+            # is_public 列迁移（卷、镜像、容器元数据表）
+            vol_meta_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_volumes_meta)").fetchall()}
+            if "is_public" not in vol_meta_cols:
+                conn.execute("ALTER TABLE docker_volumes_meta ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
+            img_meta_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_images_meta)").fetchall()}
+            if "is_public" not in img_meta_cols:
+                conn.execute("ALTER TABLE docker_images_meta ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
+            ctr_meta_cols_public = {r[1] for r in conn.execute("PRAGMA table_info(docker_containers_meta)").fetchall()}
+            if "is_public" not in ctr_meta_cols_public:
+                conn.execute("ALTER TABLE docker_containers_meta ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
         _DB_INITIALIZED = True
     _start_df_cache_refresher()
 
@@ -1028,6 +1067,71 @@ def _legacy_owner_matches(
     return row is not None
 
 
+def _is_resource_public(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+    resource_ref: str,
+) -> bool:
+    """判断资源是否被标记为公开（is_public=1）。
+
+    公开资源自动授予所有有权访问服务器的用户查看权限。
+    """
+    refs = _resource_ref_candidates(resource_type, resource_ref)
+    if not refs:
+        return False
+    placeholders, params = _sql_in_clause(refs)
+    if resource_type == "image":
+        row = conn.execute(
+            f"SELECT is_public FROM docker_images_meta WHERE server_id=? AND image_ref IN ({placeholders}) LIMIT 1",
+            [server_id, *params],
+        ).fetchone()
+    elif resource_type == "container":
+        row = conn.execute(
+            f"SELECT is_public FROM docker_containers_meta WHERE server_id=? AND container_ref IN ({placeholders}) LIMIT 1",
+            [server_id, *params],
+        ).fetchone()
+    elif resource_type == "volume":
+        row = conn.execute(
+            f"SELECT is_public FROM docker_volumes_meta WHERE server_id=? AND volume_name IN ({placeholders}) LIMIT 1",
+            [server_id, *params],
+        ).fetchone()
+    else:
+        return False
+    return bool(row and row["is_public"])
+
+
+def _get_public_resource_refs(
+    conn: sqlite3.Connection,
+    server_id: str,
+    resource_type: str,
+) -> set[str]:
+    """批量查询某服务器上某类型所有公开资源的 ref 集合。"""
+    public_refs: set[str] = set()
+    if resource_type == "image":
+        rows = conn.execute(
+            "SELECT image_ref FROM docker_images_meta WHERE server_id=? AND is_public=1",
+            (server_id,),
+        ).fetchall()
+        for r in rows:
+            public_refs.add(r["image_ref"])
+    elif resource_type == "container":
+        rows = conn.execute(
+            "SELECT container_ref FROM docker_containers_meta WHERE server_id=? AND is_public=1",
+            (server_id,),
+        ).fetchall()
+        for r in rows:
+            public_refs.add(r["container_ref"])
+    elif resource_type == "volume":
+        rows = conn.execute(
+            "SELECT volume_name FROM docker_volumes_meta WHERE server_id=? AND is_public=1",
+            (server_id,),
+        ).fetchall()
+        for r in rows:
+            public_refs.add(r["volume_name"])
+    return public_refs
+
+
 def _user_can_access_resource(
     conn: sqlite3.Connection,
     server_id: str,
@@ -1036,6 +1140,9 @@ def _user_can_access_resource(
     user: User,
 ) -> bool:
     if user.role == "admin":
+        return True
+    # 公开资源：所有有权访问服务器的用户自动拥有查看权限
+    if _is_resource_public(conn, server_id, resource_type, resource_ref):
         return True
     refs = _resource_ref_candidates(resource_type, resource_ref)
     return (

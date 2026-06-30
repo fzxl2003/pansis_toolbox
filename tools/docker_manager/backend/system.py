@@ -169,3 +169,72 @@ def get_server_resource_overview(server_id: str, user: User) -> dict[str, Any]:
             "allGpuInfo": server_gpu_info,
         },
     }
+
+
+# ==============================================================
+# 宿主机目录浏览（供 host_path 变量点选）
+# ==============================================================
+
+def browse_host_dirs(server_id: str, path: str, user: User) -> dict[str, Any]:
+    """列出服务器上指定目录的子目录（仅目录，不含文件），供前端路径选择器使用。
+
+    - 受用户 ctr_path_whitelist 限制：只能浏览白名单内的路径。
+      若 path 不在任一白名单前缀下，返回 403。
+      管理员白名单为空表示不受限。
+    - path 为空或 "/" 时，若用户有白名单则返回白名单根目录列表，否则返回根目录。
+    - 返回 { path, dirs: [{ name, path }] }，dirs 为可直接点选的子目录。
+    """
+    init_docker_database()
+    with get_connection() as conn:
+        _require_server_visible(conn, server_id, user)
+        srv_row = _get_server_row(conn, server_id)
+        perms = _get_user_perms(conn, server_id, user)
+
+    # 管理员路径不受限；普通用户受 ctr_path_whitelist 限制
+    whitelist: list[str] = perms.get("ctr_path_whitelist", []) if user.role != "admin" else []
+    # 规范化白名单：去尾 /，空字符串过滤
+    whitelist = [w.rstrip("/") for w in whitelist if w and w.strip()]
+
+    # 确定要浏览的路径
+    target = (path or "").strip() or "/"
+    if not target.startswith("/"):
+        target = "/" + target
+    # 规范化：去除多余的 //
+    target = "/" + "/".join(p for p in target.split("/") if p)
+
+    # 若用户有白名单，校验 target 是否在白名单前缀下
+    if whitelist:
+        in_whitelist = any(target == w or target.startswith(w + "/") for w in whitelist)
+        if not in_whitelist:
+            raise ToolboxError(
+                "PATH_NOT_ALLOWED",
+                f"路径 {target} 不在您可浏览的白名单范围内",
+                status_code=403,
+                tool_id=TOOL_ID,
+            )
+
+    client = _ssh_connect(srv_row)
+    dirs: list[dict[str, Any]] = []
+    try:
+        safe = shlex.quote(target)
+        # 列出目录下的子目录（仅一层），排除隐藏目录和符号链接文件
+        # 使用 find 限制 maxdepth 1 且仅 type d，避免 ls 的权限/格式问题
+        cmd = (
+            f"find {safe} -maxdepth 1 -type d "
+            f"! -name '.*' 2>/dev/null | sort"
+        )
+        out, _, rc = _ssh_exec(client, cmd, timeout=15)
+        if rc == 0:
+            lines = [l.strip() for l in out.splitlines() if l.strip()]
+            # find 结果第一行通常是 target 本身，跳过
+            for line in lines:
+                if line == target:
+                    continue
+                name = line.rsplit("/", 1)[-1] if "/" in line else line
+                if not name:
+                    continue
+                dirs.append({"name": name, "path": line})
+    finally:
+        client.close()
+
+    return {"path": target, "dirs": dirs}

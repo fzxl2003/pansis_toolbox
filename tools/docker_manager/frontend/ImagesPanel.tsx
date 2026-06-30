@@ -141,8 +141,8 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
 
   async function doDelete(imageRef: string, img: DockerImage) {
     if (!serverId) return;
+    // 该镜像被服务器上任意容器使用（含用户无权查看的容器），不允许删除
     if (img.inUse) {
-      // 该镜像被服务器上任意容器使用（含用户无权查看的容器），不允许删除
       return;
     }
     if (!confirm(`确定要删除镜像 ${imageRef} 吗？`)) return;
@@ -278,7 +278,10 @@ export function ImagesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser
               const hasContainers = imageCntrs.length > 0;
               return (
                 <div key={img.id} className="dm-table-row" style={{ gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto' }}>
-                  <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><TruncText text={img.repo} /></span>
+                  <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <TruncText text={img.repo} />
+                    {img.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}
+                  </span>
                   <span><code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{img.tag}</code></span>
                   <span style={{ color: '#526071' }}>{img.size}</span>
                   <span style={{ color: '#94a3b8', fontSize: 12 }}>{img.created}</span>

@@ -98,9 +98,14 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
             raise ToolboxError("PERMISSION_DENIED", "您没有查看镜像的权限", status_code=403, tool_id=TOOL_ID)
         # 获取镜像所有权元数据
         meta_rows = conn.execute(
-            "SELECT image_ref, owner_user_id FROM docker_images_meta WHERE server_id = ?", (server_id,)
+            "SELECT image_ref, owner_user_id, is_public FROM docker_images_meta WHERE server_id = ?", (server_id,)
         ).fetchall()
-        meta_map = {r["image_ref"]: r["owner_user_id"] for r in meta_rows}
+        meta_map = {r["image_ref"]: r for r in meta_rows}
+        # 公开镜像 ref 集合：is_public=1 的镜像对所有服务器可见用户开放查看
+        public_img_refs: set[str] = set()
+        for r in meta_rows:
+            if r["is_public"]:
+                public_img_refs.add(r["image_ref"])
         # 新角色表：查询当前用户拥有查看权限（owner/viewer）的所有镜像 ref。creator/quota_holder 不具备查看权
         user_accessible_refs: set[str] = set()
         for r in conn.execute(
@@ -140,7 +145,10 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
                     [server_id, *accessible_ctrs],
                 ).fetchall():
                     user_accessible_refs.add(r["resource_ref"])
-        view_all = user.role == "admin" or perms.get("img_view_all", False) or perms.get("ctr_view_all", False)
+        # 镜像可见性仅由镜像权限决定（img_view_all / img_manage_all）。
+        # 容器全局权（ctr_view_all / ctr_manage_all）不授予镜像查看权，避免通过容器列表泄露镜像信息。
+        # 注：img_manage_all 隐含查看权；容器的 owner/viewer 角色继承在下方 user_accessible_refs 中处理。
+        view_all = user.role == "admin" or perms.get("img_view_all", False) or perms.get("img_manage_all", False)
         cache_rows = conn.execute(
             "SELECT * FROM docker_df_images WHERE server_id=? ORDER BY repository, tag",
             (server_id,),
@@ -151,7 +159,9 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
         # 查找所有者：优先用 repo:tag 匹配，其次用 image id 匹配
         ref_full = cache["image_ref"]
         ref_candidates = _resource_ref_candidates("image", ref_full) + _resource_ref_candidates("image", cache["image_id"])
-        owner = next((meta_map.get(ref) for ref in ref_candidates if meta_map.get(ref)), None)
+        meta_entry = next((meta_map.get(ref) for ref in ref_candidates if meta_map.get(ref)), None)
+        owner = meta_entry["owner_user_id"] if meta_entry else None
+        is_public = bool(meta_entry["is_public"]) if meta_entry else False
         img = {
             "id": cache["image_id"],
             "repo": cache["repository"],
@@ -163,16 +173,17 @@ def list_images(server_id: str, user: User) -> list[dict[str, Any]]:
             "containers": cache["containers"],
             "ownerUserId": owner,
             "platformManaged": owner is not None or any(ref in user_accessible_refs for ref in ref_candidates),
+            "isPublic": is_public,
         }
         # 当前用户是否可管理该镜像（删除/复制）：全局管理权 或 owner 角色。creator 不拥有管理权
         img["canManage"] = has_img_manage_all or any(ref in user_managed_refs for ref in ref_candidates)
         # 该镜像是否被服务器上任意容器使用（不受权限过滤，用于禁用删除按钮）
         img["inUse"] = int(cache["containers"] or 0) > 0
 
-        # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）
+        # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）或公开资源
         if view_all:
             images.append(img)
-        elif any(ref in user_accessible_refs for ref in ref_candidates) or owner == user.id:
+        elif any(ref in user_accessible_refs for ref in ref_candidates) or owner == user.id or any(ref in public_img_refs for ref in ref_candidates):
             images.append(img)
 
     return images

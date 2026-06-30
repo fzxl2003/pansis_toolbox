@@ -14,6 +14,7 @@ from tools.docker_manager.backend.service import (
     add_server,
     assign_resource_owner,
     assign_resource_roles,
+    assign_template_roles,
     check_servers_status,
     container_action,
     copy_image,
@@ -28,16 +29,20 @@ from tools.docker_manager.backend.service import (
     delete_server,
     delete_template,
     delete_volume,
+    detect_placeholders,
     get_container_detail,
     get_container_logs,
     update_restart_policy,
     get_my_quota,
     get_template,
+    get_template_roles,
     get_user_perms_for_user,
     get_volume_detail,
+    list_all_templates_for_admin,
     list_containers,
     list_images,
     list_my_owned_resources,
+    list_my_templates,
     list_server_permissions,
     list_server_resources,
     list_servers,
@@ -46,8 +51,11 @@ from tools.docker_manager.backend.service import (
     pull_image,
     refresh_docker_df_cache,
     rescan_server_cuda,
+    browse_host_dirs,
     get_server_resource_overview,
+    set_resource_public,
     set_resource_viewers,
+    set_template_viewers,
     set_user_perms,
     update_template,
 )
@@ -153,8 +161,10 @@ class CreateTemplatePayload(BaseModel):
     description: str = ""
     category: str = "general"
     docContent: str = ""
-    config: dict[str, Any] = Field(default_factory=dict)
     isPublic: bool = True
+    deployType: str = "run"  # run | compose
+    rawContent: str = ""
+    variables: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class UpdateTemplatePayload(BaseModel):
@@ -162,14 +172,29 @@ class UpdateTemplatePayload(BaseModel):
     description: str | None = None
     category: str | None = None
     docContent: str | None = None
-    config: dict[str, Any] | None = None
     isPublic: bool | None = None
+    deployType: str | None = None
+    rawContent: str | None = None
+    variables: list[dict[str, Any]] | None = None
 
 
 class CreateFromTemplatePayload(BaseModel):
     templateId: str
     overrides: dict[str, Any] = Field(default_factory=dict)
     gpus: str = ""  # GPU 挂载参数，e.g. "all" or "\"device=0,1\""
+
+
+class DetectPlaceholdersPayload(BaseModel):
+    rawContent: str
+
+
+class AssignTemplateRolesPayload(BaseModel):
+    ownerUserIds: list[str] = Field(default_factory=list)
+    viewerUserIds: list[str] = Field(default_factory=list)
+
+
+class SetTemplateViewersPayload(BaseModel):
+    viewerUserIds: list[str] = Field(default_factory=list)
 
 
 # ==============================================================
@@ -332,6 +357,27 @@ def list_templates_route(request: Request) -> dict:
     return {"templates": list_templates(user)}
 
 
+@router.get("/templates/all-admin")
+def list_all_templates_admin_route(request: Request) -> dict:
+    """管理员查看所有模板（含角色信息）"""
+    user = require_user(request)
+    return {"templates": list_all_templates_for_admin(user)}
+
+
+@router.get("/templates/my")
+def list_my_templates_route(request: Request) -> dict:
+    """列出当前用户作为 owner 的模板"""
+    user = require_user(request)
+    return {"templates": list_my_templates(user)}
+
+
+@router.post("/templates/detect-placeholders")
+def detect_placeholders_route(request: Request, payload: DetectPlaceholdersPayload) -> dict:
+    """从原始内容中自动检测 {{VAR}} 占位符，返回默认变量声明列表"""
+    user = require_user(request)
+    return {"variables": detect_placeholders(payload.rawContent)}
+
+
 @router.post("/templates")
 def create_template_route(request: Request, payload: CreateTemplatePayload) -> dict:
     user = require_user(request)
@@ -356,6 +402,27 @@ def delete_template_route(request: Request, template_id: str) -> dict:
     user = require_user(request)
     delete_template(template_id, user)
     return {"deleted": True}
+
+
+@router.get("/templates/{template_id}/roles")
+def get_template_roles_route(request: Request, template_id: str) -> dict:
+    """获取模板角色信息"""
+    user = require_user(request)
+    return get_template_roles(template_id, user)
+
+
+@router.put("/templates/{template_id}/roles")
+def assign_template_roles_route(request: Request, template_id: str, payload: AssignTemplateRolesPayload) -> dict:
+    """设置模板的多角色（owner/viewer），管理员或模板 owner 可调用"""
+    user = require_user(request)
+    return assign_template_roles(template_id, payload.ownerUserIds, payload.viewerUserIds, user)
+
+
+@router.put("/templates/{template_id}/viewers")
+def set_template_viewers_route(request: Request, template_id: str, payload: SetTemplateViewersPayload) -> dict:
+    """模板 owner 修改查看者列表"""
+    user = require_user(request)
+    return set_template_viewers(template_id, payload.viewerUserIds, user)
 
 
 # ==============================================================
@@ -471,6 +538,28 @@ class SetResourceViewersPayload(BaseModel):
     viewerUserIds: list[str] = Field(default_factory=list)
 
 
+class SetResourcePublicPayload(BaseModel):
+    """设置资源公开状态"""
+    resourceType: str                    # container | image | volume
+    resourceRef: str                     # 资源标识
+    isPublic: bool
+
+
+# Pydantic v2 + `from __future__ import annotations` 会使类型注解变为字符串（前向引用），
+# 需在所有模型定义完成后调用 model_rebuild() 强制解析，否则首次请求验证时会报
+# "TypeAdapter is not fully defined" 错误。
+for _m in (
+    AddServerPayload, SetUserPermsPayload, PullImagePayload, CopyImagePayload,
+    CreateContainerRunPayload, RunRawPayload, CreateContainerComposePayload,
+    ContainerActionPayload, CreateVolumePayload, CopyVolumePayload,
+    CreateTemplatePayload, UpdateTemplatePayload, CreateFromTemplatePayload,
+    DetectPlaceholdersPayload, AssignTemplateRolesPayload, SetTemplateViewersPayload,
+    UpdateRestartPayload, AssignResourceOwnerPayload, AssignResourceRolesPayload,
+    SetResourceViewersPayload, SetResourcePublicPayload,
+):
+    _m.model_rebuild()
+
+
 @router.get("/my-owned-resources")
 def list_my_owned_resources_route(request: Request) -> dict:
     """获取当前用户作为 owner 的所有资源及其 viewer 信息（普通用户专用）"""
@@ -487,6 +576,21 @@ def set_resource_viewers_route(request: Request, server_id: str, payload: SetRes
         payload.resourceType,
         payload.resourceRef,
         payload.viewerUserIds,
+        user,
+    )
+
+
+@router.put("/servers/{server_id}/resource-public")
+def set_resource_public_route(request: Request, server_id: str, payload: SetResourcePublicPayload) -> dict:
+    """设置资源公开状态（管理员、全局管理权限或资源 owner 可调用）
+    公开资源自动授予所有有权访问服务器的用户查看权限。
+    """
+    user = require_user(request)
+    return set_resource_public(
+        server_id,
+        payload.resourceType,
+        payload.resourceRef,
+        payload.isPublic,
         user,
     )
 
@@ -511,3 +615,16 @@ def resource_overview_route(request: Request, server_id: str) -> dict:
     """获取当前用户在服务器上的资源概览（卷配额、路径磁盘、CUDA 权限）"""
     user = require_user(request)
     return get_server_resource_overview(server_id, user)
+
+
+# ==============================================================
+# 宿主机目录浏览路由（供 host_path 变量点选）
+# ==============================================================
+
+@router.get("/servers/{server_id}/browse-dirs")
+def browse_dirs_route(request: Request, server_id: str, path: str = "/") -> dict:
+    """列出服务器上指定目录的子目录（仅目录），受用户路径白名单限制。
+    用于 host_path 类型变量的点选选择器。
+    """
+    user = require_user(request)
+    return browse_host_dirs(server_id, path, user)

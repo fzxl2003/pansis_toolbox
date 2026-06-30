@@ -87,6 +87,7 @@ export type DockerImage = {
   created: string;
   canManage?: boolean;  // 当前用户是否可管理该镜像（删除/复制）
   inUse?: boolean;      // 该镜像是否被服务器上任意容器使用（不受权限过滤，用于禁用删除按钮）
+  isPublic?: boolean;   // 是否公开（公开则所有用户自动拥有查看权限）
 };
 
 export type DockerContainer = {
@@ -99,6 +100,8 @@ export type DockerContainer = {
   CreatedAt?: string;
   ownerUserId?: string | null;    // 容器所有者用户 ID（来自后端平台元数据）
   platformManaged?: boolean;     // 是否由平台管理（有所有权记录或用户有查看角色）
+  isPublic?: boolean;            // 是否公开（公开则所有用户自动拥有查看权限）
+  canManage?: boolean;           // 当前用户是否可管理该容器
 };
 
 // 容器详情类型（来自 docker inspect）
@@ -115,6 +118,7 @@ export type ContainerMount = {
   mode: string;
   rw: boolean;
   name: string;
+  canSeeVolume: boolean;  // 当前用户是否可查看该卷挂载的卷名（容器全局权不授予卷查看权）
 };
 
 export type ContainerNetwork = {
@@ -156,6 +160,9 @@ export type ContainerDetail = {
     ownerUserId: string | null;
     assignedAt: string | null;
     displayPorts: string[] | null;
+    isPublic: boolean;
+    canManage: boolean;
+    canSeeImage: boolean;  // 当前用户是否可查看该容器的镜像名（容器全局权不授予镜像查看权）
   };
 };
 
@@ -168,6 +175,7 @@ export type DockerVolume = {
   createdAt?: string;
   platformManaged: boolean;
   canManage?: boolean;  // 当前用户是否可管理该卷（删除）
+  isPublic?: boolean;   // 是否公开（公开则所有用户自动拥有查看权限）
 };
 
 export type VolumeDetailUser = {
@@ -190,6 +198,8 @@ export type VolumeDetail = {
   sizeGb: number | null;
   createdAt: string | null;
   platformManaged: boolean;
+  isPublic: boolean;
+  canManage: boolean;
   roles: {
     creatorUserId: string | null;
     creator: VolumeDetailUser | null;
@@ -204,6 +214,33 @@ export type VolumeDetail = {
   hiddenContainerCount: number;
 };
 
+// 模板变量类型：支持的输入控件类型
+// - string     : 单行文本（筛选条件为通配符，输入须匹配）
+// - text       : 多行文本（筛选条件为通配符，输入须匹配）
+// - number     : 数字（筛选条件为范围，如 1-100 或 >=0,<=100）
+// - port       : 端口号（1-65535，筛选条件可进一步限定范围）
+// - image      : 镜像选择器（筛选条件为通配符，过滤服务器镜像下拉选项）
+// - volume     : 卷选择器（筛选条件为通配符，过滤服务器卷下拉选项）
+// - gpu        : GPU 选择器（筛选条件为通配符，按 GPU 名称过滤；值为逗号分隔的索引或 all）
+// - host_path  : 宿主路径选择器（筛选条件为通配符前缀，如 /data/*；部署时点选宿主机目录）
+// - docker_path: 容器内路径（纯文本输入；筛选条件为通配符，输入须匹配）
+// - select     : 下拉选择（筛选条件填逗号分隔的允许选项）
+export type TemplateVariableType = 'string' | 'text' | 'number' | 'port' | 'image' | 'volume' | 'gpu' | 'host_path' | 'docker_path' | 'select';
+
+export type TemplateVariable = {
+  name: string;            // 变量名，对应 {{VAR_NAME}} 中的 VAR_NAME
+  type: TemplateVariableType;
+  filter: string;          // 筛选条件：语义随类型变化（通配符 / 数字范围 / 选项列表）
+  description: string;     // 说明文字
+  defaultValue: string;    // 默认值
+};
+
+export type TemplateRoles = {
+  ownerUserIds: string[];
+  viewerUserIds: string[];
+  creatorUserId: string | null;
+};
+
 export type Template = {
   id: string;
   name: string;
@@ -211,13 +248,40 @@ export type Template = {
   category: string;
   creatorId: string;
   hasDoc: boolean;
-  config: Record<string, unknown>;
   isPublic: boolean;
+  deployType: 'run' | 'compose';
+  rawContent: string;             // docker run 命令 或 docker-compose.yml 内容
+  variables: TemplateVariable[];
   createdAt: string;
   updatedAt: string;
+  // 列表接口附带的权限标记
+  canManage?: boolean;            // 当前用户是否可编辑/删除此模板
+  canUse?: boolean;               // 当前用户是否可使用此模板
+  // 角色信息（列表/详情均返回）
+  roles?: TemplateRoles;
+  // 管理员视角下附带的创建者显示名
+  creatorName?: string | null;
 };
 
 export type TemplateDetail = Template & { docContent: string };
+
+// 模板角色详情（含用户显示名），用于角色管理弹窗
+export type TemplateUserInfo = {
+  userId: string;
+  username: string;
+  displayName: string;
+};
+
+export type TemplateRoleDetail = {
+  templateId: string;
+  creatorUserId: string | null;
+  creator: TemplateUserInfo | null;
+  ownerUserIds: string[];
+  owners: TemplateUserInfo[];
+  viewerUserIds: string[];
+  viewers: TemplateUserInfo[];
+  canManage: boolean;
+};
 
 // 资源多角色管理相关类型
 export type ResourceRoles = {
@@ -232,7 +296,7 @@ export type ResourceItem = ResourceRoles;
 
 export type ContainerResource = DockerContainer & ResourceItem;
 export type ImageResource = DockerImage & ResourceItem;
-export type VolumeResource = { name: string } & ResourceItem;
+export type VolumeResource = { name: string; isPublic?: boolean } & ResourceItem;
 
 export type ServerResources = {
   serverId: string;

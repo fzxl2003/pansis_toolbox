@@ -80,13 +80,13 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
             elif r["role"] == "quota_holder":
                 roles_map[key]["quotaHolderUserIds"].append(r["user_id"])
 
-        # 从 _meta 表读取 owner（显示用）
-        img_meta = {r["image_ref"]: r["owner_user_id"] for r in
-                    conn.execute("SELECT image_ref, owner_user_id FROM docker_images_meta WHERE server_id=?", (server_id,)).fetchall()}
-        ctr_meta = {r["container_ref"]: r["owner_user_id"] for r in
-                    conn.execute("SELECT container_ref, owner_user_id FROM docker_containers_meta WHERE server_id=?", (server_id,)).fetchall()}
-        vol_meta = {r["volume_name"]: r["owner_user_id"] for r in
-                    conn.execute("SELECT volume_name, owner_user_id FROM docker_volumes_meta WHERE server_id=?", (server_id,)).fetchall()}
+        # 从 _meta 表读取 owner 和 is_public（显示用）
+        img_meta = {r["image_ref"]: dict(r) for r in
+                    conn.execute("SELECT image_ref, owner_user_id, is_public FROM docker_images_meta WHERE server_id=?", (server_id,)).fetchall()}
+        ctr_meta = {r["container_ref"]: dict(r) for r in
+                    conn.execute("SELECT container_ref, owner_user_id, is_public FROM docker_containers_meta WHERE server_id=?", (server_id,)).fetchall()}
+        vol_meta = {r["volume_name"]: dict(r) for r in
+                    conn.execute("SELECT volume_name, owner_user_id, is_public FROM docker_volumes_meta WHERE server_id=?", (server_id,)).fetchall()}
         ctr_rows = conn.execute("SELECT * FROM docker_df_containers WHERE server_id=? ORDER BY names", (server_id,)).fetchall()
         img_rows = conn.execute("SELECT * FROM docker_df_images WHERE server_id=? ORDER BY repository, tag", (server_id,)).fetchall()
         vol_rows = conn.execute("SELECT * FROM docker_df_volumes WHERE server_id=? ORDER BY volume_name", (server_id,)).fetchall()
@@ -105,7 +105,9 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
         name = row["names"] or row["container_id"][:12]
         id_short = row["container_id"][:12]
         ref = name or id_short
-        legacy_owner = ctr_meta.get(name) or ctr_meta.get(id_short)
+        meta_entry = ctr_meta.get(name) or ctr_meta.get(id_short)
+        legacy_owner = meta_entry["owner_user_id"] if meta_entry else None
+        is_public = bool(meta_entry["is_public"]) if meta_entry else False
         roles = _merge_roles("container", ref, legacy_owner)
         containers.append({
             "ID": id_short,
@@ -118,13 +120,16 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
             "CreatedAt": row["created"],
             "Size": row["size"],
             "LocalVolumes": row["local_volumes"],
+            "isPublic": is_public,
             **roles,
         })
 
     images = []
     for row in img_rows:
         ref_full = row["image_ref"]
-        legacy_owner = img_meta.get(ref_full) or img_meta.get(row["image_id"])
+        meta_entry = img_meta.get(ref_full) or img_meta.get(row["image_id"])
+        legacy_owner = meta_entry["owner_user_id"] if meta_entry else None
+        is_public = bool(meta_entry["is_public"]) if meta_entry else False
         roles = _merge_roles("image", ref_full, legacy_owner)
         images.append({
             "id": row["image_id"],
@@ -135,15 +140,18 @@ def list_server_resources(server_id: str, user: User) -> dict[str, Any]:
             "sharedSize": row["shared_size"],
             "uniqueSize": row["unique_size"],
             "containers": row["containers"],
+            "isPublic": is_public,
             **roles,
         })
 
     volumes = []
     for row in vol_rows:
         name = row["volume_name"]
-        legacy_owner = vol_meta.get(name)
+        meta_entry = vol_meta.get(name)
+        legacy_owner = meta_entry["owner_user_id"] if meta_entry else None
+        is_public = bool(meta_entry["is_public"]) if meta_entry else False
         roles = _merge_roles("volume", name, legacy_owner)
-        volumes.append({"name": name, "size": row["size"], "links": row["links"], **roles})
+        volumes.append({"name": name, "size": row["size"], "links": row["links"], "isPublic": is_public, **roles})
 
     return {"serverId": server_id, "containers": containers, "images": images, "volumes": volumes}
 
@@ -439,6 +447,115 @@ def set_resource_viewers(
         "resourceType": resource_type,
         "resourceRef": resource_ref,
         "viewerUserIds": viewer_user_ids,
+        "updatedAt": now,
+    }
+
+
+_MANAGE_ALL_PERM_KEY: dict[str, str] = {
+    "image": "img_manage_all",
+    "container": "ctr_manage_all",
+    "volume": "vol_manage_all",
+}
+
+
+def set_resource_public(
+    server_id: str,
+    resource_type: str,
+    resource_ref: str,
+    is_public: bool,
+    user: User,
+) -> dict[str, Any]:
+    """设置资源的公开状态（is_public）。
+
+    权限要求（满足任一即可）：
+      - 管理员
+      - 拥有该资源类型的全局管理权（img_manage_all / ctr_manage_all / vol_manage_all）
+      - 该资源的 owner（通过 _user_can_manage_resource 判断）
+
+    若资源尚无 meta 记录，则以调用者作为 owner 创建一条，再更新 is_public。
+    """
+    init_docker_database()
+    if resource_type not in {"container", "image", "volume"}:
+        raise ToolboxError("INVALID_TYPE", "资源类型无效，应为 container/image/volume", status_code=400, tool_id=TOOL_ID)
+
+    now = _now()
+    public_val = 1 if is_public else 0
+
+    with get_connection() as conn:
+        _get_server_row(conn, server_id)
+
+        # 权限校验
+        if user.role != "admin":
+            perms = _get_user_perms(conn, server_id, user)
+            manage_all_key = _MANAGE_ALL_PERM_KEY.get(resource_type, "")
+            has_manage_all = bool(perms.get(manage_all_key))
+            is_owner = _user_can_manage_resource(conn, server_id, resource_type, resource_ref, user)
+            if not has_manage_all and not is_owner:
+                raise ToolboxError(
+                    "PERMISSION_DENIED",
+                    "您没有管理此资源的权限，无法修改公开状态（需要是资源所有者或拥有全局管理权限）",
+                    status_code=403,
+                    tool_id=TOOL_ID,
+                )
+
+        # 确保资源标识规范化（镜像需要 normalize）
+        ref = resource_ref
+        if resource_type == "image":
+            ref = _normalize_image_ref(resource_ref)
+
+        # 确保有 meta 记录：若无则以调用者为 owner 创建
+        if resource_type == "image":
+            existing = conn.execute(
+                "SELECT 1 FROM docker_images_meta WHERE server_id=? AND image_ref=?",
+                (server_id, ref),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO docker_images_meta (id, image_ref, server_id, owner_user_id, assigned_at, is_public) VALUES (?,?,?,?,?,?)",
+                    (_new_id(), ref, server_id, user.id, now, public_val),
+                )
+            else:
+                conn.execute(
+                    "UPDATE docker_images_meta SET is_public=? WHERE server_id=? AND image_ref=?",
+                    (public_val, server_id, ref),
+                )
+        elif resource_type == "container":
+            existing = conn.execute(
+                "SELECT 1 FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
+                (server_id, ref),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO docker_containers_meta (id, container_ref, server_id, owner_user_id, assigned_at, is_public) VALUES (?,?,?,?,?,?)",
+                    (_new_id(), ref, server_id, user.id, now, public_val),
+                )
+            else:
+                conn.execute(
+                    "UPDATE docker_containers_meta SET is_public=? WHERE server_id=? AND container_ref=?",
+                    (public_val, server_id, ref),
+                )
+        elif resource_type == "volume":
+            existing = conn.execute(
+                "SELECT 1 FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
+                (server_id, ref),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO docker_volumes_meta (id, volume_name, server_id, owner_user_id, size_gb, created_at, is_public) VALUES (?,?,?,?,0,?,?)",
+                    (_new_id(), ref, server_id, user.id, now, public_val),
+                )
+            else:
+                conn.execute(
+                    "UPDATE docker_volumes_meta SET is_public=? WHERE server_id=? AND volume_name=?",
+                    (public_val, server_id, ref),
+                )
+
+    return {
+        "success": True,
+        "serverId": server_id,
+        "resourceType": resource_type,
+        "resourceRef": ref,
+        "isPublic": bool(public_val),
         "updatedAt": now,
     }
 

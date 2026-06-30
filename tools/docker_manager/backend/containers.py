@@ -388,6 +388,91 @@ def _compose_has_build(yaml_content: str) -> bool:
     return any(isinstance(config, dict) and bool(config.get("build")) for config in services.values())
 
 
+def _extract_gpus_from_compose(yaml_content: str) -> list[str]:
+    """从 docker-compose YAML 中提取 GPU 使用声明，返回 gpus 参数值列表。
+
+    用于与 docker run 的 --gpus 权限校验保持一致。
+    支持格式：
+      deploy.resources.reservations.devices（driver: nvidia，capabilities 含 gpu）
+        - count: all          → "all"
+        - count: <N>          → "all"（保守视为请求全部权限范围内的 GPU）
+        - device_ids: ['0','1'] → "device=0,1"
+        - 未指定 count/device_ids → "all"
+      环境变量 NVIDIA_VISIBLE_DEVICES=all / 0,1 → "all" / "device=0,1"
+
+    返回 gpus_arg 列表（如 ['all'] 或 ['device=0,1']），供 _validate_gpus_permission 校验。
+    """
+    try:
+        import yaml
+    except ImportError:
+        return []
+    try:
+        data = yaml.safe_load(yaml_content)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    services = data.get("services", {})
+    if not isinstance(services, dict):
+        return []
+    gpus_args: list[str] = []
+    for svc_config in services.values():
+        if not isinstance(svc_config, dict):
+            continue
+        # 1) deploy.resources.reservations.devices（现代 compose GPU 声明）
+        deploy = svc_config.get("deploy", {})
+        if isinstance(deploy, dict):
+            resources = deploy.get("resources", {})
+            if isinstance(resources, dict):
+                reservations = resources.get("reservations", {})
+                if isinstance(reservations, dict):
+                    devices = reservations.get("devices", [])
+                    if isinstance(devices, list):
+                        for dev in devices:
+                            if not isinstance(dev, dict):
+                                continue
+                            if str(dev.get("driver", "")).lower() != "nvidia":
+                                continue
+                            caps = dev.get("capabilities", [])
+                            is_gpu = False
+                            if isinstance(caps, list):
+                                is_gpu = any(str(c).lower() == "gpu" for c in caps)
+                            elif isinstance(caps, str):
+                                is_gpu = "gpu" in caps.lower()
+                            if not is_gpu:
+                                continue
+                            device_ids = dev.get("device_ids")
+                            if isinstance(device_ids, list) and device_ids:
+                                ids = ",".join(str(d).strip() for d in device_ids if str(d).strip())
+                                if ids:
+                                    gpus_args.append(f"device={ids}")
+                                continue
+                            count = dev.get("count")
+                            if count is not None:
+                                # count: all 或具体数字均保守视为请求全部权限范围内的 GPU
+                                gpus_args.append("all")
+                                continue
+                            # 未指定 count/device_ids，默认请求全部
+                            gpus_args.append("all")
+        # 2) NVIDIA_VISIBLE_DEVICES 环境变量（旧式 GPU 声明）
+        env = svc_config.get("environment", {})
+        nvd = ""
+        if isinstance(env, dict):
+            nvd = str(env.get("NVIDIA_VISIBLE_DEVICES", ""))
+        elif isinstance(env, list):
+            for item in env:
+                if isinstance(item, str) and item.startswith("NVIDIA_VISIBLE_DEVICES="):
+                    nvd = item.split("=", 1)[1]
+                    break
+        if nvd:
+            nvd = nvd.strip()
+            if nvd.lower() == "all":
+                gpus_args.append("all")
+            elif nvd:
+                gpus_args.append(f"device={nvd}")
+    return list(dict.fromkeys(gpus_args))
+
+
 def list_containers(server_id: str, user: User, all_containers: bool = True) -> list[dict[str, Any]]:
     """列出服务器上的容器，按所有权/角色过滤"""
     init_docker_database()
@@ -398,9 +483,14 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
             raise ToolboxError("PERMISSION_DENIED", "您没有查看容器的权限", status_code=403, tool_id=TOOL_ID)
         # 获取容器所有权元数据
         meta_rows = conn.execute(
-            "SELECT container_ref, owner_user_id FROM docker_containers_meta WHERE server_id = ?", (server_id,)
+            "SELECT container_ref, owner_user_id, is_public FROM docker_containers_meta WHERE server_id = ?", (server_id,)
         ).fetchall()
-        meta_map: dict[str, str] = {r["container_ref"]: r["owner_user_id"] for r in meta_rows}
+        meta_map: dict[str, dict] = {r["container_ref"]: dict(r) for r in meta_rows}
+        # 公开容器 ref 集合：is_public=1 的容器对所有服务器可见用户开放查看
+        public_ctr_refs: set[str] = set()
+        for r in meta_rows:
+            if r["is_public"]:
+                public_ctr_refs.add(r["container_ref"])
         # 新角色表：查询当前用户拥有查看权限（owner/viewer）的所有容器 ref。creator/quota_holder 不具备查看权
         user_accessible_refs: set[str] = set()
         for r in conn.execute(
@@ -408,6 +498,15 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
             (server_id, user.id),
         ).fetchall():
             user_accessible_refs.add(r["resource_ref"])
+        # 查询当前用户拥有 owner 角色的容器 ref（可管理）。creator 不拥有管理权，仅 owner 可管理
+        user_managed_refs: set[str] = set()
+        for r in conn.execute(
+            "SELECT resource_ref FROM docker_resource_roles WHERE server_id=? AND resource_type='container' AND user_id=? AND role='owner'",
+            (server_id, user.id),
+        ).fetchall():
+            user_managed_refs.add(r["resource_ref"])
+        # 是否有全局容器管理权限
+        has_ctr_manage_all = user.role == "admin" or bool(perms.get("ctr_manage_all"))
         view_all = user.role == "admin" or perms.get("ctr_view_all", False)
         cache_rows = conn.execute(
             "SELECT * FROM docker_df_containers WHERE server_id=? ORDER BY names",
@@ -424,7 +523,9 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
         ctr_name = cache["names"] or cache["container_id"][:12]
         ctr_id_short = cache["container_id"][:12]
         ref = ctr_name or ctr_id_short
-        owner = meta_map.get(ctr_name) or meta_map.get(ctr_id_short)
+        meta_entry = meta_map.get(ctr_name) or meta_map.get(ctr_id_short)
+        owner = meta_entry["owner_user_id"] if meta_entry else None
+        is_public = bool(meta_entry["is_public"]) if meta_entry else False
         ctr = {
             "ID": ctr_id_short,
             "Names": ctr_name,
@@ -437,7 +538,9 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
             "Size": cache["size"],
             "LocalVolumes": cache["local_volumes"],
             "ownerUserId": owner,
-            "platformManaged": owner is not None or ref in user_accessible_refs,
+            "platformManaged": owner is not None or ref in user_accessible_refs or ctr_id_short in user_accessible_refs,
+            "isPublic": is_public,
+            "canManage": has_ctr_manage_all or ref in user_managed_refs or ctr_id_short in user_managed_refs,
         }
 
         if ref and cache["image"]:
@@ -445,7 +548,7 @@ def list_containers(server_id: str, user: User, all_containers: bool = True) -> 
 
         if view_all:
             containers.append(ctr)
-        elif ref in user_accessible_refs or ctr_id_short in user_accessible_refs or owner == user.id:
+        elif ref in user_accessible_refs or ctr_id_short in user_accessible_refs or owner == user.id or ref in public_ctr_refs or ctr_id_short in public_ctr_refs:
             containers.append(ctr)
 
     if cache_updates:
@@ -615,6 +718,217 @@ def _plan_container_volume_usage(
     return list(dict.fromkeys(created_named_volumes))
 
 
+def _get_viewer_only_volume_sources(
+    conn: sqlite3.Connection,
+    server_row: sqlite3.Row,
+    volume_specs: list[str],
+    user: User,
+) -> set[str]:
+    """返回用户仅有查看权（非所有者）的命名卷来源集合。
+
+    这些卷在创建容器时必须以只读模式挂载（:ro）。
+    管理员及拥有 vol_manage_all / vol_view_all 权限的用户不受此限制。
+    """
+    if user.role == "admin":
+        return set()
+    perms = _get_user_perms(conn, server_row["id"], user)
+    if perms.get("vol_manage_all") or perms.get("vol_view_all"):
+        return set()
+    viewer_only: set[str] = set()
+    for spec in volume_specs:
+        kind, source = _volume_source_from_spec(spec)
+        if kind != "named" or not source:
+            continue
+        can_access = _user_can_access_resource(conn, server_row["id"], "volume", source, user)
+        can_manage = _user_can_manage_resource(conn, server_row["id"], "volume", source, user)
+        if can_access and not can_manage:
+            viewer_only.add(source)
+    return viewer_only
+
+
+def _enforce_viewer_only_volumes_readonly(
+    volume_specs: list[str], viewer_only_sources: set[str]
+) -> None:
+    """校验 viewer-only 命名卷是否以只读模式挂载；若未设置只读则抛出异常拒绝创建。
+
+    用于 docker run 的 -v/--volume 风格卷规格列表（如 "myvol:/data:ro"）。
+    与旧版「强制改写为只读」不同，此处仅校验、不修改用户命令，未设置只读时直接拒绝。
+    """
+    if not viewer_only_sources:
+        return
+    for spec in volume_specs:
+        kind, source = _volume_source_from_spec(spec)
+        if kind == "named" and source in viewer_only_sources:
+            if not _is_volume_spec_readonly(spec):
+                raise ToolboxError(
+                    "VOLUME_READONLY_REQUIRED",
+                    f"卷 {source} 您仅有查看权限，必须以只读模式挂载（添加 :ro），当前未设置只读",
+                    status_code=403,
+                    tool_id=TOOL_ID,
+                )
+
+
+def _is_volume_spec_readonly(spec: str) -> bool:
+    """判断 -v 卷挂载规格是否为只读模式。"""
+    raw = spec.strip()
+    parts = raw.split(":")
+    if len(parts) < 3:
+        return False
+    mode = parts[-1]
+    return "ro" in [m.strip() for m in mode.split(",")]
+
+
+def _enforce_mount_option_viewer_only_readonly(
+    mount_str: str, viewer_only_sources: set[str]
+) -> None:
+    """校验 --mount type=volume,... 格式中 viewer-only 卷是否只读；未设只读则拒绝。
+
+    --mount 语法示例: type=volume,source=myvol,target=/data,readonly=true
+    """
+    if not viewer_only_sources:
+        return
+    parts: dict[str, str] = {}
+    for item in mount_str.split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parts[key.strip()] = value.strip()
+    mount_type = parts.get("type", "")
+    source = parts.get("source") or parts.get("src") or ""
+    if mount_type != "volume" or source not in viewer_only_sources:
+        return
+    if parts.get("readonly") != "true":
+        raise ToolboxError(
+            "VOLUME_READONLY_REQUIRED",
+            f"卷 {source} 您仅有查看权限，必须以只读模式挂载（--mount 需添加 readonly=true），当前未设置只读",
+            status_code=403,
+            tool_id=TOOL_ID,
+        )
+
+
+def _enforce_cmd_viewer_only_readonly(cmd: str, viewer_only_sources: set[str]) -> None:
+    """校验 docker run 原始命令中 viewer-only 卷是否均以只读挂载；未设只读则拒绝。
+
+    遍历命令中的 -v / --volume / --mount 参数，对 viewer-only 命名卷检查是否设了 :ro / readonly。
+    与旧版「重写命令强制只读」不同，此处仅校验、不修改命令。
+    """
+    if not viewer_only_sources:
+        return
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        spec: str | None = None
+        if tok in ("-v", "--volume") and i + 1 < len(tokens):
+            spec = tokens[i + 1]
+            i += 2
+        elif tok.startswith("-v") and len(tok) > 2 and not tok.startswith("--"):
+            spec = tok[2:]
+            i += 1
+        elif tok.startswith("--volume="):
+            spec = tok[len("--volume="):]
+            i += 1
+        elif tok in ("--mount",) and i + 1 < len(tokens):
+            _enforce_mount_option_viewer_only_readonly(tokens[i + 1], viewer_only_sources)
+            i += 2
+            continue
+        elif tok.startswith("--mount="):
+            _enforce_mount_option_viewer_only_readonly(tok[len("--mount="):], viewer_only_sources)
+            i += 1
+            continue
+        else:
+            i += 1
+            continue
+        if spec is not None:
+            kind, source = _volume_source_from_spec(spec)
+            if kind == "named" and source in viewer_only_sources:
+                if not _is_volume_spec_readonly(spec):
+                    raise ToolboxError(
+                        "VOLUME_READONLY_REQUIRED",
+                        f"卷 {source} 您仅有查看权限，必须以只读模式挂载（添加 :ro），当前未设置只读",
+                        status_code=403,
+                        tool_id=TOOL_ID,
+                    )
+
+
+def _enforce_compose_viewer_only_readonly(
+    yaml_content: str,
+    viewer_only_sources: set[str],
+    project_name: str = "",
+) -> None:
+    """校验 docker-compose YAML 中 viewer-only 卷是否均以只读挂载；未设只读则拒绝。
+
+    支持字符串格式（source:target[:ro]）和字典格式（type: volume, read_only: true）。
+    """
+    if not viewer_only_sources:
+        return
+    try:
+        import yaml
+    except ImportError:
+        return
+    try:
+        data = yaml.safe_load(yaml_content)
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+
+    top_volumes = data.get("volumes", {})
+    external_volumes: set[str] = set()
+    if isinstance(top_volumes, dict):
+        for name, config in top_volumes.items():
+            if isinstance(config, dict) and config.get("external"):
+                external_volumes.add(str(config.get("name") or name))
+
+    def _resolve_vol_ref(source: str) -> str:
+        if source in external_volumes:
+            return source
+        if project_name and source:
+            return f"{project_name}_{source}"
+        return source
+
+    services = data.get("services", {})
+    if not isinstance(services, dict):
+        return
+    for svc_config in services.values():
+        if not isinstance(svc_config, dict):
+            continue
+        vols = svc_config.get("volumes", [])
+        if not isinstance(vols, list):
+            continue
+        for vol in vols:
+            if isinstance(vol, str):
+                parts = vol.split(":")
+                if len(parts) >= 2:
+                    source = parts[0].strip()
+                    if source and not _is_bind_mount_source(source):
+                        ref = _resolve_vol_ref(source)
+                        if ref in viewer_only_sources or source in viewer_only_sources:
+                            if not _is_volume_spec_readonly(vol):
+                                raise ToolboxError(
+                                    "VOLUME_READONLY_REQUIRED",
+                                    f"卷 {source} 您仅有查看权限，必须以只读模式挂载（添加 :ro），当前未设置只读",
+                                    status_code=403,
+                                    tool_id=TOOL_ID,
+                                )
+            elif isinstance(vol, dict):
+                mount_type = vol.get("type")
+                source = str(vol.get("source") or "")
+                if mount_type == "volume" and source:
+                    ref = _resolve_vol_ref(source)
+                    if ref in viewer_only_sources or source in viewer_only_sources:
+                        if not vol.get("read_only"):
+                            raise ToolboxError(
+                                "VOLUME_READONLY_REQUIRED",
+                                f"卷 {source} 您仅有查看权限，必须以只读模式挂载（设置 read_only: true），当前未设置只读",
+                                status_code=403,
+                                tool_id=TOOL_ID,
+                            )
+
+
 def _record_container_resource_creations(
     server_id: str,
     user: User,
@@ -651,8 +965,14 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
     image_ref = (params.get("image") or "").strip()
     if not image_ref:
         raise ToolboxError("INVALID_IMAGE", "镜像不能为空", status_code=400, tool_id=TOOL_ID)
+    # 从 extra_args 中提取卷挂载规格，与结构化 volumes 合并后统一校验权限
+    # 防止用户通过 extra_args 绕过卷权限/路径白名单校验
+    extra_args_str = params.get("extra_args", "") or ""
+    extra_arg_vol_specs = _extract_volume_specs_from_raw_cmd(f"docker run {extra_args_str}") if extra_args_str.strip() else []
+    all_vol_specs = list(params.get("volumes", [])) + extra_arg_vol_specs
     images_to_record: list[str] = []
     volumes_to_record: list[str] = []
+    viewer_only_vols: set[str] = set()
     with get_connection() as conn:
         if user.role != "admin":
             perms = _get_user_perms(conn, server_id, user)
@@ -661,21 +981,33 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
                 raise ToolboxError(
                     "NO_CREATE_PERMISSION", "您没有在此服务器创建容器的权限", status_code=403, tool_id=TOOL_ID
                 )
-            # 校验挂载路径白名单
-            volumes = params.get("volumes", [])
-            if volumes:
+            # 校验挂载路径白名单（结构化 volumes + extra_args 中的卷）
+            if all_vol_specs:
                 whitelist = perms.get("ctr_path_whitelist", [])
-                _validate_path_whitelist(volumes, whitelist)
+                _validate_path_whitelist(all_vol_specs, whitelist)
             # 校验 GPU 权限
             gpus_arg = params.get("gpus", "") or ""
             if gpus_arg:
                 _validate_gpus_permission(gpus_arg, perms.get("cuda_gpu_indices", []))
+            # 校验 extra_args 中的 --gpus 参数
+            if extra_args_str.strip():
+                extra_gpus = _extract_gpus_from_raw_cmd(f"docker run {extra_args_str}")
+                if extra_gpus:
+                    _validate_gpus_permission(extra_gpus, perms.get("cuda_gpu_indices", []))
         row = _get_server_row(conn, server_id)
         # 容器数量配额校验
         if user.role != "admin":
             _enforce_container_quota(conn, row, user)
         images_to_record = _plan_container_image_usage(conn, row, [image_ref], user)
-        volumes_to_record = _plan_container_volume_usage(conn, row, params.get("volumes", []), user)
+        volumes_to_record = _plan_container_volume_usage(conn, row, all_vol_specs, user)
+        # 计算 viewer-only 卷（仅有查看权、非所有者），须用户自行设置只读
+        viewer_only_vols = _get_viewer_only_volume_sources(conn, row, all_vol_specs, user)
+
+    # 校验 viewer-only 卷是否已设置只读（未设只读则拒绝创建，不再强制改写）
+    if viewer_only_vols:
+        _enforce_viewer_only_volumes_readonly(params.get("volumes", []), viewer_only_vols)
+        if extra_args_str.strip():
+            _enforce_cmd_viewer_only_readonly(f"docker run {extra_args_str}", viewer_only_vols)
 
     # 构建 docker run 命令
     cmd_parts = ["docker", "run", "-d"]
@@ -712,8 +1044,24 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
 
     full_cmd = " ".join(cmd_parts)
 
+    # 显示用合并命令（docker volume create ... && docker run ...）
+    create_cmd_parts = [f"docker volume create {shlex.quote(v)}" for v in volumes_to_record]
+    display_cmd = " && ".join(create_cmd_parts + [full_cmd]) if create_cmd_parts else full_cmd
+
     client = _ssh_connect(row)
     try:
+        # 先显式创建新卷（避免依赖 Docker 自动创建，便于错误处理与配额控制）
+        for vol_name in volumes_to_record:
+            create_cmd = f"docker volume create {shlex.quote(vol_name)}"
+            _, c_stderr, c_code = _ssh_exec(client, create_cmd, timeout=30)
+            if c_code != 0:
+                raise ToolboxError(
+                    "CREATE_VOLUME_FAILED",
+                    f"创建卷 {vol_name} 失败: {c_stderr.strip()}",
+                    status_code=502,
+                    tool_id=TOOL_ID,
+                )
+        # 创建容器
         stdout, stderr, code = _ssh_exec(client, full_cmd, timeout=60)
     finally:
         client.close()
@@ -736,29 +1084,74 @@ def create_container_run(server_id: str, params: dict[str, Any], user: User) -> 
     _record_container_resource_creations(server_id, user, images_to_record, volumes_to_record)
 
     _refresh_docker_df_cache_best_effort(server_id)
-    return {"success": True, "containerId": container_id_full, "command": full_cmd}
+    return {"success": True, "containerId": container_id_full, "command": display_cmd}
+
+
+def _parse_combined_docker_command(cmd: str) -> tuple[list[str], str]:
+    """解析可能包含 docker volume create 前缀的组合命令。
+
+    支持格式：
+      docker run ...                                    → ([], "docker run ...")
+      docker volume create v1 && docker run ...         → (["docker volume create v1"], "docker run ...")
+      docker volume create v1 && docker volume create v2 && docker run ...
+                                                        → (["docker volume create v1", "docker volume create v2"], "docker run ...")
+
+    返回: (volume_create_cmds, run_cmd)
+    """
+    parts = [p.strip() for p in cmd.split("&&") if p.strip()]
+    vol_create_parts: list[str] = []
+    run_part = ""
+    for p in parts:
+        pl = p.lower()
+        if pl.startswith("docker volume create"):
+            vol_create_parts.append(p)
+        elif pl.startswith("docker run"):
+            run_part = p
+        else:
+            # 未知命令段，原样追加到 run_part 后面（保守处理）
+            run_part = (run_part + " " + p).strip() if run_part else p
+    return vol_create_parts, run_part
+
+
+def _extract_vol_names_from_create_cmds(create_cmds: list[str]) -> set[str]:
+    """从 docker volume create 命令列表中提取卷名集合。"""
+    names: set[str] = set()
+    for c in create_cmds:
+        try:
+            tokens = shlex.split(c)
+        except ValueError:
+            continue
+        # docker volume create <name> [--opt ...]
+        if len(tokens) >= 4 and tokens[0] == "docker" and tokens[1] == "volume" and tokens[2] == "create":
+            # 第 4 个 token 若不以 - 开头则为卷名
+            if not tokens[3].startswith("-"):
+                names.add(tokens[3])
+    return names
 
 
 def create_container_run_raw(server_id: str, command: str, user: User) -> dict[str, Any]:
     """
     直接在服务器上执行用户提供的完整 docker run 命令（命令行模式）。
+    支持格式：docker volume create v1 && docker run ...（先创建卷再运行容器）
     安全校验：
-    - 命令必须以 `docker run` 开头（大小写不敏感、允许前缀空格）
+    - 命令必须以 `docker run` 或 `docker volume create` 开头
     - 用户必须拥有创建容器的权限 + 服务器可见性
-    - 校验挂载路径白名单（从命令中解析 -v/--volume）
-    - 校验 GPU 权限（从命令中解析 --gpus）
+    - 校验挂载路径白名单（从 docker run 部分解析 -v/--volume）
+    - 校验 GPU 权限（从 docker run 部分解析 --gpus）
     - 容器数量配额校验
+    - 新卷显式创建（docker volume create），失败则拒绝创建容器
     """
     init_docker_database()
     cmd = command.strip()
-    # 安全性：只允许 docker run 命令
-    if not cmd.lower().startswith("docker run"):
-        raise ToolboxError("INVALID_COMMAND", "命令必须以 'docker run' 开头", status_code=400, tool_id=TOOL_ID)
+    # 解析组合命令：分离 docker volume create 部分和 docker run 部分
+    vol_create_parts, run_part = _parse_combined_docker_command(cmd)
+    if not run_part:
+        raise ToolboxError("INVALID_COMMAND", "命令必须包含 'docker run'", status_code=400, tool_id=TOOL_ID)
 
-    raw_image = _extract_image_from_raw_cmd(cmd)
+    raw_image = _extract_image_from_raw_cmd(run_part)
     if not raw_image:
         raise ToolboxError("INVALID_IMAGE", "无法从 docker run 命令中解析镜像", status_code=400, tool_id=TOOL_ID)
-    raw_volume_specs = _extract_volume_specs_from_raw_cmd(cmd)
+    raw_volume_specs = _extract_volume_specs_from_raw_cmd(run_part)
     images_to_record: list[str] = []
     volumes_to_record: list[str] = []
     with get_connection() as conn:
@@ -769,12 +1162,12 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
                 raise ToolboxError(
                     "NO_CREATE_PERMISSION", "您没有在此服务器创建容器的权限", status_code=403, tool_id=TOOL_ID
                 )
-            # 校验挂载路径白名单（从原始命令中解析）
+            # 校验挂载路径白名单（从 docker run 部分解析）
             whitelist = perms.get("ctr_path_whitelist", [])
             if raw_volume_specs:
                 _validate_path_whitelist(raw_volume_specs, whitelist)
             # 校验 GPU 权限
-            raw_gpus = _extract_gpus_from_raw_cmd(cmd)
+            raw_gpus = _extract_gpus_from_raw_cmd(run_part)
             if raw_gpus:
                 _validate_gpus_permission(raw_gpus, perms.get("cuda_gpu_indices", []))
         row = _get_server_row(conn, server_id)
@@ -783,10 +1176,42 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
             _enforce_container_quota(conn, row, user)
         images_to_record = _plan_container_image_usage(conn, row, [raw_image], user)
         volumes_to_record = _plan_container_volume_usage(conn, row, raw_volume_specs, user)
+        # 计算 viewer-only 卷（仅有查看权、非所有者），须用户自行设置只读
+        viewer_only_vols = _get_viewer_only_volume_sources(conn, row, raw_volume_specs, user)
+
+    # 校验 viewer-only 卷是否已设置只读（未设只读则拒绝创建，不再强制改写命令）
+    if viewer_only_vols:
+        _enforce_cmd_viewer_only_readonly(run_part, viewer_only_vols)
+
+    # 用户命令中已包含的卷创建命令覆盖的卷名
+    user_created_vol_names = _extract_vol_names_from_create_cmds(vol_create_parts)
 
     client = _ssh_connect(row)
     try:
-        stdout, stderr, code = _ssh_exec(client, cmd, timeout=120)
+        # 先执行用户命令中的 docker volume create 部分（保留用户自定义选项如 --driver）
+        for vc in vol_create_parts:
+            _, vc_stderr, vc_code = _ssh_exec(client, vc, timeout=30)
+            if vc_code != 0:
+                raise ToolboxError(
+                    "CREATE_VOLUME_FAILED",
+                    f"创建卷失败: {vc_stderr.strip()}",
+                    status_code=502,
+                    tool_id=TOOL_ID,
+                )
+        # 对于 volumes_to_record 中未被用户命令覆盖的新卷，也显式创建
+        for vol_name in volumes_to_record:
+            if vol_name not in user_created_vol_names:
+                create_cmd = f"docker volume create {shlex.quote(vol_name)}"
+                _, c_stderr, c_code = _ssh_exec(client, create_cmd, timeout=30)
+                if c_code != 0:
+                    raise ToolboxError(
+                        "CREATE_VOLUME_FAILED",
+                        f"创建卷 {vol_name} 失败: {c_stderr.strip()}",
+                        status_code=502,
+                        tool_id=TOOL_ID,
+                    )
+        # 创建容器（仅执行 docker run 部分）
+        stdout, stderr, code = _ssh_exec(client, run_part, timeout=120)
     finally:
         client.close()
 
@@ -799,10 +1224,10 @@ def create_container_run_raw(server_id: str, command: str, user: User) -> dict[s
     # 尝试从命令中解析容器名；docker run -d 输出容器长 ID
     container_id_full = stdout.strip()
     container_id_short = container_id_full[:12]
-    # 从命令中解析 --name 参数
+    # 从 docker run 部分解析 --name 参数
     container_name = ""
     try:
-        tokens = shlex.split(cmd)
+        tokens = shlex.split(run_part)
         for i, tok in enumerate(tokens):
             if tok == "--name" and i + 1 < len(tokens):
                 container_name = tokens[i + 1]
@@ -843,6 +1268,10 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
             whitelist = perms.get("ctr_path_whitelist", [])
             if compose_resources["bindPaths"]:
                 _validate_path_whitelist(compose_resources["bindPaths"], whitelist)
+            # 校验 GPU 权限（从 YAML 中解析 deploy.devices 与 NVIDIA_VISIBLE_DEVICES）
+            compose_gpus_list = _extract_gpus_from_compose(yaml_content)
+            for gpus_arg in compose_gpus_list:
+                _validate_gpus_permission(gpus_arg, perms.get("cuda_gpu_indices", []))
             if _compose_has_build(yaml_content) and not (perms.get("img_use") and perms.get("img_pull")):
                 raise ToolboxError("PERMISSION_DENIED", "Compose build 会创建镜像，您没有使用并拉取/新增镜像的权限", status_code=403, tool_id=TOOL_ID)
         row = _get_server_row(conn, server_id)
@@ -851,6 +1280,12 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
             _enforce_container_quota(conn, row, user)
         images_to_record = _plan_container_image_usage(conn, row, compose_resources["images"], user)
         volumes_to_record = _plan_container_volume_usage(conn, row, compose_resources["volumeSpecs"], user)
+        # 计算 viewer-only 卷（仅有查看权、非所有者），须用户自行设置只读
+        viewer_only_vols = _get_viewer_only_volume_sources(conn, row, compose_resources["volumeSpecs"], user)
+
+    # 校验 viewer-only 卷是否已设置只读（未设只读则拒绝创建，不再强制改写 YAML）
+    if viewer_only_vols:
+        _enforce_compose_viewer_only_readonly(yaml_content, viewer_only_vols, project_name)
 
     tmp_dir = f"/tmp/.docker_manager_{uuid.uuid4().hex[:8]}"
     compose_file = f"{tmp_dir}/docker-compose.yml"
@@ -869,6 +1304,20 @@ def create_container_compose(server_id: str, yaml_content: str, user: User, proj
                 f.write(yaml_content)
         finally:
             sftp.close()
+
+        # 先显式创建新命名卷（避免依赖 compose 自动创建，便于错误处理与配额控制）
+        for vol_name in volumes_to_record:
+            create_cmd = f"docker volume create {shlex.quote(vol_name)}"
+            _, c_stderr, c_code = _ssh_exec(client, create_cmd, timeout=30)
+            if c_code != 0:
+                # 创建卷失败，清理临时目录后拒绝创建容器
+                client.exec_command(f"rm -rf {shlex.quote(tmp_dir)}")
+                raise ToolboxError(
+                    "CREATE_VOLUME_FAILED",
+                    f"创建卷 {vol_name} 失败: {c_stderr.strip()}",
+                    status_code=502,
+                    tool_id=TOOL_ID,
+                )
 
         project_flag = f"-p {shlex.quote(project_name)}" if project_name else ""
         cmd = f"docker compose {project_flag} -f {shlex.quote(compose_file)} up -d"
@@ -1038,7 +1487,7 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
 
         # 查询平台元数据
         meta_row = conn.execute(
-            "SELECT owner_user_id, assigned_at FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
+            "SELECT owner_user_id, assigned_at, is_public FROM docker_containers_meta WHERE server_id=? AND container_ref=?",
             (server_id, container_id),
         ).fetchone()
         # 查询显示端口配置（从 display_ports 列，若存在）
@@ -1053,6 +1502,11 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
                 display_ports_raw = dp_row["display_ports"]
 
         row = _get_server_row(conn, server_id)
+        # 计算当前用户是否可管理此容器（用于前端判断是否可切换公开状态）
+        if user.role == "admin":
+            can_manage = True
+        else:
+            can_manage = bool(perms.get("ctr_manage_all")) or _user_can_manage_resource(conn, server_id, "container", container_id, user)
 
     client = _ssh_connect(row)
     try:
@@ -1105,7 +1559,33 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
             "mode": m.get("Mode", ""),
             "rw": m.get("RW", True),
             "name": m.get("Name", ""),
+            "canSeeVolume": True,
         })
+
+    # 卷可见性：容器全局权（ctr_view_all / ctr_manage_all）不授予卷查看权。
+    # 仅当用户具备卷权限、或对该卷有直接角色、或该卷为公开时，才返回卷名；
+    # 否则遮蔽卷名（name / source 置空），防止仅凭容器全局查看权泄露卷信息。
+    # bind 挂载（主机路径）不属于卷，不受此逻辑影响。
+    if user.role != "admin":
+        with get_connection() as conn:
+            perms = _get_user_perms(conn, server_id, user)
+            has_ctr_global = bool(perms.get("ctr_view_all") or perms.get("ctr_manage_all"))
+            if has_ctr_global:
+                vol_view_all = bool(perms.get("vol_view_all") or perms.get("vol_manage_all"))
+                for m in mounts_list:
+                    if m.get("type") != "volume":
+                        continue
+                    vol_name = m.get("name") or m.get("source") or ""
+                    if not vol_name:
+                        continue
+                    vol_allowed = (
+                        vol_view_all
+                        or _user_can_access_resource(conn, server_id, "volume", vol_name, user)
+                    )
+                    if not vol_allowed:
+                        m["name"] = ""
+                        m["source"] = ""
+                        m["canSeeVolume"] = False
 
     # 网络
     networks: list[dict[str, Any]] = []
@@ -1127,12 +1607,37 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
                 ssh_host_port = hp
                 break
 
+    # 镜像可见性：容器全局权（ctr_view_all / ctr_manage_all）不授予镜像查看权。
+    # 仅当用户具备镜像权限、或对该镜像有直接角色、或对该容器有直接角色/容器为公开时，才返回镜像名；
+    # 否则遮蔽镜像名（置空），防止仅凭容器全局查看权泄露镜像信息。
+    image_name = cfg.get("Image", "")
+    image_id_ref = d.get("Image", "")
+    can_see_image = True
+    if user.role != "admin":
+        with get_connection() as conn:
+            perms = _get_user_perms(conn, server_id, user)
+            has_ctr_global = bool(perms.get("ctr_view_all") or perms.get("ctr_manage_all"))
+            if has_ctr_global:
+                img_allowed = (
+                    bool(perms.get("img_view_all"))
+                    or bool(perms.get("img_manage_all"))
+                    or _user_can_access_resource(conn, server_id, "image", image_name, user)
+                )
+                ctr_refs = _resource_ref_candidates("container", container_id)
+                ctr_direct_or_public = (
+                    _has_resource_role(conn, server_id, "container", ctr_refs, user.id, ("owner", "viewer"))
+                    or _legacy_owner_matches(conn, server_id, "container", ctr_refs, user.id)
+                    or _is_resource_public(conn, server_id, "container", container_id)
+                )
+                if not img_allowed and not ctr_direct_or_public:
+                    can_see_image = False
+
     return {
         "id": d.get("Id", ""),
         "shortId": d.get("Id", "")[:12],
         "name": d.get("Name", "").lstrip("/"),
-        "image": cfg.get("Image", ""),
-        "imageId": d.get("Image", ""),
+        "image": image_name if can_see_image else "",
+        "imageId": image_id_ref if can_see_image else "",
         "status": state.get("Status", ""),
         "running": state.get("Running", False),
         "paused": state.get("Paused", False),
@@ -1159,6 +1664,9 @@ def get_container_detail(server_id: str, container_id: str, user: User) -> dict[
             "ownerUserId": meta_row["owner_user_id"] if meta_row else None,
             "assignedAt": meta_row["assigned_at"] if meta_row else None,
             "displayPorts": json.loads(display_ports_raw) if display_ports_raw else None,
+            "isPublic": bool(meta_row["is_public"]) if meta_row else False,
+            "canManage": can_manage,
+            "canSeeImage": can_see_image,
         },
     }
 

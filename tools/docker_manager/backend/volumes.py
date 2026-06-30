@@ -112,6 +112,11 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
             "SELECT * FROM docker_volumes_meta WHERE server_id = ?", (server_id,)
         ).fetchall()
         meta_map = {r["volume_name"]: dict(r) for r in meta_rows}
+        # 公开卷集合：is_public=1 的卷对所有服务器可见用户开放查看
+        public_vols: set[str] = set()
+        for r in meta_rows:
+            if r["is_public"]:
+                public_vols.add(r["volume_name"])
         # 新角色表：查询当前用户拥有查看权限（owner/viewer）的卷 ref。creator/quota_holder 不具备查看权
         user_accessible_vols: set[str] = set()
         if user.role != "admin":
@@ -172,18 +177,20 @@ def list_volumes(server_id: str, user: User) -> dict[str, Any]:
             vol["sizeGb"] = cache["size_gb"]
             vol["createdAt"] = m["created_at"]
             vol["platformManaged"] = True
+            vol["isPublic"] = bool(m["is_public"])
         else:
             vol["ownerUserId"] = None
             vol["sizeGb"] = cache["size_gb"]
             vol["platformManaged"] = vname in user_accessible_vols
+            vol["isPublic"] = False
 
         # 当前用户是否可管理该卷（删除）：全局管理权 或 owner 角色。creator 不拥有管理权
         vol["canManage"] = has_vol_manage_all or vname in user_managed_vols
 
-        # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）
+        # 访问过滤：view_all 看全部；否则看有查看角色关联的（owner/viewer）或公开资源
         if view_all:
             volumes.append(vol)
-        elif vname in user_accessible_vols or vol.get("ownerUserId") == user.id:
+        elif vname in user_accessible_vols or vol.get("ownerUserId") == user.id or vname in public_vols:
             volumes.append(vol)
 
     return {"volumes": volumes, "quota": quota}
@@ -220,6 +227,11 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
         )
         if not can_view_volume:
             raise ToolboxError("PERMISSION_DENIED", "您没有权限查看此卷详情", status_code=403, tool_id=TOOL_ID)
+        # 当前用户是否可管理此卷（用于前端判断是否可切换公开状态）
+        if user.role == "admin":
+            can_manage_vol = True
+        else:
+            can_manage_vol = bool(perms.get("vol_manage_all")) or _user_can_manage_resource(conn, server_id, "volume", volume_name, user)
         view_all_ctrs = user.role == "admin" or perms.get("ctr_view_all", False)
 
         # 当前用户可访问的容器 ref 集合（仅 owner/viewer 具备查看权）
@@ -291,6 +303,8 @@ def get_volume_detail(server_id: str, volume_name: str, user: User) -> dict[str,
         "sizeGb": meta["size_gb"] if meta else None,
         "createdAt": meta["created_at"] if meta else None,
         "platformManaged": meta is not None or bool(roles.get("ownerUserIds") or roles.get("creatorUserId")),
+        "isPublic": bool(meta["is_public"]) if meta else False,
+        "canManage": can_manage_vol,
         "roles": {
             "creatorUserId": roles.get("creatorUserId"),
             "creator": creator_info,

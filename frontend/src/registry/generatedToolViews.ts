@@ -7,6 +7,7 @@ export const generatedToolViews = {
   "server_monitor": lazy(() => import("../../../tools/server_monitor/frontend/index")),
   "text_cleaner": lazy(() => import("../../../tools/text_cleaner/frontend/index")),
   "url_navigator": lazy(() => import("../../../tools/url_navigator/frontend/index")),
+  "web_proxy": lazy(() => import("../../../tools/web_proxy/frontend/index")),
 } as const;
 
 export type GeneratedToolId = keyof typeof generatedToolViews;

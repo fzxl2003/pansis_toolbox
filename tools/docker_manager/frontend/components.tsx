@@ -6,12 +6,19 @@ import { useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   AlertCircle,
+  Box,
   CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  Database,
+  HardDrive,
+  Image as ImageIcon,
   Loader2,
   Server,
   X,
 } from 'lucide-react';
-import { permColor, permLabel } from './utils';
+import type { ServerResourceOverview } from './types';
 import type { DmServer } from './types';
 
 // ---- 基础组件 ----
@@ -131,10 +138,10 @@ export function CopyTruncText({ text, style: extraStyle }: { text: string; style
   );
 }
 
-export function Modal({ title, onClose, children, foot, wide }: { title: string; onClose: () => void; children: ReactNode; foot?: ReactNode; wide?: boolean }) {
+export function Modal({ title, onClose, children, foot, wide, width }: { title: string; onClose: () => void; children: ReactNode; foot?: ReactNode; wide?: boolean; width?: number }) {
   return (
     <div className="dm-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`dm-modal${wide ? ' wide' : ''}`}>
+      <div className={`dm-modal${wide ? ' wide' : ''}`} style={width ? { width } : undefined}>
         <div className="dm-modal-head">
           <h3>{title}</h3>
           <button className="dm-btn-icon" onClick={onClose}><X size={16} /></button>
@@ -146,7 +153,7 @@ export function Modal({ title, onClose, children, foot, wide }: { title: string;
   );
 }
 
-export function Field({ label, children, full, style }: { label: string; children: ReactNode; full?: boolean; style?: CSSProperties }) {
+export function Field({ label, children, full, style }: { label: ReactNode; children: ReactNode; full?: boolean; style?: CSSProperties }) {
   return (
     <div className={`dm-form-field${full ? ' dm-full-col' : ''}`} style={style}>
       <label>{label}</label>
@@ -164,9 +171,282 @@ export function ServerSelector({ servers, selected, onSelect }: { servers: DmSer
         <button key={s.id} className={`dm-server-chip${selected === s.id ? ' active' : ''}`} onClick={() => onSelect(s.id)}>
           <Server size={13} />
           {s.name}
-          <span className={`dm-perm-badge ${permColor(s.permissionLevel)}`}>{permLabel(s.permissionLevel)}</span>
         </button>
       ))}
+    </div>
+  );
+}
+
+// ---- 资源占用进度条组件 ----
+
+function ProgressBar({ segments }: {
+  segments: Array<{ value: number; max: number; color: string; label: string }>;
+}) {
+  const total = segments[0]?.max || 1;
+  return (
+    <div className="dm-progress-track">
+      {segments.map((seg, i) => {
+        const pct = total > 0 ? Math.min(100, (seg.value / total) * 100) : 0;
+        return (
+          <div
+            key={i}
+            className="dm-progress-fill"
+            style={{ width: `${pct}%`, background: seg.color }}
+            title={`${seg.label}: ${seg.value.toFixed(1)} GB`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function fmtGb(v: number | null | undefined, fallback = '–') {
+  if (v == null) return fallback;
+  return v < 1 ? `${(v * 1024).toFixed(0)} MB` : `${v.toFixed(1)} GB`;
+}
+
+/**
+ * ResourceUsagePanel：在服务器选择下方展示可折叠的资源占用情况
+ * @param overview – 后端 /resource-overview 的返回数据
+ * @param resourceType – 当前 tab 类型：'container' | 'image' | 'volume'
+ * @param loading – 是否正在加载
+ */
+export function ResourceUsagePanel({
+  overview,
+  resourceType,
+  loading = false,
+}: {
+  overview: ServerResourceOverview | null;
+  resourceType: 'container' | 'image' | 'volume';
+  loading?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!overview && !loading) return null;
+
+  const vol = overview?.volume;
+  const img = overview?.image;
+  const ctr = overview?.container;
+  const cuda = overview?.cuda;
+
+  const volQuota = vol?.quotaGb ?? 0;
+  const volUsed = vol?.usedSelfGb ?? 0;
+  const volTotal = vol?.usedTotalGb ?? 0;
+  const volRemaining = vol?.remainingGb ?? null;
+
+  const imgQuota = img?.quotaGb ?? 0;
+  const imgUsed = img?.usedSelfGb ?? 0;
+  const imgTotal = img?.usedTotalGb ?? 0;
+  const imgRemaining = img?.remainingGb ?? null;
+  const imgCountSelf = img?.countSelf ?? 0;
+  const imgCountTotal = img?.countTotal ?? 0;
+
+  const ctrQuota = ctr?.quotaNum ?? 0;
+  const ctrUsed = ctr?.usedSelf ?? 0;
+  const ctrTotal = ctr?.usedTotal ?? 0;
+  const ctrRemaining = ctr?.remaining ?? null;
+
+  const gpuTotal = cuda?.totalGpuCount ?? 0;
+  const gpuAllowed = cuda?.allowedGpuIndices?.length ?? 0;
+
+  return (
+    <div className="dm-resource-usage-panel">
+      <button
+        className="dm-resource-usage-toggle"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        <span>资源占用概览</span>
+        {loading && <Loader2 size={12} className="spin" style={{ marginLeft: 4 }} />}
+        {!loading && overview && (
+          <span className="dm-resource-usage-summary">
+            {resourceType === 'container' && ctrQuota > 0 && (
+              <span className={`dm-usage-chip${ctrRemaining !== null && ctrRemaining <= 0 ? ' warn' : ''}`}>
+                <Box size={11} /> {ctrUsed}/{ctrQuota} 个
+              </span>
+            )}
+            {resourceType === 'container' && cuda?.serverHasCuda && (
+              <span className="dm-usage-chip gpu">
+                <Cpu size={11} /> GPU {gpuAllowed}/{gpuTotal}
+              </span>
+            )}
+            {resourceType === 'image' && (
+              <span className={`dm-usage-chip${imgQuota > 0 && imgRemaining !== null && imgRemaining < imgQuota * 0.2 ? ' warn' : ''}`}>
+                <ImageIcon size={11} /> {imgCountSelf} 个 / {fmtGb(imgUsed)}{imgQuota > 0 ? `/${fmtGb(imgQuota)}` : ''}
+              </span>
+            )}
+            {volQuota > 0 && (
+              <span className={`dm-usage-chip${volRemaining !== null && volRemaining < volQuota * 0.2 ? ' warn' : ''}`}>
+                <HardDrive size={11} /> {fmtGb(volUsed)}/{fmtGb(volQuota)}
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+
+      {expanded && (
+        <div className="dm-resource-usage-body">
+          {loading ? (
+            <div style={{ padding: '12px 0', color: '#94a3b8', fontSize: 12 }}>
+              <Loader2 size={14} className="spin" style={{ marginRight: 6 }} />正在加载资源概览…
+            </div>
+          ) : overview ? (
+            <div className="dm-resource-usage-content">
+              {/* 容器配额区域（容器 Tab 且有配额时显示） */}
+              {resourceType === 'container' && ctrQuota > 0 && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title">
+                    <Box size={13} />
+                    容器配额
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>我的容器</span>
+                    <span>{ctrUsed} 个</span>
+                  </div>
+                  <div className="dm-usage-row muted">
+                    <span>全服务器</span>
+                    <span>{ctrTotal} 个</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>配额上限</span>
+                    <span className="dm-usage-quota">{ctrQuota} 个</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>剩余</span>
+                    <span style={{ color: (ctrRemaining ?? 0) <= 0 ? '#ef4444' : '#22c55e' }}>{ctrRemaining}</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <ProgressBar segments={[
+                      { value: ctrUsed, max: ctrQuota, color: '#0ea5e9', label: '我的容器' },
+                    ]} />
+                    <div className="dm-progress-legend">
+                      <span><span className="dm-legend-dot" style={{ background: '#0ea5e9' }} />已用</span>
+                      <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {ctrRemaining}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 镜像配额区域（镜像 Tab 或有镜像配额时显示） */}
+              {resourceType === 'image' && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title">
+                    <ImageIcon size={13} />
+                    镜像配额
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>我的镜像</span>
+                    <span>{imgCountSelf} 个 / {fmtGb(imgUsed)}</span>
+                  </div>
+                  <div className="dm-usage-row muted">
+                    <span>全服务器</span>
+                    <span>{imgCountTotal} 个 / {fmtGb(imgTotal)}</span>
+                  </div>
+                  {imgQuota > 0 && (
+                    <>
+                      <div className="dm-usage-row">
+                        <span>配额上限</span>
+                        <span className="dm-usage-quota">{fmtGb(imgQuota)}</span>
+                      </div>
+                      <div className="dm-usage-row">
+                        <span>剩余</span>
+                        <span style={{ color: (imgRemaining ?? 0) < imgQuota * 0.2 ? '#ef4444' : '#22c55e' }}>{fmtGb(imgRemaining)}</span>
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <ProgressBar segments={[
+                          { value: imgUsed, max: imgQuota, color: '#7c3aed', label: '我的镜像' },
+                        ]} />
+                        <div className="dm-progress-legend">
+                          <span><span className="dm-legend-dot" style={{ background: '#7c3aed' }} />已用</span>
+                          <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {fmtGb(imgRemaining)}</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* 卷配额区域 */}
+              {volQuota > 0 && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title">
+                    <Database size={13} />
+                    卷配额
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>我的占用</span>
+                    <span>{fmtGb(volUsed)}</span>
+                  </div>
+                  <div className="dm-usage-row muted">
+                    <span>总占用</span>
+                    <span>{fmtGb(volTotal)}</span>
+                  </div>
+                  <div className="dm-usage-row">
+                    <span>配额上限</span>
+                    <span className="dm-usage-quota">{fmtGb(volQuota)}</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <ProgressBar segments={[
+                      { value: volUsed, max: volQuota, color: '#6366f1', label: '我的占用' },
+                    ]} />
+                    <div className="dm-progress-legend">
+                      <span><span className="dm-legend-dot" style={{ background: '#6366f1' }} />已用</span>
+                      <span><span className="dm-legend-dot" style={{ background: '#e2e8f0' }} />剩余 {fmtGb(volRemaining)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* GPU 区域（仅容器 Tab） */}
+              {resourceType === 'container' && cuda?.serverHasCuda && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title"><Cpu size={13} /> 可用 GPU</div>
+                  <div className="dm-usage-row">
+                    <span>有权使用</span>
+                    <span>{gpuAllowed} / {gpuTotal} 张</span>
+                  </div>
+                  {cuda.availableGpus.length > 0 && (
+                    <div className="dm-gpu-chips">
+                      {cuda.availableGpus.map((g) => (
+                        <span key={g.index} className="dm-gpu-chip" title={g.name}>
+                          #{g.index} {g.name?.replace(/NVIDIA/i, '').trim()}
+                          {g.memoryTotal ? ` (${g.memoryTotal})` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 8 }}>
+                    <ProgressBar segments={[
+                      { value: gpuAllowed, max: Math.max(gpuTotal, 1), color: '#10b981', label: '可用 GPU' },
+                    ]} />
+                  </div>
+                </div>
+              )}
+
+              {/* 挂载路径磁盘空间 */}
+              {overview.paths.length > 0 && (
+                <div className="dm-usage-section">
+                  <div className="dm-usage-section-title"><HardDrive size={13} /> 路径磁盘空间</div>
+                  {overview.paths.map((p) => (
+                    <div key={p.path} className="dm-path-row">
+                      <div className="dm-path-label" title={p.path}>{p.path}</div>
+                      <div className="dm-usage-row muted">
+                        <span>已用 / 总量</span>
+                        <span>{fmtGb(p.usedGb)} / {fmtGb(p.totalGb)}</span>
+                      </div>
+                      {p.totalGb && p.usedGb != null && (
+                        <ProgressBar segments={[
+                          { value: p.usedGb, max: p.totalGb, color: '#3b82f6', label: '已用' },
+                        ]} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

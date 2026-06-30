@@ -17,6 +17,7 @@ storage/temp/*
 storage/user_data/
 storage/data/platform.db
 storage/data/widget_layout.json
+storage/data/tools/
 !storage/uploads/.gitkeep
 !storage/outputs/.gitkeep
 !storage/temp/.gitkeep

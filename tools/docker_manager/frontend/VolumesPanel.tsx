@@ -6,19 +6,19 @@ import { useCallback, useEffect, useState } from 'react';
 import { Box, Copy, HardDrive, Info, Plus, RefreshCw, Shield, Trash2 } from 'lucide-react';
 import { apiDelete, apiGet, apiPost } from '../../../frontend/src/api/client';
 import type { AuthUser } from '../../../frontend/src/api/auth';
-import { Alert, CopyTruncText, Field, Modal, ServerSelector, Spin } from './components';
+import { Alert, CopyTruncText, Field, Modal, ResourceUsagePanel, ServerSelector, Spin } from './components';
 import { API, formatSize, useErrorMsg } from './utils';
-import type { DmServer, DockerVolume, VolumeDetail } from './types';
+import type { DmServer, DockerVolume, ServerResourceOverview, VolumeDetail } from './types';
 
 export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUser }) {
   const [serverId, setServerId] = useState<string | null>(servers[0]?.id ?? null);
   const [volumes, setVolumes] = useState<DockerVolume[]>([]);
   const [quota, setQuota] = useState<{ volumeTotalGb: number | null; volumeUsedGb: number | null }>({ volumeTotalGb: null, volumeUsedGb: null });
   const [loading, setLoading] = useState(false);
+  const [serverOverview, setServerOverview] = useState<ServerResourceOverview | null>(null);
   const [error, setError, clearError] = useErrorMsg();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
-  const [newSizeGb, setNewSizeGb] = useState('0');
   const [creating, setCreating] = useState(false);
   // 卷复制状态
   const [copyTarget, setCopyTarget] = useState<DockerVolume | null>(null);
@@ -32,13 +32,44 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
+  // ── 权限辅助函数（对齐 ImagesPanel 模式） ──
+  const canUse = (sid: string | null) => {
+    if (!sid) return false;
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || !!s?.perms?.vol_use || !!s?.perms?.vol_view_all;
+  };
+
+  const canCreate = (sid: string | null) => {
+    if (!sid) return false;
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || !!s?.perms?.vol_create;
+  };
+
+  // 跨服务器复制卷权限：vol_copy 是专用权限（对齐 img_copy）
+  const canCopy = (sid: string | null) => {
+    if (!sid) return false;
+    const s = servers.find((x) => x.id === sid);
+    return me.role === 'admin' || !!s?.perms?.vol_copy;
+  };
+
+  // 卷配额是否已用满（remainingGb=null 表示不限，此时不会耗尽）
+  const volQuotaExhausted =
+    serverOverview?.volume?.remainingGb != null && serverOverview.volume.remainingGb <= 0;
+
+  // 可作为跨服务器复制目标的服务器（排除源服务器，且用户在目标服务器也拥有 vol_copy 权限）
+  const copyableDstCount = servers.filter((s) => s.id !== serverId && canCopy(s.id)).length;
+
   const load = useCallback(async (sid: string) => {
     setLoading(true);
     clearError();
     try {
-      const r = await apiGet<{ volumes: DockerVolume[]; quota: { volumeTotalGb: number | null; volumeUsedGb: number | null } }>(`${API}/servers/${sid}/volumes`);
+      const [r, ovr] = await Promise.all([
+        apiGet<{ volumes: DockerVolume[]; quota: { volumeTotalGb: number | null; volumeUsedGb: number | null } }>(`${API}/servers/${sid}/volumes`),
+        apiGet<ServerResourceOverview>(`${API}/servers/${sid}/resource-overview`).catch(() => null),
+      ]);
       setVolumes(r.volumes);
       setQuota(r.quota);
+      setServerOverview(ovr);
     } catch (e) {
       setError(e);
     } finally {
@@ -53,15 +84,28 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
     setCreating(true);
     clearError();
     try {
-      await apiPost(`${API}/servers/${serverId}/volumes`, { name: newName.trim(), sizeGb: parseFloat(newSizeGb) || 0 });
+      await apiPost(`${API}/servers/${serverId}/volumes`, { name: newName.trim() });
       setShowCreate(false);
       setNewName('');
-      setNewSizeGb('0');
       void load(serverId);
     } catch (e) {
       setError(e);
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function doRefresh() {
+    if (!serverId) return;
+    setLoading(true);
+    clearError();
+    try {
+      await apiPost(`${API}/servers/${serverId}/df-cache/refresh`, {});
+      await load(serverId);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -136,7 +180,10 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setVolumes([]); }} />
+      <ServerSelector servers={servers} selected={serverId} onSelect={(id) => { setServerId(id); setVolumes([]); setServerOverview(null); }} />
+      {serverId && (
+        <ResourceUsagePanel overview={serverOverview} resourceType="volume" loading={loading && !serverOverview} />
+      )}
       {error && <Alert type="error">{error}</Alert>}
 
       {quota.volumeTotalGb != null && quota.volumeTotalGb > 0 && (
@@ -152,10 +199,23 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn btn-primary" onClick={() => setShowCreate(true)}><Plus size={14} /> 创建卷</button>
-        <button className="btn" onClick={() => serverId && load(serverId)} disabled={loading}><RefreshCw size={14} /> 刷新</button>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        {canCreate(serverId) && (
+          <button className="btn btn-primary" onClick={() => setShowCreate(true)} disabled={volQuotaExhausted}
+            title={volQuotaExhausted ? '卷空间配额已满，无法创建新卷' : undefined}>
+            <Plus size={14} /> 创建卷
+          </button>
+        )}
+        <button className="btn" onClick={doRefresh} disabled={loading}><RefreshCw size={14} /> 刷新</button>
       </div>
+
+      {/* 卷配额超限提醒 */}
+      {serverId && volQuotaExhausted && (
+        <Alert type="error">
+          卷空间配额已用满（已用 {quota.volumeUsedGb != null ? formatSize(quota.volumeUsedGb) : '—'} / {quota.volumeTotalGb} GB），
+          无法创建新卷，也无法作为跨服务器复制的目标服务器。请删除不再使用的卷或联系管理员调整配额。
+        </Alert>
+      )}
 
       {loading ? (
         <div className="dm-empty"><Spin /> 加载中…</div>
@@ -168,24 +228,33 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
           </div>
           {volumes.map((v) => (
             <div key={v.name} className="dm-table-row" style={{ gridTemplateColumns: '1.4fr 1fr 1fr 1fr auto' }}>
-              <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0 }}><CopyTruncText text={v.name} /></span>
+              <span style={{ fontFamily: 'monospace', fontSize: 13, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <CopyTruncText text={v.name} />
+                {v.isPublic && <span style={{ fontSize: 10, color: '#059669', border: '1px solid #a7f3d0', background: '#ecfdf5', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>公开</span>}
+              </span>
               <span style={{ color: '#526071' }}>{v.driver}</span>
               <span style={{ color: '#526071' }}>{v.sizeGb != null ? formatSize(v.sizeGb) : '—'}</span>
               <span style={{ color: '#94a3b8', fontSize: 12 }}>
                 {v.platformManaged ? (v.ownerUserId === me.id ? '本人' : (v.ownerUserId ?? '未知')) : '平台外'}
               </span>
-              <span style={{ display: 'flex', gap: 4 }}>
+              <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                 <button className="dm-btn-icon" title="卷详情" onClick={() => void openDetail(v)}>
                   <Info size={13} />
                 </button>
-                <button className="dm-btn-icon" title="复制卷（本地 / 跨服务器）" onClick={() => openCopy(v)}>
-                  <Copy size={13} />
-                </button>
-                {(v.ownerUserId === me.id || me.role === 'admin') && (
+                {canCopy(serverId) && (
+                  <button className="dm-btn-icon" title="复制卷（本地 / 跨服务器）" onClick={() => openCopy(v)}>
+                    <Copy size={13} />
+                  </button>
+                )}
+                {v.canManage ? (
                   <button className="dm-btn-icon danger" title="删除" onClick={() => doDelete(v.name)}>
                     <Trash2 size={13} />
                   </button>
-                )}
+                ) : me.role === 'admin' ? (
+                  <button className="dm-btn-icon danger" title="删除" onClick={() => doDelete(v.name)}>
+                    <Trash2 size={13} />
+                  </button>
+                ) : null}
               </span>
             </div>
           ))}
@@ -206,12 +275,10 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
           {error && <Alert type="error">{error}</Alert>}
           <div className="dm-form-grid">
             <Field label="卷名称"><input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="my-data-volume" /></Field>
-            <Field label="预估大小 (GB)">
-              <input type="number" min="0" step="0.5" value={newSizeGb} onChange={(e) => setNewSizeGb(e.target.value)} />
-            </Field>
           </div>
-          {quota.volumeTotalGb != null && quota.volumeTotalGb > 0 && (
-            <Alert type="info">剩余配额：{formatSize((quota.volumeTotalGb ?? 0) - (quota.volumeUsedGb ?? 0))}</Alert>
+          <Alert type="info">卷创建后大小为 0，实际磁盘占用将在列表加载时通过 <code>du</code> 命令自动测量。</Alert>
+          {volQuotaExhausted && (
+            <Alert type="error">卷空间配额已用满，无法创建新卷</Alert>
           )}
         </Modal>
       )}
@@ -374,7 +441,7 @@ export function VolumesPanel({ servers, me }: { servers: DmServer[]; me: AuthUse
                 </Field>
                 <Field label="目标服务器">
                   <select value={copyDstServerId} onChange={(e) => setCopyDstServerId(e.target.value)}>
-                    {servers.map((s) => (
+                    {servers.filter(s => canCopy(s.id)).map((s) => (
                       <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
                     ))}
                   </select>

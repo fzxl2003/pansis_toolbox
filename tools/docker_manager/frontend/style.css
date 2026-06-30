@@ -142,6 +142,13 @@
   gap: 4px;
 }
 
+.dm-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
 .dm-card-actions {
   display: flex;
   gap: 6px;
@@ -218,6 +225,59 @@
 .dm-status.created .dm-status-dot  { background: #0ea5e9; }
 .dm-status.unknown  { background: #f1f5f9; color: #475569; }
 .dm-status.unknown .dm-status-dot  { background: #94a3b8; }
+
+/* ── Server Status Badges（服务器连接状态）── */
+
+.dm-status-badge {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+font-size: 11px;
+font-weight: 600;
+padding: 2px 8px;
+border-radius: 999px;
+white-space: nowrap;
+}
+
+.dm-status-badge .dm-status-dot {
+width: 6px;
+height: 6px;
+border-radius: 50%;
+}
+
+.dm-status-badge.online {
+background: #d1fae5;
+color: #065f46;
+}
+
+.dm-status-badge.online .dm-status-dot {
+background: #10b981;
+animation: dm-pulse 2s ease-in-out infinite;
+}
+
+.dm-status-badge.offline {
+background: #fee2e2;
+color: #991b1b;
+}
+
+.dm-status-badge.offline .dm-status-dot {
+background: #ef4444;
+}
+
+.dm-status-badge.checking {
+background: #f1f5f9;
+color: #475569;
+}
+
+.dm-status-badge.checking .dm-status-dot {
+background: #94a3b8;
+animation: dm-pulse 1s ease-in-out infinite;
+}
+
+@keyframes dm-pulse {
+0%, 100% { opacity: 1; }
+50% { opacity: 0.4; }
+}
 
 /* ── Modal ── */
 
@@ -487,6 +547,170 @@
   font-weight: 700;
 }
 
+/* ── 模板变量字段（说明文档内联 + 变量汇总区统一样式） ── */
+
+.dm-var-field {
+  margin: 12px 0;
+}
+
+.dm-var-field-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.dm-var-badge {
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dm-var-desc {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* 变量字段内输入控件统一外观，与 dm-form-field 保持一致 */
+.dm-var-field input,
+.dm-var-field select,
+.dm-var-field textarea {
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 1px solid #d0d9e4;
+  border-radius: 7px;
+  background: #f8fafc;
+  font-size: 14px;
+  color: #17202a;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+
+.dm-var-field input:focus,
+.dm-var-field select:focus,
+.dm-var-field textarea:focus {
+  outline: none;
+  border-color: #0f766e;
+  background: #ffffff;
+}
+
+.dm-var-field textarea {
+  min-height: 80px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.dm-var-field textarea.mono {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.dm-var-field input[type="checkbox"] {
+  width: 16px;
+  min-height: auto;
+  height: 16px;
+}
+
+.dm-md-unknown-var {
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.9em;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+/* ── 变量汇总修改区（折叠） ── */
+
+.dm-var-summary {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.dm-var-summary > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #526071;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+  list-style: none;
+}
+
+.dm-var-summary > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dm-var-summary > summary::before {
+  content: '▸';
+  font-size: 11px;
+  color: #94a3b8;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+
+.dm-var-summary[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.dm-var-summary > summary:hover {
+  background: #f8fafc;
+}
+
+.dm-var-summary-body {
+  padding: 4px 16px 16px;
+  display: grid;
+  gap: 14px;
+}
+
+/* ── 最终命令/配置预览（折叠） ── */
+
+.dm-cmd-preview {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #fff;
+}
+
+.dm-cmd-preview > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #526071;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+  list-style: none;
+}
+
+.dm-cmd-preview > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dm-cmd-preview > summary::before {
+  content: '▸';
+  font-size: 11px;
+  color: #94a3b8;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+
+.dm-cmd-preview[open] > summary::before {
+  transform: rotate(90deg);
+}
+
 /* ── Perm Table ── */
 
 .dm-perm-table {
@@ -533,7 +757,82 @@
 .dm-perm-checks {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 12px;
+  align-items: start;
+}
+
+.dm-muted-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+/* ── Capsule Switch（胶囊开关）── */
+
+.dm-capsule-switch {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dm-capsule-switch.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dm-capsule-switch-label {
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+.dm-capsule-switch-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.dm-capsule-switch-track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.dm-capsule-switch-track.on {
+  background: #2563eb;
+}
+
+.dm-capsule-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: transform 0.2s;
+}
+
+.dm-capsule-switch-track.on .dm-capsule-switch-knob {
+transform: translateX(18px);
 }
 
 /* ── Template Category Tag ── */
@@ -574,6 +873,11 @@
   background: #fef2f2;
   border-color: #ef4444;
   color: #ef4444;
+}
+
+.dm-btn-icon.active {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
 }
 
 /* ── Loading / Empty State ── */
@@ -793,6 +1097,12 @@
   border-top-color: #1e293b;
   z-index: 9999;
   pointer-events: none;
+}
+
+/* ── PermCheck Tooltip（权限说明气泡）── */
+
+.dm-tooltip-trigger:hover .dm-tooltip-content {
+  display: block !important;
 }
 
 /* ── CopyTruncText（省略号 + 悬停气泡 + 点击复制）── */
@@ -1115,4 +1425,601 @@
 /* dm-btn-icon 已在上方定义，此处为列表行删除按钮额外 flex-shrink */
 .dm-run-list-row .dm-btn-icon {
   flex-shrink: 0;
+}
+
+/* ── Sub Tabs（面板内二级 Tab）── */
+
+.dm-sub-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: 4px;
+}
+
+.dm-sub-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  margin-bottom: -1px;
+}
+
+.dm-sub-tab:hover {
+  color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-sub-tab.active {
+  color: #0f766e;
+  border-bottom-color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-sub-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: #7c3aed;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ============================================================
+   Resource Usage Panel — 资源占用面板
+   ============================================================ */
+
+.dm-resource-usage-panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.dm-resource-usage-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: #f1f5f9;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  text-align: left;
+  transition: background 0.15s;
+}
+.dm-resource-usage-toggle:hover {
+  background: #e2e8f0;
+}
+
+.dm-resource-usage-summary {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  align-items: center;
+}
+
+.dm-usage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.dm-usage-chip.gpu {
+  background: #d1fae5;
+  color: #065f46;
+}
+.dm-usage-chip.warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.dm-resource-usage-body {
+  padding: 12px 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.dm-resource-usage-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dm-usage-section {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.dm-usage-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.dm-usage-mode-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #ede9fe;
+  color: #6d28d9;
+  margin-left: 4px;
+}
+
+.dm-usage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: #374151;
+  padding: 2px 0;
+}
+.dm-usage-row.muted {
+  color: #94a3b8;
+}
+.dm-usage-row.accent {
+  color: #d97706;
+  font-weight: 600;
+}
+.dm-usage-quota {
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+/* 进度条 */
+.dm-progress-track {
+  width: 100%;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+}
+.dm-progress-fill {
+  height: 100%;
+  transition: width 0.4s ease;
+  border-radius: 0;
+}
+
+.dm-progress-legend {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #64748b;
+  flex-wrap: wrap;
+}
+.dm-legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+
+/* GPU Chips */
+.dm-gpu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.dm-gpu-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #d1fae5;
+  color: #065f46;
+  font-size: 11px;
+  font-weight: 600;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 路径行 */
+.dm-path-row {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.dm-path-row:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+.dm-path-label {
+  font-size: 11px;
+  color: #6366f1;
+  font-family: monospace;
+  font-weight: 600;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 配额占用者角色标签 */
+.dm-role-tag.quota_holder {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* ============================================================
+   Template Wizard & Deploy — 模板向导与部署样式
+   ============================================================ */
+
+/* ── Step Indicator（步骤指示器，显示在 Modal 底部）── */
+
+.dm-step-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.dm-step-indicator > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid #d7dee8;
+  background: #ffffff;
+  color: #94a3b8;
+  font-weight: 700;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.dm-step-indicator > span.active {
+  border-color: #0f766e;
+  background: #0f766e;
+  color: #ffffff;
+}
+
+.dm-step-line {
+  width: 24px;
+  height: 2px;
+  background: #d7dee8;
+  border-radius: 1px;
+}
+
+/* ── Step Header（每一步的标题区）── */
+
+.dm-step-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #f0fdf4 0%, #eff6ff 100%);
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+}
+
+.dm-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #0f766e;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.dm-step-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #17202a;
+}
+
+.dm-step-desc {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+/* ── Deploy Choice（部署类型单选卡片）── */
+
+.dm-deploy-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  padding: 12px 14px;
+  border: 1.5px solid #d7dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.dm-deploy-choice:hover {
+  border-color: #0f766e;
+  background: #f0fdf4;
+}
+
+.dm-deploy-choice.active {
+  border-color: #0f766e;
+  background: #ecfdf5;
+  box-shadow: 0 0 0 1px #0f766e;
+}
+
+.dm-deploy-choice input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #0f766e;
+  flex-shrink: 0;
+}
+
+.dm-deploy-choice > div {
+  display: grid;
+  gap: 2px;
+}
+
+.dm-deploy-choice strong {
+  font-size: 14px;
+  font-weight: 700;
+  color: #17202a;
+}
+
+.dm-deploy-choice small {
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* ── Variable Edit Table（变量配置表格，编辑器第二步）── */
+
+.dm-var-table {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.dm-var-table-header,
+.dm-var-table-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1.2fr 1fr 1.4fr 36px;
+  gap: 8px;
+  padding: 8px 10px;
+  align-items: center;
+}
+
+.dm-var-table-header {
+  background: #f8fafc;
+  color: #526071;
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.dm-var-table-row {
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 13px;
+}
+
+.dm-var-table-row:last-child {
+  border-bottom: 0;
+}
+
+.dm-var-table-row input,
+.dm-var-table-row select {
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid #d0d9e4;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 13px;
+  color: #17202a;
+  box-sizing: border-box;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dm-var-table-row input:focus,
+.dm-var-table-row select:focus {
+  outline: none;
+  border-color: #0f766e;
+  background: #ffffff;
+}
+
+.dm-var-table-row .dm-var-name {
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .dm-var-table-header,
+  .dm-var-table-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .dm-var-table-header {
+    display: none;
+  }
+
+  .dm-var-table-row {
+    padding: 10px;
+    gap: 8px;
+  }
+}
+
+/* ── Deploy Type Tag（部署类型标签）── */
+
+.dm-deploy-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dm-deploy-tag.run {
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+
+.dm-deploy-tag.compose {
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px solid #c4b5fd;
+}
+
+/* ── Variable Count Badge（变量数量徽章）── */
+
+.dm-var-count-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ── Template Card（模板卡片，可点击）── */
+
+.dm-template-card {
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+
+.dm-template-card:hover {
+  border-color: #0f766e;
+  box-shadow: 0 4px 12px rgba(15, 118, 110, 0.1);
+}
+
+.dm-template-card:active {
+  transform: translateY(1px);
+}
+
+.dm-template-card .dm-card-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.dm-template-card:hover .dm-card-actions {
+  opacity: 1;
+}
+
+/* ── Variable Info Table（模板详情中的变量说明表）── */
+
+.dm-var-info-table {
+  display: grid;
+  gap: 6px;
+}
+
+.dm-var-info-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.dm-var-info-name {
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #1e293b;
+  font-weight: 600;
+}
+
+.dm-var-info-type {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
+  white-space: nowrap;
+}
+
+.dm-var-info-desc {
+  color: #526071;
+  flex: 1;
+  min-width: 120px;
+}
+
+.dm-var-info-default {
+  font-size: 12px;
+  color: #64748b;
+  padding: 1px 7px;
+  background: #f8fafc;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* ── Raw Content Preview（原始内容预览块）── */
+
+.dm-raw-content-preview {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: 'Consolas', 'Monaco', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  margin: 0;
 }

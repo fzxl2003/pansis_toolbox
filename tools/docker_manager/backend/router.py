@@ -14,6 +14,8 @@ from tools.docker_manager.backend.service import (
     add_server,
     assign_resource_owner,
     assign_resource_roles,
+    assign_template_roles,
+    check_servers_status,
     container_action,
     copy_image,
     copy_volume,
@@ -27,28 +29,34 @@ from tools.docker_manager.backend.service import (
     delete_server,
     delete_template,
     delete_volume,
+    detect_placeholders,
     get_container_detail,
     get_container_logs,
     update_restart_policy,
     get_my_quota,
     get_template,
+    get_template_roles,
     get_user_perms_for_user,
     get_volume_detail,
+    list_all_templates_for_admin,
     list_containers,
     list_images,
     list_my_owned_resources,
+    list_my_templates,
     list_server_permissions,
     list_server_resources,
     list_servers,
     list_templates,
     list_volumes,
     pull_image,
+    refresh_docker_df_cache,
     rescan_server_cuda,
+    browse_host_dirs,
     get_server_resource_overview,
+    set_resource_public,
     set_resource_viewers,
-    set_user_permission,
+    set_template_viewers,
     set_user_perms,
-    set_user_quota,
     update_template,
 )
 
@@ -67,42 +75,32 @@ class AddServerPayload(BaseModel):
     sshPassword: str
 
 
-class SetPermissionPayload(BaseModel):
-    userId: str
-    level: str  # manage | use | view | none
-
-
-class SetQuotaPayload(BaseModel):
-    userId: str
-    volumeTotalGb: float = 0.0
-    pathWhitelist: list[str] = Field(default_factory=list)
-    canCreateContainer: bool = False
-    canManageContainer: bool = False
-
-
 class SetUserPermsPayload(BaseModel):
     userId: str
     # 服务器可见性
     server_visible: bool = False
     # 镜像权限
+    img_use: bool = False           # 是否有权使用（查看/访问）镜像（资源角色查看者的前提条件）
     img_pull: bool = False
-    img_delete: bool = False
+    img_view_all: bool = False      # 查看所有用户的镜像
+    img_manage_all: bool = False    # 管理所有用户的镜像（删除权）
     img_copy: bool = False
+    img_quota_gb: float = 0.0       # 镜像空间配额(GB，0=不限)
     # 容器权限
-    ctr_view_own: bool = False
+    ctr_use: bool = False           # 是否有权使用（查看/访问）容器（资源角色查看者的前提条件）
     ctr_view_all: bool = False
-    ctr_create_run: bool = False
-    ctr_create_compose: bool = False
+    ctr_manage_all: bool = False    # 管理所有用户的容器（自动成为所有容器的所有者角色）
+    ctr_create: bool = False        # 创建容器（run/compose 模式均包含）
     ctr_create_template: bool = False
-    ctr_manage_own: bool = False
-    ctr_manage_all: bool = False
     ctr_path_whitelist: list[str] = Field(default_factory=list)
+    ctr_quota_num: int = 0          # 容器数量配额（0=不限）
     # 卷权限
+    vol_use: bool = False           # 是否有权使用（查看/访问）卷（资源角色查看者的前提条件）
+    vol_view_all: bool = False      # 查看所有用户的卷
     vol_create: bool = False
-    vol_delete_own: bool = False
-    vol_delete_all: bool = False
+    vol_manage_all: bool = False    # 管理所有用户的卷（删除权，自动包含查看权）
     vol_copy: bool = False
-    vol_quota_gb: float = 0.0
+    vol_quota_gb: float = 0.0       # 卷空间配额(GB，0=不限)
     # 模板权限
     tpl_use: bool = False
     tpl_create: bool = False
@@ -149,7 +147,6 @@ class ContainerActionPayload(BaseModel):
 
 class CreateVolumePayload(BaseModel):
     name: str
-    sizeGb: float = 0.0
 
 
 class CopyVolumePayload(BaseModel):
@@ -164,8 +161,10 @@ class CreateTemplatePayload(BaseModel):
     description: str = ""
     category: str = "general"
     docContent: str = ""
-    config: dict[str, Any] = Field(default_factory=dict)
     isPublic: bool = True
+    deployType: str = "run"  # run | compose
+    rawContent: str = ""
+    variables: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class UpdateTemplatePayload(BaseModel):
@@ -173,14 +172,29 @@ class UpdateTemplatePayload(BaseModel):
     description: str | None = None
     category: str | None = None
     docContent: str | None = None
-    config: dict[str, Any] | None = None
     isPublic: bool | None = None
+    deployType: str | None = None
+    rawContent: str | None = None
+    variables: list[dict[str, Any]] | None = None
 
 
 class CreateFromTemplatePayload(BaseModel):
     templateId: str
     overrides: dict[str, Any] = Field(default_factory=dict)
     gpus: str = ""  # GPU 挂载参数，e.g. "all" or "\"device=0,1\""
+
+
+class DetectPlaceholdersPayload(BaseModel):
+    rawContent: str
+
+
+class AssignTemplateRolesPayload(BaseModel):
+    ownerUserIds: list[str] = Field(default_factory=list)
+    viewerUserIds: list[str] = Field(default_factory=list)
+
+
+class SetTemplateViewersPayload(BaseModel):
+    viewerUserIds: list[str] = Field(default_factory=list)
 
 
 # ==============================================================
@@ -191,6 +205,13 @@ class CreateFromTemplatePayload(BaseModel):
 def list_servers_route(request: Request) -> dict:
     user = require_user(request)
     return {"servers": list_servers(user)}
+
+
+@router.get("/servers/status")
+def servers_status_route(request: Request) -> dict:
+    """检测所有可见服务器的连接状态（在线/离线）"""
+    user = require_user(request)
+    return {"statuses": check_servers_status(user)}
 
 
 @router.post("/servers")
@@ -210,30 +231,6 @@ def delete_server_route(request: Request, server_id: str) -> dict:
 def list_permissions_route(request: Request, server_id: str) -> dict:
     user = require_user(request)
     return {"permissions": list_server_permissions(server_id, user)}
-
-
-@router.put("/servers/{server_id}/permissions")
-def set_permission_route(request: Request, server_id: str, payload: SetPermissionPayload) -> dict:
-    user = require_user(request)
-    result = set_user_permission(server_id, payload.userId, payload.level, user)
-    return {"permission": result}
-
-
-@router.put("/servers/{server_id}/quotas")
-def set_quota_route(request: Request, server_id: str, payload: SetQuotaPayload) -> dict:
-    user = require_user(request)
-    result = set_user_quota(
-        server_id,
-        payload.userId,
-        {
-            "volumeTotalGb": payload.volumeTotalGb,
-            "pathWhitelist": payload.pathWhitelist,
-            "canCreateContainer": payload.canCreateContainer,
-            "canManageContainer": payload.canManageContainer,
-        },
-        user,
-    )
-    return {"quota": result}
 
 
 @router.get("/servers/{server_id}/user-perms")
@@ -360,6 +357,27 @@ def list_templates_route(request: Request) -> dict:
     return {"templates": list_templates(user)}
 
 
+@router.get("/templates/all-admin")
+def list_all_templates_admin_route(request: Request) -> dict:
+    """管理员查看所有模板（含角色信息）"""
+    user = require_user(request)
+    return {"templates": list_all_templates_for_admin(user)}
+
+
+@router.get("/templates/my")
+def list_my_templates_route(request: Request) -> dict:
+    """列出当前用户作为 owner 的模板"""
+    user = require_user(request)
+    return {"templates": list_my_templates(user)}
+
+
+@router.post("/templates/detect-placeholders")
+def detect_placeholders_route(request: Request, payload: DetectPlaceholdersPayload) -> dict:
+    """从原始内容中自动检测 {{VAR}} 占位符，返回默认变量声明列表"""
+    user = require_user(request)
+    return {"variables": detect_placeholders(payload.rawContent)}
+
+
 @router.post("/templates")
 def create_template_route(request: Request, payload: CreateTemplatePayload) -> dict:
     user = require_user(request)
@@ -386,6 +404,27 @@ def delete_template_route(request: Request, template_id: str) -> dict:
     return {"deleted": True}
 
 
+@router.get("/templates/{template_id}/roles")
+def get_template_roles_route(request: Request, template_id: str) -> dict:
+    """获取模板角色信息"""
+    user = require_user(request)
+    return get_template_roles(template_id, user)
+
+
+@router.put("/templates/{template_id}/roles")
+def assign_template_roles_route(request: Request, template_id: str, payload: AssignTemplateRolesPayload) -> dict:
+    """设置模板的多角色（owner/viewer），管理员或模板 owner 可调用"""
+    user = require_user(request)
+    return assign_template_roles(template_id, payload.ownerUserIds, payload.viewerUserIds, user)
+
+
+@router.put("/templates/{template_id}/viewers")
+def set_template_viewers_route(request: Request, template_id: str, payload: SetTemplateViewersPayload) -> dict:
+    """模板 owner 修改查看者列表"""
+    user = require_user(request)
+    return set_template_viewers(template_id, payload.viewerUserIds, user)
+
+
 # ==============================================================
 # 卷管理路由
 # ==============================================================
@@ -406,7 +445,7 @@ def get_volume_detail_route(request: Request, server_id: str, volume_name: str) 
 @router.post("/servers/{server_id}/volumes")
 def create_volume_route(request: Request, server_id: str, payload: CreateVolumePayload) -> dict:
     user = require_user(request)
-    return create_volume(server_id, payload.name, payload.sizeGb, user)
+    return create_volume(server_id, payload.name, user)
 
 
 @router.delete("/servers/{server_id}/volumes/{volume_name}")
@@ -428,12 +467,19 @@ def copy_volume_route(request: Request, payload: CopyVolumePayload) -> dict:
     )
 
 
+@router.post("/servers/{server_id}/df-cache/refresh")
+def refresh_df_cache_route(request: Request, server_id: str) -> dict:
+    """刷新 docker system df -v 缓存（镜像 / 容器 / 卷）。"""
+    user = require_user(request)
+    return refresh_docker_df_cache(server_id, user)
+
+
 # ==============================================================
 # 资源所有者管理路由（管理员专用）
 # ==============================================================
 
 class AssignResourceOwnerPayload(BaseModel):
-    """兼容旧接口：单 owner 分配"""
+    """单 owner 分配"""
     resourceType: str   # container | image | volume
     resourceRef: str    # 容器名/镜像 repo:tag/卷名
     ownerUserId: str    # 目标用户 ID，传 "" 表示取消分配
@@ -443,8 +489,9 @@ class AssignResourceRolesPayload(BaseModel):
     """新接口：多角色分配"""
     resourceType: str                   # container | image | volume
     resourceRef: str                    # 容器名/镜像 repo:tag/卷名
-    ownerUserIds: list[str] = Field(default_factory=list)   # 所有者列表
-    viewerUserIds: list[str] = Field(default_factory=list)  # 查看者列表
+    ownerUserIds: list[str] = Field(default_factory=list)       # 所有者列表
+    viewerUserIds: list[str] = Field(default_factory=list)      # 查看者列表
+    quotaHolderUserIds: list[str] = Field(default_factory=list) # 配额占用者（可多人，无需是所有者）
     creatorUserId: str = ""             # 创建者（唯一），传 "" 表示不设置
 
 
@@ -457,7 +504,7 @@ def list_server_resources_route(request: Request, server_id: str) -> dict:
 
 @router.put("/servers/{server_id}/resource-owner")
 def assign_resource_owner_route(request: Request, server_id: str, payload: AssignResourceOwnerPayload) -> dict:
-    """为服务器上的资源分配所有者（兼容旧接口，管理员专用）"""
+    """为服务器上的资源分配所有者（管理员专用）"""
     user = require_user(request)
     return assign_resource_owner(
         server_id,
@@ -470,7 +517,7 @@ def assign_resource_owner_route(request: Request, server_id: str, payload: Assig
 
 @router.put("/servers/{server_id}/resource-roles")
 def assign_resource_roles_route(request: Request, server_id: str, payload: AssignResourceRolesPayload) -> dict:
-    """为服务器上的资源分配多角色（所有者/查看者/创建者，管理员专用）"""
+    """为服务器上的资源分配多角色（所有者/查看者/创建者/配额占用者，管理员专用）"""
     user = require_user(request)
     return assign_resource_roles(
         server_id,
@@ -480,6 +527,7 @@ def assign_resource_roles_route(request: Request, server_id: str, payload: Assig
         payload.viewerUserIds,
         payload.creatorUserId,
         user,
+        quota_holder_user_ids=payload.quotaHolderUserIds,
     )
 
 
@@ -488,6 +536,28 @@ class SetResourceViewersPayload(BaseModel):
     resourceType: str                    # container | image | volume
     resourceRef: str                     # 资源标识
     viewerUserIds: list[str] = Field(default_factory=list)
+
+
+class SetResourcePublicPayload(BaseModel):
+    """设置资源公开状态"""
+    resourceType: str                    # container | image | volume
+    resourceRef: str                     # 资源标识
+    isPublic: bool
+
+
+# Pydantic v2 + `from __future__ import annotations` 会使类型注解变为字符串（前向引用），
+# 需在所有模型定义完成后调用 model_rebuild() 强制解析，否则首次请求验证时会报
+# "TypeAdapter is not fully defined" 错误。
+for _m in (
+    AddServerPayload, SetUserPermsPayload, PullImagePayload, CopyImagePayload,
+    CreateContainerRunPayload, RunRawPayload, CreateContainerComposePayload,
+    ContainerActionPayload, CreateVolumePayload, CopyVolumePayload,
+    CreateTemplatePayload, UpdateTemplatePayload, CreateFromTemplatePayload,
+    DetectPlaceholdersPayload, AssignTemplateRolesPayload, SetTemplateViewersPayload,
+    UpdateRestartPayload, AssignResourceOwnerPayload, AssignResourceRolesPayload,
+    SetResourceViewersPayload, SetResourcePublicPayload,
+):
+    _m.model_rebuild()
 
 
 @router.get("/my-owned-resources")
@@ -506,6 +576,21 @@ def set_resource_viewers_route(request: Request, server_id: str, payload: SetRes
         payload.resourceType,
         payload.resourceRef,
         payload.viewerUserIds,
+        user,
+    )
+
+
+@router.put("/servers/{server_id}/resource-public")
+def set_resource_public_route(request: Request, server_id: str, payload: SetResourcePublicPayload) -> dict:
+    """设置资源公开状态（管理员、全局管理权限或资源 owner 可调用）
+    公开资源自动授予所有有权访问服务器的用户查看权限。
+    """
+    user = require_user(request)
+    return set_resource_public(
+        server_id,
+        payload.resourceType,
+        payload.resourceRef,
+        payload.isPublic,
         user,
     )
 
@@ -530,3 +615,16 @@ def resource_overview_route(request: Request, server_id: str) -> dict:
     """获取当前用户在服务器上的资源概览（卷配额、路径磁盘、CUDA 权限）"""
     user = require_user(request)
     return get_server_resource_overview(server_id, user)
+
+
+# ==============================================================
+# 宿主机目录浏览路由（供 host_path 变量点选）
+# ==============================================================
+
+@router.get("/servers/{server_id}/browse-dirs")
+def browse_dirs_route(request: Request, server_id: str, path: str = "/") -> dict:
+    """列出服务器上指定目录的子目录（仅目录），受用户路径白名单限制。
+    用于 host_path 类型变量的点选选择器。
+    """
+    user = require_user(request)
+    return browse_host_dirs(server_id, path, user)

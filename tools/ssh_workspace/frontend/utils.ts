@@ -58,6 +58,7 @@ export function buildTerminalWsUrl(
   screenSession: string,
   cols: number,
   rows: number,
+  initialCommand?: string,
 ): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const base = `${proto}://${window.location.host}${API}/ws/terminal`;
@@ -68,5 +69,6 @@ export function buildTerminalWsUrl(
     rows: String(rows),
   });
   if (screenSession) params.set('screenSession', screenSession);
+  if (initialCommand) params.set('initialCommand', initialCommand);
   return `${base}?${params.toString()}`;
 }

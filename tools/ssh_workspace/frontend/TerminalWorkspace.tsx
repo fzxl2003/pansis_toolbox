@@ -103,6 +103,7 @@ export function TerminalWorkspace({ servers, serversLoading }: TerminalWorkspace
       label,
       tabOrder: tabs.length,
       _key: genId(),
+      initialCommand: pick.initialCommand,
     };
     setTabs((prev) => [...prev, newTab]);
     setActiveId(newTab.id);

@@ -112,6 +112,7 @@ class TerminalTabPayload(BaseModel):
     mode: str = "native"
     screenSession: str = ""
     label: str = ""
+    initialCommand: str | None = None
 
 
 class SaveTabsPayload(BaseModel):
@@ -294,8 +295,9 @@ async def terminal_ws_route(
     screenSession: str | None = None,
     cols: int = 80,
     rows: int = 24,
+    initialCommand: str | None = None,
 ) -> None:
-    await terminal_websocket(websocket, serverId, mode=mode, screen_session=screenSession, cols=cols, rows=rows)
+    await terminal_websocket(websocket, serverId, mode=mode, screen_session=screenSession, cols=cols, rows=rows, initial_command=initialCommand)
 
 
 init_database()

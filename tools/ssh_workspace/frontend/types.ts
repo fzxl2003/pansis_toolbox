@@ -147,6 +147,7 @@ export type TerminalTab = {
   screenSession: string;
   label: string;
   tabOrder: number;
+  initialCommand?: string;
 };
 
 // Runtime state for a tab (not persisted)
@@ -162,6 +163,7 @@ export type NewSessionPick = {
   serverId: string;
   mode: SessionMode;
   screenSession: string; // for screen_existing: the name; for screen_new: the new name
+  initialCommand?: string; // command to run after session starts
 };
 
 // ---- Terminal API (for sidebar command execution) ----

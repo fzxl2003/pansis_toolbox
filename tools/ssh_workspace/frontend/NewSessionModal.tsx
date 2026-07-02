@@ -2,13 +2,13 @@
 // SSH Workspace Tool — New Session Picker Modal
 // ============================================================
 
-import { useEffect, useState } from 'react';
-import { Loader2, Monitor, Plus, RefreshCw, Server, SquareTerminal, Terminal } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronDown, Loader2, Monitor, Plus, RefreshCw, Server, SquareTerminal, Terminal } from 'lucide-react';
 
 import { apiGet } from '../../../frontend/src/api/client';
 import { Alert, Badge, Modal, Spin } from './components';
 import { API, messageFromError } from './utils';
-import type { NewSessionPick, ScreenSession, SessionMode, SshServer } from './types';
+import type { CommandTemplate, NewSessionPick, ScreenSession, SessionMode, SshServer } from './types';
 
 export type NewSessionModalProps = {
   servers: SshServer[];
@@ -25,6 +25,25 @@ export function NewSessionModal({ servers, onClose, onConfirm }: NewSessionModal
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [error, setError] = useState('');
 
+  // Command template state
+  const [templates, setTemplates] = useState<CommandTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const [templateVarValues, setTemplateVarValues] = useState<Record<string, string>>({});
+  const [templateDropdownOpen, setTemplateDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!templateDropdownOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setTemplateDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [templateDropdownOpen]);
+
   // Auto-select first server
   useEffect(() => {
     if (servers.length > 0 && !selectedServerId) {
@@ -35,7 +54,7 @@ export function NewSessionModal({ servers, onClose, onConfirm }: NewSessionModal
   // Get selected server
   const selectedServer = servers.find((s) => s.id === selectedServerId) || null;
 
-  // Reset mode when server changes
+  // Reset mode when server changes & load templates
   useEffect(() => {
     if (selectedServer) {
       if (!selectedServer.hasScreen && mode !== 'native') {
@@ -44,7 +63,27 @@ export function NewSessionModal({ servers, onClose, onConfirm }: NewSessionModal
       setSelectedScreen('');
       setNewScreenName('');
     }
+    // Load templates for this server
+    setSelectedTemplateId('');
+    setTemplateVarValues({});
+    setTemplateDropdownOpen(false);
+    if (selectedServerId) {
+      void loadTemplates(selectedServerId);
+    } else {
+      setTemplates([]);
+    }
   }, [selectedServerId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function loadTemplates(serverId: string) {
+    try {
+      const r = await apiGet<{ templates: CommandTemplate[] }>(
+        `${API}/servers/${serverId}/templates`,
+      );
+      setTemplates(r.templates);
+    } catch {
+      setTemplates([]);
+    }
+  }
 
   // Load screen sessions when screen mode is selected
   useEffect(() => {
@@ -77,19 +116,35 @@ export function NewSessionModal({ servers, onClose, onConfirm }: NewSessionModal
 
   function handleConfirm() {
     if (!selectedServerId) return;
+    const initialCommand = resolveTemplateCommand();
     if (mode === 'native') {
-      onConfirm({ serverId: selectedServerId, mode: 'native', screenSession: '' });
+      onConfirm({ serverId: selectedServerId, mode: 'native', screenSession: '', initialCommand });
     } else if (mode === 'screen_existing') {
       if (!selectedScreen) {
         setError('请选择一个 screen 会话');
         return;
       }
-      onConfirm({ serverId: selectedServerId, mode: 'screen_existing', screenSession: selectedScreen });
+      onConfirm({ serverId: selectedServerId, mode: 'screen_existing', screenSession: selectedScreen, initialCommand });
     } else if (mode === 'screen_new') {
       const name = newScreenName.trim() || `ssh_${Date.now()}`;
-      onConfirm({ serverId: selectedServerId, mode: 'screen_new', screenSession: name });
+      onConfirm({ serverId: selectedServerId, mode: 'screen_new', screenSession: name, initialCommand });
     }
   }
+
+  function resolveTemplateCommand(): string | undefined {
+    if (!selectedTemplateId) return undefined;
+    const tpl = templates.find((t) => t.id === selectedTemplateId);
+    if (!tpl) return undefined;
+    let cmd = tpl.command;
+    // Replace {{variable}} placeholders with user-provided values
+    for (const v of tpl.variables) {
+      const val = templateVarValues[v] ?? '';
+      cmd = cmd.replace(new RegExp(`\\{\\{\\s*${v}\\s*\\}\\}`, 'g'), val);
+    }
+    return cmd;
+  }
+
+  const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) || null;
 
   if (servers.length === 0) {
     return (
@@ -226,6 +281,88 @@ export function NewSessionModal({ servers, onClose, onConfirm }: NewSessionModal
               onChange={(e) => setNewScreenName(e.target.value)}
               placeholder="例如：dev_session"
             />
+          </div>
+        )}
+
+        {/* Command template picker */}
+        {templates.length > 0 && (
+          <div className="sw-form-field sw-full-col">
+            <label>启动命令模板（可选）</label>
+            <div className="sw-template-dropdown-wrapper" ref={dropdownRef}>
+              <button
+                className="sw-template-dropdown-trigger"
+                onClick={() => setTemplateDropdownOpen((v) => !v)}
+                type="button"
+              >
+                <span>
+                  {selectedTemplate
+                    ? `${selectedTemplate.name}${selectedTemplate.description ? ` — ${selectedTemplate.description}` : ''}`
+                    : '无（不执行命令）'}
+                </span>
+                <ChevronDown size={14} className={templateDropdownOpen ? 'open' : ''} />
+              </button>
+              {templateDropdownOpen && (
+                <div className="sw-template-dropdown-menu">
+                  <button
+                    className={`sw-template-dropdown-item${!selectedTemplateId ? ' active' : ''}`}
+                    onClick={() => {
+                      setSelectedTemplateId('');
+                      setTemplateVarValues({});
+                      setTemplateDropdownOpen(false);
+                    }}
+                    type="button"
+                  >
+                    无（不执行命令）
+                  </button>
+                  {templates.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      className={`sw-template-dropdown-item${selectedTemplateId === tpl.id ? ' active' : ''}`}
+                      onClick={() => {
+                        setSelectedTemplateId(tpl.id);
+                        setTemplateVarValues({});
+                        setTemplateDropdownOpen(false);
+                      }}
+                      type="button"
+                    >
+                      <span className="sw-template-item-name">{tpl.name}</span>
+                      {tpl.description && (
+                        <span className="sw-template-item-desc">{tpl.description}</span>
+                      )}
+                      {tpl.variables.length > 0 && (
+                        <Badge color="blue">{tpl.variables.length} 个变量</Badge>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Variable inputs for selected template */}
+            {selectedTemplate && selectedTemplate.variables.length > 0 && (
+              <div className="sw-template-vars">
+                <div className="sw-template-vars-header">
+                  填写命令参数
+                </div>
+                {selectedTemplate.variables.map((v) => (
+                  <div key={v} className="sw-form-field">
+                    <label>{v}</label>
+                    <input
+                      className="sw-input"
+                      type="text"
+                      value={templateVarValues[v] || ''}
+                      onChange={(e) =>
+                        setTemplateVarValues((prev) => ({ ...prev, [v]: e.target.value }))
+                      }
+                      placeholder={`请输入 ${v}`}
+                    />
+                  </div>
+                ))}
+                <div className="sw-template-preview">
+                  <code>{resolveTemplateCommand()}</code>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

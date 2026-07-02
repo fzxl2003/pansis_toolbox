@@ -143,6 +143,7 @@ def init_database() -> None:
                 mode TEXT NOT NULL DEFAULT 'native',
                 screen_session TEXT NOT NULL DEFAULT '',
                 label TEXT NOT NULL DEFAULT '',
+                initial_command TEXT,
                 tab_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -157,6 +158,11 @@ def init_database() -> None:
             connection.execute("SELECT server_id FROM ssh_command_templates LIMIT 1")
         except sqlite3.OperationalError:
             connection.execute("ALTER TABLE ssh_command_templates ADD COLUMN server_id TEXT")
+        # Migration: add initial_command to terminal tabs if missing
+        try:
+            connection.execute("SELECT initial_command FROM ssh_terminal_tabs LIMIT 1")
+        except sqlite3.OperationalError:
+            connection.execute("ALTER TABLE ssh_terminal_tabs ADD COLUMN initial_command TEXT")
             connection.execute(
                 """
                 UPDATE ssh_command_templates
@@ -660,8 +666,8 @@ def save_terminal_tabs(tabs: list[dict[str, Any]], user: User) -> list[dict[str,
                 continue
             tab_id = tab.get("id") or _new_id()
             connection.execute(
-                "INSERT INTO ssh_terminal_tabs (id, owner_user_id, server_id, mode, screen_session, label, tab_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (tab_id, user.id, server_id, tab.get("mode") or "native", tab.get("screenSession") or "", tab.get("label") or "", idx, now, now),
+                "INSERT INTO ssh_terminal_tabs (id, owner_user_id, server_id, mode, screen_session, label, initial_command, tab_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (tab_id, user.id, server_id, tab.get("mode") or "native", tab.get("screenSession") or "", tab.get("label") or "", tab.get("initialCommand") or None, idx, now, now),
             )
         connection.commit()
         rows = connection.execute(
@@ -683,6 +689,7 @@ async def terminal_websocket(
     screen_session: str | None = None,
     cols: int = 80,
     rows: int = 24,
+    initial_command: str | None = None,
 ) -> None:
     # Accept first so we can send structured error messages to the client
     await websocket.accept()
@@ -733,6 +740,12 @@ async def terminal_websocket(
         elif mode == "screen_new" and screen_session:
             safe_name = _safe_session_name(screen_session)
             await asyncio.to_thread(channel.send, f"screen -S {shlex.quote(safe_name)}\n")
+
+        # Send initial command if provided
+        if initial_command:
+            # Small delay to let the shell/screen settle before sending the command
+            await asyncio.sleep(0.5)
+            await asyncio.to_thread(channel.send, initial_command + "\n")
 
         async def read_ssh() -> None:
             while True:
@@ -1083,11 +1096,16 @@ def _public_run(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _public_tab(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    result = {
         "id": row["id"], "serverId": row["server_id"], "mode": row["mode"],
         "screenSession": row["screen_session"], "label": row["label"],
         "tabOrder": row["tab_order"], "createdAt": row["created_at"], "updatedAt": row["updated_at"],
     }
+    try:
+        result["initialCommand"] = row["initial_command"]
+    except (IndexError, KeyError):
+        result["initialCommand"] = None
+    return result
 
 
 # ============================================================

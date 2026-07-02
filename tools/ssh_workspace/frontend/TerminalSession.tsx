@@ -75,7 +75,7 @@ export function TerminalSession({ tab, serverName, active, registerApi }: Termin
     const rows = term.rows || 24;
 
     // Connect WebSocket
-    const url = buildTerminalWsUrl(tab.serverId, tab.mode, tab.screenSession, cols, rows);
+    const url = buildTerminalWsUrl(tab.serverId, tab.mode, tab.screenSession, cols, rows, tab.initialCommand);
     const ws = new WebSocket(url);
     wsRef.current = ws;
     setStatus('connecting');
@@ -161,7 +161,7 @@ export function TerminalSession({ tab, serverName, active, registerApi }: Termin
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.id, tab.serverId, tab.mode, tab.screenSession, reconnectKey]);
+  }, [tab.id, tab.serverId, tab.mode, tab.screenSession, tab.initialCommand, reconnectKey]);
 
   // ---- Fit terminal when becoming active ----
   useEffect(() => {

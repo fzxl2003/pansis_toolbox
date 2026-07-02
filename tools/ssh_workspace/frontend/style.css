@@ -371,13 +371,20 @@
 
 .sw-workspace {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: calc(100vh - 200px);
   min-height: 500px;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
   overflow: hidden;
   background: #0f172a;
+}
+
+.sw-workspace-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
 }
 
 .sw-tab-bar {
@@ -448,6 +455,26 @@
 }
 .sw-tab-add:hover { background: #0f766e; color: #fff; }
 .sw-tab-add:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.sw-tab-bar-actions {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+}
+
+.sw-tab-sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  border: none;
+  border-left: 1px solid #334155;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.sw-tab-sidebar-toggle:hover { background: #334155; color: #e2e8f0; }
 
 /* ── Terminal Area ── */
 
@@ -932,6 +959,252 @@
 .sw-source-terminal { background: #dbeafe; color: #1e40af; }
 .sw-source-scheduled_task { background: #fef3c7; color: #92400e; }
 
+/* ── Terminal Sidebar ── */
+
+.sw-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #1e293b;
+  border-left: 1px solid #334155;
+  overflow: hidden;
+}
+
+.sw-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid #334155;
+  flex-shrink: 0;
+}
+
+.sw-sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sw-sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid #334155;
+  flex-shrink: 0;
+}
+
+.sw-sidebar-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  justify-content: center;
+}
+.sw-sidebar-tab:hover { background: #334155; color: #e2e8f0; }
+.sw-sidebar-tab.active { color: #14b8a6; border-bottom: 2px solid #14b8a6; }
+
+.sw-sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: #475569 transparent;
+}
+.sw-sidebar-body::-webkit-scrollbar { width: 5px; }
+.sw-sidebar-body::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+
+.sw-sidebar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sw-sidebar-add-btn {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+/* ── Command Item (history / template) ── */
+
+.sw-cmd-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 6px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.sw-cmd-item:hover { background: #334155; }
+
+.sw-cmd-item-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sw-cmd-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.sw-cmd-text {
+  font-family: monospace;
+  font-size: 11px;
+  color: #94a3b8;
+  background: #0f172a;
+  padding: 3px 6px;
+  border-radius: 4px;
+  word-break: break-all;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.sw-cmd-meta {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.sw-cmd-vars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 2px;
+}
+.sw-cmd-vars .sw-badge { font-size: 10px; padding: 1px 5px; }
+
+.sw-cmd-item-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sw-cmd-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.sw-cmd-btn:hover { background: #475569; color: #e2e8f0; }
+.sw-cmd-btn-danger:hover { background: #ef4444; color: #fff; }
+
+/* ── Template Run Modal ── */
+
+.sw-tpl-run {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sw-tpl-run-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sw-tpl-run-vars-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.sw-tpl-run-novars {
+  font-size: 13px;
+  color: #64748b;
+  padding: 8px 0;
+}
+
+.sw-tpl-run-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sw-tpl-run-preview label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+.sw-tpl-run-cmd {
+  font-family: monospace;
+  font-size: 12px;
+  color: #1e293b;
+  background: #f1f5f9;
+  padding: 10px 12px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* ── Server Selector (templates panel) ── */
+
+.sw-server-selector {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.sw-server-selector-label {
+  font-size: 13px;
+  color: #526071;
+}
+
+.sw-server-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid #d7dee8;
+  border-radius: 999px;
+  background: #fff;
+  color: #17202a;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s;
+}
+.sw-server-chip:hover { border-color: #0f766e; background: #f0fdfa; }
+.sw-server-chip.active {
+  border-color: #0f766e;
+  background: #ecfdf5;
+  color: #0f766e;
+  font-weight: 600;
+}
+
 /* ── Responsive ── */
 
 @media (max-width: 768px) {
@@ -940,4 +1213,7 @@
   .sw-server-pick-grid { grid-template-columns: 1fr; }
   .sw-server-card-actions { flex-wrap: wrap; }
   .sw-code-cell { max-width: 200px; }
+  .sw-sidebar { width: 240px; }
+  .sw-workspace { flex-direction: column; }
+  .sw-sidebar { width: 100%; border-left: none; border-top: 1px solid #334155; max-height: 250px; }
 }

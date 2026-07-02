@@ -164,6 +164,12 @@ export type NewSessionPick = {
   screenSession: string; // for screen_existing: the name; for screen_new: the new name
 };
 
+// ---- Terminal API (for sidebar command execution) ----
+
+export type TerminalApi = {
+  sendText: (text: string) => void;
+};
+
 // ---- Top-level tab ----
 
-export type TopTabId = 'terminal' | 'servers' | 'history';
+export type TopTabId = 'terminal' | 'servers' | 'templates' | 'history';

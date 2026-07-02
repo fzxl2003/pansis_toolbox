@@ -8,17 +8,18 @@ import { FitAddon } from '@xterm/addon-fit';
 import { AlertCircle, Loader2, RotateCw, SquareTerminal } from 'lucide-react';
 
 import { buildTerminalWsUrl } from './utils';
-import type { TerminalTab } from './types';
+import type { TerminalApi, TerminalTab } from './types';
 
 export type TerminalSessionProps = {
   tab: TerminalTab;
   serverName: string;
   active: boolean;
+  registerApi: (api: TerminalApi | null) => void;
 };
 
 type ConnStatus = 'connecting' | 'connected' | 'error' | 'closed';
 
-export function TerminalSession({ tab, serverName, active }: TerminalSessionProps) {
+export function TerminalSession({ tab, serverName, active, registerApi }: TerminalSessionProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -187,6 +188,23 @@ export function TerminalSession({ tab, serverName, active }: TerminalSessionProp
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
     };
   }, []);
+
+  // ---- Register terminal API when active ----
+  useEffect(() => {
+    if (!active) {
+      registerApi(null);
+      return;
+    }
+    registerApi({
+      sendText: (text: string) => {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'input', data: text }));
+        }
+      },
+    });
+    return () => { registerApi(null); };
+  }, [active, registerApi]);
 
   // ---- Reconnect (triggers effect re-run via key change) ----
   function reconnect() {

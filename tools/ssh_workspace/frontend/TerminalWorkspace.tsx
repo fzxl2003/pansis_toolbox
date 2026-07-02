@@ -3,14 +3,15 @@
 // ============================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Monitor, Plus, SquareTerminal, X } from 'lucide-react';
+import { Monitor, PanelRightClose, PanelRightOpen, Plus, SquareTerminal, X } from 'lucide-react';
 
 import { apiGet, apiPut } from '../../../frontend/src/api/client';
 import { Alert, EmptyState } from './components';
 import { API, genId, messageFromError, serverLabel } from './utils';
-import type { NewSessionPick, SshServer, TerminalTab } from './types';
+import type { NewSessionPick, SshServer, TerminalApi, TerminalTab } from './types';
 import { TerminalSession } from './TerminalSession';
 import { NewSessionModal } from './NewSessionModal';
+import { TerminalSidebar } from './TerminalSidebar';
 
 export type TerminalWorkspaceProps = {
   servers: SshServer[];
@@ -19,13 +20,29 @@ export type TerminalWorkspaceProps = {
 
 type RuntimeTab = TerminalTab & { _key: string };
 
+const SIDEBAR_KEY = 'sshw_sidebar_visible';
+
 export function TerminalWorkspace({ servers, serversLoading }: TerminalWorkspaceProps) {
   const [tabs, setTabs] = useState<RuntimeTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showNewModal, setShowNewModal] = useState(false);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(() => {
+    try { return localStorage.getItem(SIDEBAR_KEY) !== 'false'; } catch { return true; }
+  });
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [terminalApi, setTerminalApi] = useState<TerminalApi | null>(null);
+
+  // Stable callback for TerminalSession to register/unregister its API
+  const registerApi = useCallback((api: TerminalApi | null) => {
+    setTerminalApi(api);
+  }, []);
+
+  // ---- Persist sidebar visibility ----
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_KEY, String(sidebarVisible)); } catch { /* ignore */ }
+  }, [sidebarVisible]);
 
   // ---- Load persisted tabs on mount ----
   useEffect(() => {
@@ -96,9 +113,7 @@ export function TerminalWorkspace({ servers, serversLoading }: TerminalWorkspace
   function closeTab(tabId: string) {
     setTabs((prev) => {
       const filtered = prev.filter((t) => t.id !== tabId);
-      // Reorder
       const reordered = filtered.map((t, idx) => ({ ...t, tabOrder: idx }));
-      // If closing the active tab, switch to neighbor
       if (activeId === tabId) {
         const closedIdx = prev.findIndex((t) => t.id === tabId);
         const newActive = reordered[Math.min(closedIdx, reordered.length - 1)]?.id || null;
@@ -110,79 +125,102 @@ export function TerminalWorkspace({ servers, serversLoading }: TerminalWorkspace
 
   // ---- Server map for validation ----
   const serverIds = new Set(servers.map((s) => s.id));
-
-  // Filter out tabs whose server was deleted
   const validTabs = tabs.filter((t) => serverIds.has(t.serverId));
 
+  // ---- Active server info ----
+  const activeTab = validTabs.find((t) => t.id === activeId) || null;
+  const activeServerId = activeTab?.serverId || null;
+  const activeServerName = activeServerId ? serverName(activeServerId) : '';
+
   return (
-    <div className="sw-workspace">
-      {/* Tab bar */}
-      <div className="sw-tab-bar">
-        <div className="sw-tabs-scroll">
-          {validTabs.map((tab) => {
-            const srv = servers.find((s) => s.id === tab.serverId);
-            const isActive = tab.id === activeId;
-            return (
-              <div
-                key={tab._key}
-                className={`sw-tab-item${isActive ? ' active' : ''}`}
-                onClick={() => setActiveId(tab.id)}
-              >
-                <span className="sw-tab-icon">
-                  {tab.mode === 'native' ? <SquareTerminal size={12} /> : <Monitor size={12} />}
-                </span>
-                <span className="sw-tab-text">{tab.label}</span>
-                <button
-                  className="sw-tab-close"
-                  onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                  type="button"
+    <div className={`sw-workspace${sidebarVisible ? ' sidebar-visible' : ''}`}>
+      <div className="sw-workspace-main">
+        {/* Tab bar */}
+        <div className="sw-tab-bar">
+          <div className="sw-tabs-scroll">
+            {validTabs.map((tab) => {
+              const isActive = tab.id === activeId;
+              return (
+                <div
+                  key={tab._key}
+                  className={`sw-tab-item${isActive ? ' active' : ''}`}
+                  onClick={() => setActiveId(tab.id)}
                 >
-                  <X size={12} />
-                </button>
-              </div>
-            );
-          })}
+                  <span className="sw-tab-icon">
+                    {tab.mode === 'native' ? <SquareTerminal size={12} /> : <Monitor size={12} />}
+                  </span>
+                  <span className="sw-tab-text">{tab.label}</span>
+                  <button
+                    className="sw-tab-close"
+                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                    type="button"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <div className="sw-tab-bar-actions">
+            <button
+              className="sw-tab-add"
+              onClick={() => setShowNewModal(true)}
+              type="button"
+              title="新建会话"
+              disabled={serversLoading}
+            >
+              <Plus size={16} />
+            </button>
+            <button
+              className="sw-tab-sidebar-toggle"
+              onClick={() => setSidebarVisible((v) => !v)}
+              type="button"
+              title={sidebarVisible ? '隐藏侧边栏' : '显示侧边栏'}
+            >
+              {sidebarVisible ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+            </button>
+          </div>
         </div>
-        <button
-          className="sw-tab-add"
-          onClick={() => setShowNewModal(true)}
-          type="button"
-          title="新建会话"
-          disabled={serversLoading}
-        >
-          <Plus size={16} />
-        </button>
+
+        {/* Terminal area */}
+        <div className="sw-term-area">
+          {error && <Alert type="error">{error}</Alert>}
+          {serversLoading && !loaded && (
+            <EmptyState icon={<SquareTerminal size={32} />} title="加载中…" hint="正在获取服务器列表" />
+          )}
+          {!serversLoading && servers.length === 0 && (
+            <EmptyState
+              icon={<SquareTerminal size={32} />}
+              title="暂无服务器"
+              hint="请先在「服务器」页添加 SSH 服务器"
+            />
+          )}
+          {servers.length > 0 && validTabs.length === 0 && loaded && (
+            <EmptyState
+              icon={<SquareTerminal size={32} />}
+              title="还没有终端会话"
+              hint="点击上方 + 号新建一个 SSH 会话"
+            />
+          )}
+          {validTabs.map((tab) => (
+            <TerminalSession
+              key={tab._key}
+              tab={tab}
+              serverName={serverName(tab.serverId)}
+              active={tab.id === activeId}
+              registerApi={registerApi}
+            />
+          ))}
+        </div>
       </div>
 
-      {/* Terminal area */}
-      <div className="sw-term-area">
-        {error && <Alert type="error">{error}</Alert>}
-        {serversLoading && !loaded && (
-          <EmptyState icon={<SquareTerminal size={32} />} title="加载中…" hint="正在获取服务器列表" />
-        )}
-        {!serversLoading && servers.length === 0 && (
-          <EmptyState
-            icon={<SquareTerminal size={32} />}
-            title="暂无服务器"
-            hint="请先在「服务器」页添加 SSH 服务器"
-          />
-        )}
-        {servers.length > 0 && validTabs.length === 0 && loaded && (
-          <EmptyState
-            icon={<SquareTerminal size={32} />}
-            title="还没有终端会话"
-            hint="点击上方 + 号新建一个 SSH 会话"
-          />
-        )}
-        {validTabs.map((tab) => (
-          <TerminalSession
-            key={tab._key}
-            tab={tab}
-            serverName={serverName(tab.serverId)}
-            active={tab.id === activeId}
-          />
-        ))}
-      </div>
+      {/* Right sidebar */}
+      <TerminalSidebar
+        serverId={activeServerId}
+        serverName={activeServerName}
+        terminalApi={terminalApi}
+        visible={sidebarVisible}
+      />
 
       {showNewModal && (
         <NewSessionModal

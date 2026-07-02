@@ -7,7 +7,7 @@ import '@xterm/xterm/css/xterm.css';
 
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { History, Server, SquareTerminal } from 'lucide-react';
+import { ClipboardList, History, Server, SquareTerminal } from 'lucide-react';
 
 import { apiGet } from '../../../frontend/src/api/client';
 import { fetchMe, type AuthUser } from '../../../frontend/src/api/auth';
@@ -19,6 +19,7 @@ import type { SshServer, TopTabId } from './types';
 
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ServersPanel } from './ServersPanel';
+import { TemplatesPanel } from './TemplatesPanel';
 import { HistoryPanel } from './HistoryPanel';
 
 // ---- Tab config ----
@@ -26,6 +27,7 @@ import { HistoryPanel } from './HistoryPanel';
 const TABS: { id: TopTabId; label: string; icon: ReactNode }[] = [
   { id: 'terminal', label: '终端', icon: <SquareTerminal size={14} /> },
   { id: 'servers', label: '服务器', icon: <Server size={14} /> },
+  { id: 'templates', label: '命令模板', icon: <ClipboardList size={14} /> },
   { id: 'history', label: '历史', icon: <History size={14} /> },
 ];
 
@@ -108,6 +110,9 @@ export default function SshWorkspaceTool() {
         )}
         {activeTab === 'servers' && (
           <ServersPanel servers={servers} loading={serversLoading} onRefresh={() => void loadServers()} />
+        )}
+        {activeTab === 'templates' && (
+          <TemplatesPanel servers={servers} />
         )}
         {activeTab === 'history' && (
           <HistoryPanel servers={servers} />

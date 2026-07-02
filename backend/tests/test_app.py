@@ -1,7 +1,10 @@
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from backend.app.core.config import get_settings
+from backend.app.db.database import get_connection
 from backend.app.main import app
 from backend.app.registry.loader import discover_tools
 from backend.app.registry.models import ToolStatus
@@ -113,6 +116,109 @@ def test_admin_can_manage_users() -> None:
     assert enabled.status_code == 200
     assert enabled.json()["user"]["disabled"] is False
     _cleanup_monitor_test_data()
+
+
+def test_user_can_change_own_password() -> None:
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    username = f"password_user_{uuid4().hex[:8]}"
+    created = client.post(
+        "/api/auth/users",
+        json={"username": username, "displayName": "Password User", "password": "old-pass", "role": "user"},
+        cookies=cookies,
+    )
+    assert created.status_code == 200
+    user = created.json()["user"]
+
+    login_response = client.post("/api/auth/login", json={"username": username, "password": "old-pass"})
+    assert login_response.status_code == 200
+    changed = client.post(
+        "/api/auth/password",
+        json={"currentPassword": "old-pass", "newPassword": "new-pass"},
+        cookies=login_response.cookies,
+    )
+    assert changed.status_code == 200
+    assert changed.json()["sessionsRevoked"] is True
+
+    old_login = client.post("/api/auth/login", json={"username": username, "password": "old-pass"})
+    assert old_login.status_code == 401
+    new_login = client.post("/api/auth/login", json={"username": username, "password": "new-pass"})
+    assert new_login.status_code == 200
+
+    deleted = client.delete(f"/api/auth/users/{user['id']}", cookies=cookies)
+    assert deleted.status_code == 200
+
+
+def test_tool_access_can_hide_tool_from_anonymous_users() -> None:
+    _reset_tool_access("text_cleaner")
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+
+    updated = client.post(
+        "/api/tools-admin/text_cleaner/access",
+        json={"globalPublic": False, "allowedUserIds": []},
+        cookies=cookies,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["globalPublic"] is False
+
+    client.cookies.clear()
+    tools = client.get("/api/tools")
+    assert tools.status_code == 200
+    assert all(tool["id"] != "text_cleaner" for tool in tools.json())
+
+    detail = client.get("/api/tools/text_cleaner")
+    assert detail.status_code == 401
+    assert detail.json()["error"]["code"] == "LOGIN_REQUIRED"
+
+    clean = client.post(
+        "/api/tools/text-cleaner/clean",
+        json={"text": " hello ", "trim": True, "collapseWhitespace": True, "removeBlankLines": True},
+    )
+    assert clean.status_code == 401
+
+    restored = client.post(
+        "/api/tools-admin/text_cleaner/access",
+        json={"globalPublic": True, "allowedUserIds": []},
+        cookies=cookies,
+    )
+    assert restored.status_code == 200
+    _reset_tool_access("text_cleaner")
+
+
+def test_admin_can_clear_one_tool_storage() -> None:
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    storage_dir = get_settings().storage_dir
+    shared_dir = storage_dir / "data" / "tools" / "memo_demo"
+    user_dir = storage_dir / "user_data" / "clear_test_user" / "tools" / "memo_demo"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (shared_dir / "sample.txt").write_text("shared", encoding="utf-8")
+    (user_dir / "sample.txt").write_text("user", encoding="utf-8")
+    with get_connection() as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS memo_demo_clear_test (id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE IF NOT EXISTS unrelated_clear_test (id TEXT PRIMARY KEY)")
+        connection.commit()
+
+    cleared = client.delete("/api/tools-admin/memo_demo/storage", cookies=cookies)
+    assert cleared.status_code == 200
+    payload = cleared.json()
+    assert "memo_demo_clear_test" in payload["droppedTables"]
+    assert not shared_dir.exists()
+    assert not user_dir.exists()
+
+    with get_connection() as connection:
+        memo_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memo_demo_clear_test'"
+        ).fetchone()
+        unrelated_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'unrelated_clear_test'"
+        ).fetchone()
+        connection.execute("DROP TABLE IF EXISTS unrelated_clear_test")
+        connection.commit()
+    assert memo_table is None
+    assert unrelated_table is not None
 
 
 def test_memo_demo_requires_login() -> None:
@@ -300,6 +406,13 @@ def _cleanup_monitor_test_data() -> None:
             "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user'))"
         )
         connection.execute("DELETE FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user')")
+        connection.commit()
+
+
+def _reset_tool_access(tool_id: str) -> None:
+    with get_connection() as connection:
+        connection.execute("DELETE FROM platform_tool_visibility WHERE tool_id = ?", (tool_id,))
+        connection.execute("DELETE FROM platform_tool_user_access WHERE tool_id = ?", (tool_id,))
         connection.commit()
 
 

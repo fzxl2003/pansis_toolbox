@@ -81,8 +81,6 @@ def init_database() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(server_id) REFERENCES ssh_servers(id)
             );
-            CREATE INDEX IF NOT EXISTS idx_ssh_templates_owner_server
-                ON ssh_command_templates(owner_user_id, server_id, updated_at);
 
             CREATE TABLE IF NOT EXISTS ssh_screen_sessions (
                 id TEXT PRIMARY KEY,
@@ -158,6 +156,12 @@ def init_database() -> None:
             connection.execute("SELECT server_id FROM ssh_command_templates LIMIT 1")
         except sqlite3.OperationalError:
             connection.execute("ALTER TABLE ssh_command_templates ADD COLUMN server_id TEXT")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ssh_templates_owner_server
+                ON ssh_command_templates(owner_user_id, server_id, updated_at)
+            """
+        )
         # Migration: add initial_command to terminal tabs if missing
         try:
             connection.execute("SELECT initial_command FROM ssh_terminal_tabs LIMIT 1")

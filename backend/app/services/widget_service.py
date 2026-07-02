@@ -10,16 +10,19 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.registry.models import RegisteredWidget
 from backend.app.registry.widget_registry import widget_registry
+from backend.app.services.auth_service import User
+from backend.app.services.tool_access_service import require_tool_access
 
 
-def list_widgets() -> list[dict[str, Any]]:
-    return [widget.public_dict() for widget in widget_registry.all()]
+def list_widgets(user: User | None = None) -> list[dict[str, Any]]:
+    return [widget.public_dict() for widget in widget_registry.all() if _can_access_widget(widget, user)]
 
 
-def get_widget_data(widget_id: str) -> dict[str, Any]:
+def get_widget_data(widget_id: str, user: User | None = None) -> dict[str, Any]:
     widget = widget_registry.get(widget_id)
     if widget is None:
         raise ToolboxError("WIDGET_NOT_FOUND", "小组件不存在", status_code=404)
+    require_tool_access(widget.tool_id, user)
     if widget.backend_path is not None:
         return _load_widget_data(widget)
     return _placeholder_widget_data(widget)
@@ -74,3 +77,11 @@ def _placeholder_widget_data(widget: RegisteredWidget) -> dict[str, Any]:
         "data": {"status": widget.tool_status.value},
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _can_access_widget(widget: RegisteredWidget, user: User | None) -> bool:
+    try:
+        require_tool_access(widget.tool_id, user)
+        return True
+    except ToolboxError:
+        return False

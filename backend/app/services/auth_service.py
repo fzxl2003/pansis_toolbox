@@ -187,6 +187,27 @@ def reset_user_password(user_id: str, password: str) -> User:
     return user_from_row(updated)
 
 
+def change_user_password(user: User, current_password: str, new_password: str) -> User:
+    ensure_default_user()
+    if not current_password or not new_password:
+        raise ToolboxError("INVALID_PASSWORD", "当前密码和新密码不能为空", status_code=400)
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user.id,)).fetchone()
+        if row is None or row["disabled"]:
+            raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
+        if not verify_password(current_password, row["password_salt"], row["password_hash"]):
+            raise ToolboxError("INVALID_CURRENT_PASSWORD", "当前密码错误", status_code=400)
+        salt = secrets.token_hex(16)
+        connection.execute(
+            "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?",
+            (hash_password(new_password, salt), salt, user.id),
+        )
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user.id,))
+        connection.commit()
+        updated = connection.execute("SELECT * FROM users WHERE id = ?", (user.id,)).fetchone()
+    return user_from_row(updated)
+
+
 def delete_user(user_id: str) -> None:
     ensure_default_user()
     with get_connection() as connection:

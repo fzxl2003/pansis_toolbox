@@ -59,6 +59,20 @@ def init_database() -> None:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS platform_tool_visibility (
+                tool_id TEXT PRIMARY KEY,
+                global_public INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS platform_tool_user_access (
+                tool_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                granted_at TEXT NOT NULL,
+                PRIMARY KEY(tool_id, user_id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             """
         )
         _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")

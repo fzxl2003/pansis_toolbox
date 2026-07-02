@@ -1,9 +1,10 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Globe, Mail, Shield, UserPlus, Users } from 'lucide-react';
+import { Eye, Globe, KeyRound, Lock, Mail, Shield, Trash2, UserPlus, Users, Wrench } from 'lucide-react';
 
 import { apiGet, apiPost } from '../api/client';
-import { fetchMe, type AuthUser } from '../api/auth';
+import { changePassword, fetchMe, resetUserPassword, type AuthUser } from '../api/auth';
 import { fetchEmailConfig, saveEmailConfig, testEmailConfig, type EmailConfig, type EmailConfigPayload } from '../api/settings';
+import { clearToolStorage, fetchToolAccess, saveToolAccess, type ToolAccessItem } from '../api/tools';
 import { LoginPanel } from '../components/LoginPanel';
 
 type ManagedUser = AuthUser & { disabled: boolean };
@@ -21,6 +22,10 @@ export function SettingsPage() {
   const [me, setMe] = useState<AuthUser | null>(null);
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [form, setForm] = useState({ username: '', displayName: '', password: '', role: 'user' });
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '' });
+  const [resetPasswords, setResetPasswords] = useState<Record<string, string>>({});
+  const [toolAccess, setToolAccess] = useState<ToolAccessItem[]>([]);
+  const [clearingToolId, setClearingToolId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -40,6 +45,7 @@ export function SettingsPage() {
     if (isAdmin) {
       void loadUsers();
       void loadEmailConfig();
+      void loadToolAccess();
     }
   }, [isAdmin]);
 
@@ -70,6 +76,15 @@ export function SettingsPage() {
     }
   }
 
+  async function loadToolAccess() {
+    try {
+      const payload = await fetchToolAccess();
+      setToolAccess(payload.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载工具权限失败');
+    }
+  }
+
   async function createUser(event: FormEvent) {
     event.preventDefault();
     setError(null);
@@ -89,6 +104,82 @@ export function SettingsPage() {
       await loadUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : '更新用户失败');
+    }
+  }
+
+  async function handleChangePassword(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    try {
+      await changePassword(passwordForm.currentPassword, passwordForm.newPassword);
+      setPasswordForm({ currentPassword: '', newPassword: '' });
+      showSuccess('密码已更新，请重新登录');
+      setMe(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '修改密码失败');
+    }
+  }
+
+  async function handleResetPassword(userId: string) {
+    const password = resetPasswords[userId] ?? '';
+    if (!password) {
+      setError('请输入新密码');
+      return;
+    }
+    setError(null);
+    try {
+      await resetUserPassword(userId, password);
+      setResetPasswords((prev) => ({ ...prev, [userId]: '' }));
+      showSuccess('用户密码已重置');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重置密码失败');
+    }
+  }
+
+  async function toggleToolGlobalPublic(item: ToolAccessItem, globalPublic: boolean) {
+    setError(null);
+    try {
+      await saveToolAccess(item.tool.id, {
+        globalPublic,
+        allowedUserIds: item.allowedUsers.map((user) => user.id),
+      });
+      await loadToolAccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存工具权限失败');
+    }
+  }
+
+  async function toggleToolUser(item: ToolAccessItem, userId: string, allowed: boolean) {
+    const current = new Set(item.allowedUsers.map((user) => user.id));
+    if (allowed) {
+      current.add(userId);
+    } else {
+      current.delete(userId);
+    }
+    setError(null);
+    try {
+      await saveToolAccess(item.tool.id, {
+        globalPublic: item.globalPublic,
+        allowedUserIds: Array.from(current),
+      });
+      await loadToolAccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存工具权限失败');
+    }
+  }
+
+  async function handleClearToolStorage(item: ToolAccessItem) {
+    const confirmed = window.confirm(`确认清除「${item.tool.name}」的数据库表和存储文件？该操作不可恢复。`);
+    if (!confirmed) return;
+    setClearingToolId(item.tool.id);
+    setError(null);
+    try {
+      const result = await clearToolStorage(item.tool.id);
+      showSuccess(`已清理 ${item.tool.name}：删除 ${result.droppedTables.length} 张表、${result.removedPaths.length} 个目录/文件`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '清理工具数据失败');
+    } finally {
+      setClearingToolId(null);
     }
   }
 
@@ -144,6 +235,32 @@ export function SettingsPage() {
       {successMsg && <div className="success-box">{successMsg}</div>}
 
       {!me && <LoginPanel />}
+
+      {me && (
+        <section className="panel">
+          <div className="result-header">
+            <span>修改密码</span>
+            <KeyRound size={17} />
+          </div>
+          <form className="monitor-form user-form" onSubmit={(e) => void handleChangePassword(e)}>
+            <input
+              className="text-input"
+              type="password"
+              placeholder="当前密码"
+              value={passwordForm.currentPassword}
+              onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
+            />
+            <input
+              className="text-input"
+              type="password"
+              placeholder="新密码"
+              value={passwordForm.newPassword}
+              onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
+            />
+            <button className="primary-button" type="submit"><Lock size={16} />更新密码</button>
+          </form>
+        </section>
+      )}
 
       {me && !isAdmin && (
         <section className="content-band">
@@ -284,11 +401,90 @@ export function SettingsPage() {
               {users.map((user) => (
                 <div className="user-row" key={user.id}>
                   <span><strong>{user.displayName}</strong><small>{user.username} · {user.role}</small></span>
-                  {user.role !== 'admin' && (
-                    <button className="chip" type="button" onClick={() => void setDisabled(user.id, !user.disabled)}>
-                      {user.disabled ? '启用' : '禁用'}
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                    <input
+                      className="text-input"
+                      type="password"
+                      placeholder="新密码"
+                      style={{ width: '130px' }}
+                      value={resetPasswords[user.id] ?? ''}
+                      onChange={(event) => setResetPasswords({ ...resetPasswords, [user.id]: event.target.value })}
+                    />
+                    <button className="chip" type="button" onClick={() => void handleResetPassword(user.id)}>
+                      <KeyRound size={14} />重置
                     </button>
-                  )}
+                    {user.role !== 'admin' && (
+                      <button className="chip" type="button" onClick={() => void setDisabled(user.id, !user.disabled)}>
+                        {user.disabled ? '启用' : '禁用'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="result-header">
+              <span>工具可见性</span>
+              <Eye size={17} />
+            </div>
+            <div className="compact-list">
+              {toolAccess.map((item) => {
+                const allowedIds = new Set(item.allowedUsers.map((user) => user.id));
+                return (
+                  <div className="user-row" key={item.tool.id} style={{ alignItems: 'flex-start' }}>
+                    <span>
+                      <strong>{item.tool.name}</strong>
+                      <small>{item.tool.id} · {item.globalPublic ? '全局公开' : '按用户授权'}</small>
+                    </span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end' }}>
+                      <label className="chip" style={{ cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={item.globalPublic}
+                          onChange={(event) => void toggleToolGlobalPublic(item, event.target.checked)}
+                        />
+                        全局公开
+                      </label>
+                      {!item.globalPublic && (
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          {users.filter((user) => !user.disabled).map((user) => (
+                            <label className="chip" key={user.id} style={{ cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={allowedIds.has(user.id)}
+                                onChange={(event) => void toggleToolUser(item, user.id, event.target.checked)}
+                              />
+                              {user.displayName}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="result-header">
+              <span>工具数据清理</span>
+              <Wrench size={17} />
+            </div>
+            <div className="compact-list">
+              {toolAccess.map((item) => (
+                <div className="user-row" key={item.tool.id}>
+                  <span><strong>{item.tool.name}</strong><small>{item.tool.id}</small></span>
+                  <button
+                    className="chip"
+                    type="button"
+                    disabled={clearingToolId === item.tool.id}
+                    onClick={() => void handleClearToolStorage(item)}
+                  >
+                    <Trash2 size={14} />清除数据
+                  </button>
                 </div>
               ))}
             </div>

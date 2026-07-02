@@ -90,8 +90,8 @@ def test_screen_parser_and_gate() -> None:
         """
     )
     assert parsed == [
-        {"sessionName": "train_run", "status": "running", "state": "Detached"},
-        {"sessionName": "shell", "status": "running", "state": "Attached"},
+        {"sessionName": "train_run", "pid": "1234", "status": "running", "state": "Detached"},
+        {"sessionName": "shell", "pid": "5678", "status": "running", "state": "Attached"},
     ]
     assert service.parse_screen_ls("No Sockets found in /run/screen/S-user.\n") == []
 
@@ -121,11 +121,16 @@ def test_templates_and_history_are_user_scoped() -> None:
         },
         USER_A,
     )
-    template = service.create_template({"name": "Train", "command": "python train.py --lr {{lr}}"}, USER_A)
+    template = service.create_template(
+        {"serverId": server["id"], "name": "Train", "command": "python train.py --lr {{lr}}"},
+        USER_A,
+    )
     history = service.record_history({"serverId": server["id"], "command": "pwd", "source": "terminal"}, USER_A)
 
     assert template["variables"] == ["lr"]
-    assert service.list_templates(USER_B) == []
+    assert service.list_templates(server["id"], USER_A)[0]["id"] == template["id"]
+    with pytest.raises(ToolboxError):
+        service.list_templates(server["id"], USER_B)
     assert service.list_history(USER_A)[0]["id"] == history["id"]
     assert service.list_history(USER_B) == []
 
@@ -202,7 +207,10 @@ class FakeClient:
         self.channel = channel
         self.closed = False
 
-    def invoke_shell(self, term: str) -> FakeChannel:
+    def invoke_shell(self, term: str, width: int = 80, height: int = 24) -> FakeChannel:
+        self.term = term
+        self.width = width
+        self.height = height
         return self.channel
 
     def close(self) -> None:
@@ -241,7 +249,8 @@ def test_terminal_websocket_rejects_anonymous() -> None:
 
     asyncio.run(service.terminal_websocket(socket, "missing"))
 
-    assert socket.accepted is False
+    assert socket.accepted is True
+    assert socket.sent_json[0]["type"] == "error"
     assert socket.close_code == 4401
 
 

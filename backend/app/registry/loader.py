@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -13,6 +13,7 @@ from backend.app.registry.models import RegisteredTool, ToolManifest, ToolStatus
 from backend.app.registry.tool_registry import tool_registry
 from backend.app.registry.widget_registry import widget_registry
 from backend.app.services.scheduler_service import Scheduler, scheduler
+from backend.app.services.tool_access_service import enforce_tool_access_dependency
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,12 @@ def register_tool_routers(app: FastAPI, tools: list[RegisteredTool]) -> None:
             app.mount(f"/tool-assets/{tool.tool_id}", StaticFiles(directory=assets_dir), name=f"tool-assets:{tool.tool_id}")
         try:
             router = load_backend_router(tool)
-            app.include_router(router, prefix=tool.api_prefix, tags=[f"tool:{tool.tool_id}"])
+            app.include_router(
+                router,
+                prefix=tool.api_prefix,
+                tags=[f"tool:{tool.tool_id}"],
+                dependencies=[Depends(enforce_tool_access_dependency(tool.tool_id))],
+            )
             register_tool_scheduled_tasks(tool, scheduler)
         except Exception as exc:  # noqa: BLE001 - isolate bad tools from the host app.
             logger.exception("Failed to load tool router for %s", tool.tool_id)

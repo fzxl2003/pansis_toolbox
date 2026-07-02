@@ -1,4 +1,4 @@
-import { apiGet } from './client';
+import { apiDelete, apiGet, apiPost } from './client';
 
 export type ToolStatus =
   | 'available'
@@ -42,10 +42,31 @@ export type ToolIcon =
     }
   | string;
 
+export type ToolAccessItem = {
+  tool: ToolManifest;
+  globalPublic: boolean;
+  allowedUsers: Array<{ id: string; username: string; displayName: string }>;
+};
+
 export function fetchTools() {
   return apiGet<ToolManifest[]>('/api/tools');
 }
 
 export function fetchTool(toolId: string) {
   return apiGet<ToolManifest>(`/api/tools/${toolId}`);
+}
+
+export function fetchToolAccess() {
+  return apiGet<{ items: ToolAccessItem[] }>('/api/tools-admin/access');
+}
+
+export function saveToolAccess(toolId: string, payload: { globalPublic: boolean; allowedUserIds: string[] }) {
+  return apiPost<{ toolId: string; globalPublic: boolean; allowedUsers: ToolAccessItem['allowedUsers'] }>(
+    `/api/tools-admin/${toolId}/access`,
+    payload,
+  );
+}
+
+export function clearToolStorage(toolId: string) {
+  return apiDelete<{ toolId: string; droppedTables: string[]; removedPaths: string[] }>(`/api/tools-admin/${toolId}/storage`);
 }

@@ -24,3 +24,14 @@ export function login(username: string, password: string) {
 export function logout() {
   return apiPost<AuthState>('/api/auth/logout', {});
 }
+
+export function changePassword(currentPassword: string, newPassword: string) {
+  return apiPost<{ user: AuthUser; sessionsRevoked: boolean }>('/api/auth/password', {
+    currentPassword,
+    newPassword,
+  });
+}
+
+export function resetUserPassword(userId: string, password: string) {
+  return apiPost<{ user: AuthUser }>(`/api/auth/users/${userId}/password`, { password });
+}

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from backend.app.core.config import get_settings
 from backend.app.core.security import get_optional_user, require_admin, require_user
 from backend.app.services.auth_service import (
+    change_user_password,
     create_user,
     delete_user,
     ensure_default_user,
@@ -33,6 +34,11 @@ class CreateUserRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    currentPassword: str
+    newPassword: str
 
 
 class SetDisabledRequest(BaseModel):
@@ -102,6 +108,13 @@ def reset_user_password_route(request: Request, user_id: str, payload: ResetPass
     require_admin(request)
     user = reset_user_password(user_id, payload.password)
     return {"user": user.public_dict()}
+
+
+@router.post("/auth/password")
+def change_password_route(request: Request, payload: ChangePasswordRequest) -> dict:
+    user = require_user(request)
+    updated = change_user_password(user, payload.currentPassword, payload.newPassword)
+    return {"user": updated.public_dict(), "sessionsRevoked": True}
 
 
 @router.post("/auth/users/{user_id}/disabled")

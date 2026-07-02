@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Request
+from starlette.requests import HTTPConnection
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
@@ -152,10 +152,10 @@ def clear_tool_storage(tool: RegisteredTool) -> dict[str, Any]:
 
 
 def enforce_tool_access_dependency(tool_id: str):
-    def dependency(request: Request) -> None:
+    def dependency(connection: HTTPConnection) -> None:
         from backend.app.core.security import get_optional_user
 
-        require_tool_access(tool_id, get_optional_user(request))
+        require_tool_access(tool_id, get_optional_user(connection))
 
     return dependency
 

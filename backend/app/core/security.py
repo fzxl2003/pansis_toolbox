@@ -1,14 +1,15 @@
 from pathlib import Path
 
 from fastapi import Request
+from starlette.requests import HTTPConnection
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.services.auth_service import User, get_user_by_session_token
 
 
-def get_optional_user(request: Request) -> User | None:
-    token = request.cookies.get(get_settings().session_cookie_name)
+def get_optional_user(connection: HTTPConnection) -> User | None:
+    token = connection.cookies.get(get_settings().session_cookie_name)
     return get_user_by_session_token(token)
 
 

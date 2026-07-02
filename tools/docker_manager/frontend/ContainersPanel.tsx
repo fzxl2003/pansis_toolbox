@@ -795,7 +795,7 @@ export function RunCreateModal({ serverId, servers, me, quota, serverOverview, o
             直接输入完整 <code>docker run</code> 命令（从界面模式同步而来，可手动修改）：
           </div>
           {availVolumes.some(v => v.canManage === false) && (
-            <Alert type="warning">
+            <Alert type="info">
               提示：若命令中挂载了您仅有查看权限的卷（非所有者），必须手动在对应 <code>-v</code> / <code>--mount</code> 项添加 <code>:ro</code> / <code>readonly=true</code> 设置只读，否则将拒绝创建。
             </Alert>
           )}
@@ -1371,7 +1371,7 @@ function HostPathPickerModal({
           <button className="btn" onClick={onClose}>取消</button>
           <button
             className="btn btn-primary"
-            disabled={!cwd.startsWith('/') || (filterStr && !pathAllowed(cwd))}
+            disabled={!cwd.startsWith('/') || Boolean(filterStr && !pathAllowed(cwd))}
             onClick={() => onSelect(cwd)}
           >
             <CheckCircle size={14} /> 选择此路径

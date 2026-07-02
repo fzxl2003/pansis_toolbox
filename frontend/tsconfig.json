@@ -16,7 +16,9 @@
       "react": ["node_modules/@types/react"],
       "react/jsx-runtime": ["node_modules/@types/react/jsx-runtime"],
       "react-dom/client": ["node_modules/@types/react-dom/client"],
-      "lucide-react": ["node_modules/lucide-react/dist/lucide-react.d.ts"]
+      "lucide-react": ["node_modules/lucide-react/dist/lucide-react.d.ts"],
+      "@xterm/xterm": ["node_modules/@xterm/xterm/typings/xterm.d.ts"],
+      "@xterm/addon-fit": ["node_modules/@xterm/addon-fit/typings/addon-fit.d.ts"]
     },
     "resolveJsonModule": true,
     "isolatedModules": true,

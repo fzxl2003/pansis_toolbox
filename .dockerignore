@@ -1,0 +1,15 @@
+.git
+.pytest_cache
+.pycache
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+frontend/node_modules
+frontend/dist
+tools/*/node_modules
+tools/*/*/node_modules
+tools/web_proxy/vendor/rammerhead/node_modules
+tools/web_proxy/vendor/rammerhead/sessions/*
+tools/web_proxy/vendor/rammerhead/cache-js/*
+storage
+pansis_toolbox.egg-info

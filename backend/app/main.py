@@ -1,5 +1,9 @@
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.api import routes_auth, routes_health, routes_settings, routes_tools, routes_widgets
 from backend.app.core.config import get_settings
@@ -34,6 +38,7 @@ def create_app() -> FastAPI:
     ensure_default_user()
     tools = discover_tools(settings.tools_dir)
     register_tool_routers(app, tools)
+    mount_frontend(app, settings.frontend_dist_dir)
 
     @app.on_event("startup")
     async def start_scheduler() -> None:
@@ -44,6 +49,30 @@ def create_app() -> FastAPI:
         await scheduler.stop()
 
     return app
+
+
+def mount_frontend(app: FastAPI, dist_dir: Path) -> None:
+    index_path = dist_dir / "index.html"
+    if not index_path.exists():
+        return
+
+    assets_dir = dist_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
+
+    @app.get("/", include_in_schema=False)
+    def serve_frontend_index() -> FileResponse:
+        return FileResponse(index_path)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_frontend(full_path: str) -> FileResponse:
+        if full_path.startswith(("api/", "tool-assets/")):
+            raise HTTPException(status_code=404)
+
+        requested_path = dist_dir / full_path
+        if requested_path.is_file():
+            return FileResponse(requested_path)
+        return FileResponse(index_path)
 
 
 app = create_app()

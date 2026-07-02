@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_prefix: str = "/api"
     tools_dir: Path = Path("tools")
+    frontend_dist_dir: Path = Path("frontend/dist")
     storage_dir: Path = Path("storage")
     platform_db_path: Path = Path("storage/data/platform.db")
     widget_layout_path: Path = Path("storage/data/widget_layout.json")

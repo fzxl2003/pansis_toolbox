@@ -1,101 +1,207 @@
 # pansis_toolbox
 
-`pansis_toolbox` 是一个插件式工具箱网站骨架，采用「FastAPI 后端 + Vite React 前端 + tools 子工具目录」的结构。主平台负责工具发现、路由挂载、工具列表、小组件协议和异常隔离；每个子工具独立维护自己的 manifest、前端、后端和说明文档。
+`pansis_toolbox` 是一个插件式个人/实验室工具箱框架。当前项目由 FastAPI 后端、Vite React 前端和 `tools/` 子工具目录组成：主框架负责登录、工具发现、路由挂载、用户数据目录、小组件注册和异常隔离；每个工具通过自己的 `manifest.json`、后端 router 和前端入口接入。
 
-## 技术栈
-
-- 后端：FastAPI、Pydantic、Uvicorn
-- 前端：Vite、React、TypeScript、Tailwind CSS
-- 工具接入：`tools/{tool_id}/manifest.json` + 独立前端入口 + 独立后端 router
-- 推荐环境：Python 3.11+，当前项目使用 Conda 环境 `pansis_toolbox`
-
-## 快速启动
-
-如果环境已经创建好：
-
-```bash
-conda activate pansis_toolbox
-cd /Users/pan1pansis/Coding/pansis_toolbox
-npm run generate:tools
-npm run dev
-```
-
-如果需要从零创建 Conda 环境：
-
-```bash
-conda create -n pansis_toolbox python=3.11
-conda activate pansis_toolbox
-conda install fastapi uvicorn pydantic-settings pytest httpx python-multipart nodejs
-```
-
-默认开发账号：
+## 当前结构
 
 ```text
-用户名：admin
-密码：admin123
+backend/          FastAPI 主后端、平台 API、登录、数据库和工具加载器
+frontend/         Vite React 主前端
+tools/            可按需增删的子工具目录
+scripts/          开发启动、工具检查、工具视图生成脚本
+docker/           镜像构建和容器部署配置
+storage/          本地数据库、上传文件和用户工具数据
 ```
 
-可通过 `.env` 中的 `DEFAULT_ADMIN_USERNAME`、`DEFAULT_ADMIN_PASSWORD` 和 `DEFAULT_ADMIN_DISPLAY_NAME` 覆盖。
+平台默认读取 `tools/*/manifest.json` 发现工具。`enabled=false` 的工具不会被前端注册，也不会被 Docker 镜像的按需依赖扫描纳入运行环境构建。
 
-安装前端依赖：
+## 当前工具
+
+| 工具 ID | 名称 | 分类 | API 前缀 | 额外运行依赖 |
+| --- | --- | --- | --- | --- |
+| `docker_manager` | Docker 多租户管理 | `ops` | `/api/tools/docker-manager` | `paramiko`, `cryptography` |
+| `experiment_monitor` | 实验监控报警与触发 | `ops` | `/api/tools/experiment-monitor` | `paramiko` |
+| `memo_demo` | 备忘录 Demo | `text` | `/api/tools/memo-demo` | 无 |
+| `server_monitor` | 服务器监控看板 | `ops` | `/api/tools/server-monitor` | 无 |
+| `ssh_workspace` | SSH 工作台 | `ops` | `/api/tools/ssh-workspace` | `paramiko`, `cryptography` |
+| `text_cleaner` | 文本清洗 | `text` | `/api/tools/text-cleaner` | 无 |
+| `url_navigator` | 网址导航 | `network` | `/api/tools/url-navigator` | 无 |
+| `web_proxy` | 网页代理 | `network` | `/web-proxy` | 内置 Rammerhead Node sidecar |
+
+## 本地环境配置
+
+推荐使用 Conda 环境 `pansis_toolbox`。当前仓库在该环境下验证过 Python 测试和前端构建。
 
 ```bash
-cd frontend
-npm install
-cd ..
+conda create -n pansis_toolbox python=3.11 nodejs -c conda-forge
+conda activate pansis_toolbox
+python -m pip install -e ".[dev]"
+npm --prefix frontend install
 ```
 
-## 单独启动
+如果环境里没有通过 Conda 安装 Node.js，也可以使用系统 Node.js，但需要保证 `node` 和 `npm` 在当前 shell 中可用。
 
-只启动后端：
+复制环境变量样例：
+
+```bash
+cp .env.example .env
+```
+
+常用配置项：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `APP_ENV` | `development` | 应用运行环境 |
+| `API_PREFIX` | `/api` | 主平台 API 前缀 |
+| `TOOLS_DIR` | `tools` | 工具发现目录 |
+| `FRONTEND_DIST_DIR` | `frontend/dist` | 生产模式静态前端目录 |
+| `STORAGE_DIR` | `storage` | 本地持久化数据目录 |
+| `PLATFORM_DB_PATH` | `storage/data/platform.db` | 平台 SQLite 数据库 |
+| `WIDGET_LAYOUT_PATH` | `storage/data/widget_layout.json` | 首页小组件布局文件 |
+| `FRONTEND_ORIGIN` | `http://localhost:5173` | 开发前端允许跨域来源 |
+| `SESSION_SECRET` | `change-me-in-production` | 会话签名密钥，生产环境必须修改 |
+| `DEFAULT_ADMIN_USERNAME` | `admin` | 默认管理员用户名 |
+| `DEFAULT_ADMIN_PASSWORD` | `admin123` | 默认管理员密码，生产环境必须修改 |
+| `DEFAULT_ADMIN_DISPLAY_NAME` | `本地管理员` | 默认管理员显示名 |
+
+默认登录账号为 `admin / admin123`。首次部署或对外访问前请修改 `SESSION_SECRET` 和默认管理员密码。
+
+## 本地开发
+
+生成工具前端注册表并同时启动后端和前端：
 
 ```bash
 conda activate pansis_toolbox
-uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-只启动前端：
-
-```bash
-conda activate pansis_toolbox
-cd frontend
+npm run generate:tools
 npm run dev
 ```
 
 默认访问地址：
 
-- 前端：http://127.0.0.1:5173/
-- 后端：http://127.0.0.1:8000
-- 健康检查：http://127.0.0.1:8000/api/health
+- 前端开发服务：`http://127.0.0.1:5173/`
+- 后端 API：`http://127.0.0.1:8000`
+- 健康检查：`http://127.0.0.1:8000/api/health`
 
-## 常用命令
+也可以分别启动：
 
 ```bash
-python scripts/check_tools.py
-python scripts/generate_tool_views.py
-python -m pytest
-cd frontend && npm run build
+npm run backend
+npm run frontend
 ```
 
-根目录脚本：
+根目录常用脚本：
 
-- `npm run dev`：同时启动前端和后端开发服务。
-- `npm run backend`：启动 FastAPI 后端。
-- `npm run frontend`：启动 Vite 前端。
-- `npm run build`：构建前端。
-- `npm run generate:tools`：根据 `tools/*/manifest.json` 生成前端工具注册表。
-- `npm run check:tools`：检查工具 manifest 和入口文件。
-- `npm run test`：运行后端测试。
+```bash
+npm run generate:tools   # 根据 tools/*/manifest.json 生成前端懒加载注册表
+npm run check:tools      # 检查工具 manifest 和前后端入口
+npm run build            # 构建前端
+npm run test             # 运行 pytest
+```
 
-## 目录结构
+## 生产运行方式
+
+当前后端会在 `FRONTEND_DIST_DIR` 存在 `index.html` 时自动挂载静态前端。因此生产环境可以只运行一个 Uvicorn 服务：
+
+```bash
+conda activate pansis_toolbox
+npm run generate:tools
+npm run build
+APP_ENV=production \
+FRONTEND_ORIGIN=http://localhost:8000 \
+uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+```
+
+访问 `http://localhost:8000/` 即可打开前端页面，API 仍在 `/api` 下。
+
+## Docker 部署
+
+Docker 部署文件位于 `docker/`：
 
 ```text
-backend/              FastAPI 主后端
-frontend/             Vite React 主前端
-tools/                子工具目录
-scripts/              工具创建、检查、注册表生成和开发启动脚本
-storage/              上传、输出、临时文件和本地数据目录
+docker/Dockerfile       多阶段镜像构建
+docker/build-image.sh   镜像构建脚本
+docker/compose.yml      容器创建和启动配置
 ```
+
+构建镜像：
+
+```bash
+./docker/build-image.sh
+```
+
+可通过环境变量覆盖镜像名、标签和平台：
+
+```bash
+IMAGE_NAME=pansis-toolbox IMAGE_TAG=prod PLATFORM=linux/amd64 ./docker/build-image.sh
+```
+
+构建脚本会扫描当前仓库中的 `tools/*/manifest.json`，只处理当前存在且启用的工具。镜像内部同样按工具目录扫描：
+
+- 安装每个启用工具 manifest 中声明的 Python `dependencies`。
+- 对启用工具目录下发现的 `package.json` 执行 `npm ci` 或 `npm install`。
+- 如果该 Node 包声明了 `build` 脚本，则在镜像构建时执行构建。
+- 当前 `web_proxy` 的 Rammerhead sidecar 会因此在镜像构建阶段准备好依赖和客户端产物。
+
+启动容器：
+
+```bash
+docker compose -f docker/compose.yml up -d
+```
+
+默认访问：
+
+```text
+http://localhost:8000/
+```
+
+常用 compose 覆盖项：
+
+```bash
+HOST_PORT=8080 \
+SESSION_SECRET='replace-with-a-long-random-secret' \
+DEFAULT_ADMIN_USERNAME=admin \
+DEFAULT_ADMIN_PASSWORD='replace-this-password' \
+docker compose -f docker/compose.yml up -d
+```
+
+如果修改了 `HOST_PORT`，建议同时设置 `FRONTEND_ORIGIN`：
+
+```bash
+HOST_PORT=8080 FRONTEND_ORIGIN=http://localhost:8080 docker compose -f docker/compose.yml up -d
+```
+
+容器中的持久化数据保存在命名卷 `pansis-toolbox-storage`，挂载到 `/app/storage`。删除容器不会删除该卷；如需彻底清理数据，需要显式删除卷。
+
+## 新增工具
+
+创建工具骨架：
+
+```bash
+python scripts/create_tool.py my_tool
+```
+
+每个工具至少需要：
+
+- `manifest.json`：工具 ID、名称、分类、入口、API 前缀、权限和依赖声明。
+- `backend/router.py`：导出 FastAPI `APIRouter`。
+- `frontend/index.tsx`：导出 React 默认组件。
+
+新增或删除工具后运行：
+
+```bash
+npm run check:tools
+npm run generate:tools
+```
+
+工具运行依赖应优先写入 `manifest.json` 的 `dependencies` 字段；带独立 Node sidecar 的工具可以在工具目录下放置自己的 `package.json`。Docker 镜像会按启用工具自动处理这些依赖。
+
+工具可选 `displayMode`：
+
+- `standard`：默认工具页，保留主框架导航。
+- `fullscreen`：全屏工具页，隐藏主框架侧边栏和页面 padding。
+- `flexible`：允许用户在标准/全屏之间切换。
+
+## 用户数据
 
 平台数据库默认位于：
 
@@ -103,102 +209,13 @@ storage/              上传、输出、临时文件和本地数据目录
 storage/data/platform.db
 ```
 
-用户工具数据默认位于：
+工具用户数据默认位于：
 
 ```text
 storage/user_data/{user_id}/tools/{tool_id}/
 ```
 
-示例工具：
-
-```text
-tools/text_cleaner/
-  manifest.json
-  README.md
-  backend/router.py
-  backend/widget.py
-  frontend/index.tsx
-```
-
-## 新增工具流程
-
-```bash
-python scripts/create_tool.py my_tool
-python scripts/check_tools.py
-python scripts/generate_tool_views.py
-```
-
-每个工具至少包含：
-
-- `manifest.json`：工具 ID、名称、说明、分类、入口、API 前缀、小组件和权限声明。
-- `backend/router.py`：导出 FastAPI `APIRouter`，由主服务动态挂载。
-- `frontend/index.tsx`：导出 React 默认组件，由工具页懒加载。
-- `README.md`：说明工具用途和接口。
-
-工具可在 `manifest.json` 中声明 `displayMode`：
-
-- `standard`：默认模式，显示主框架侧边栏和工具页返回链接。
-- `fullscreen`：全屏模式，隐藏侧边栏、主内容 padding 等框架内容。
-- `flexible`：两者均可，工具页提供“全屏显示/退出全屏”切换。
-
-工具图标支持内置 Lucide 图标和工具自带图片：
-
-```json
-{ "icon": { "type": "lucide", "name": "compass" } }
-```
-
-```json
-{ "icon": { "type": "image", "src": "assets/icon.png", "alt": "工具图标" } }
-```
-
-图片路径为相对路径时，会从工具目录的 `assets/` 静态资源目录读取；也可以使用 `/` 开头的站内路径或完整 `https://` URL。
-
-## 当前示例
-
-`text_cleaner` 是匿名可用的 MVP 示例工具，提供文本清洗能力：
-
-- 清理首尾空白。
-- 合并连续空白。
-- 移除空行。
-- 支持大小写转换。
-- 提供一个首页 summary 小组件。
-
-接口示例：
-
-```text
-POST /api/tools/text-cleaner/clean
-GET  /api/widgets/text_cleaner.summary/data
-```
-
-`memo_demo` 是需要登录的用户数据示例工具：
-
-- 上传 `.txt` 文件。
-- 保存到当前登录用户自己的工具数据目录。
-- 查看、预览、删除自己的备忘录。
-- 匿名访问用户数据接口时返回 `LOGIN_REQUIRED`，前端显示登录面板。
-
-接口示例：
-
-```text
-POST   /api/tools/memo-demo/upload
-GET    /api/tools/memo-demo/memos
-GET    /api/tools/memo-demo/memos/{memo_id}
-DELETE /api/tools/memo-demo/memos/{memo_id}
-```
-
-## 登录与用户数据
-
-后端提供轻量登录接口：
-
-```text
-POST /api/auth/login
-POST /api/auth/logout
-GET  /api/auth/me
-GET  /api/auth/sso/login
-GET  /api/auth/sso/callback
-```
-
-工具后端如果需要用户专属数据，应调用：
+工具后端如果需要用户专属目录，使用：
 
 ```python
 from backend.app.core.security import require_user_tool_data_dir
@@ -206,25 +223,17 @@ from backend.app.core.security import require_user_tool_data_dir
 data_dir = require_user_tool_data_dir(request, "tool_id")
 ```
 
-未登录时该函数会返回统一的 `LOGIN_REQUIRED` 错误；已登录时会创建并返回当前用户的工具专属目录。
+未登录时会返回统一的 `LOGIN_REQUIRED` 错误；已登录时会创建并返回当前用户的工具专属目录。
 
-## 验证状态
+## 验证
 
-当前已验证：
+推荐变更后至少运行：
 
-- `python scripts/check_tools.py`
-- `python scripts/generate_tool_views.py`
-- `python -m pytest`
-- `cd frontend && npm run build`
+```bash
+python -m py_compile backend/app/main.py backend/app/core/config.py
+npm run build
+python -m pytest backend/tests/test_app.py
+git diff --check
+```
 
-如果通过 Codex 或受限 shell 启动本地服务时遇到 `listen EPERM`，需要允许本地进程监听 `127.0.0.1:8000` 和 `127.0.0.1:5173`。
-
-
-权限配置前端界面修改
-1、将可见该服务器、使用镜像、使用容器、使用卷这几个选项分别挪到服务器访问、镜像权限等行的最右侧，用一个胶囊开关，而不是勾选框
-2、每个权限下面的勾选框第二行现在前面多了空格，进行修复
-3、CUDA权限也加一个胶囊开关，其余保持不变
-
-
-1、docker pull 下来的镜像没有创建者和管理者
-2、镜像部分的资源占用概览为空
+在当前工作区，全量 `pytest` 仍有 `ssh_workspace` 既有测试与实现契约不一致的问题；如只验证主框架启动、工具注册和本次 Docker 文档相关改动，可先使用 `backend/tests/test_app.py` 与前端构建。

@@ -358,8 +358,8 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
     task_id = secrets.token_hex(12)
     now = now_iso()
     match_mode = payload.get("matchMode", "simple")
-    if match_mode not in ("simple", "regex"):
-        raise ToolboxError("INVALID_MATCH_MODE", "匹配模式必须是 simple 或 regex", status_code=400, tool_id=TOOL_ID)
+    match_pattern = _required(payload, "matchPattern")
+    _validate_process_filter(match_mode, match_pattern, strict_regex=True)
     alert_condition = payload.get("alertCondition", "below")
     if alert_condition not in ("below", "above", "changed"):
         raise ToolboxError("INVALID_ALERT_CONDITION", "报警条件类型无效", status_code=400, tool_id=TOOL_ID)
@@ -380,7 +380,7 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
                 _required(payload, "name"),
                 payload.get("description", ""),
                 match_mode,
-                _required(payload, "matchPattern"),
+                match_pattern,
                 payload.get("filterUser", ""),
                 alert_condition,
                 int(payload.get("alertThreshold", 0)),
@@ -407,8 +407,8 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
 def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
     row = get_monitor_task(task_id, user)
     match_mode = payload.get("matchMode", row["match_mode"])
-    if match_mode not in ("simple", "regex"):
-        raise ToolboxError("INVALID_MATCH_MODE", "匹配模式必须是 simple 或 regex", status_code=400, tool_id=TOOL_ID)
+    match_pattern = payload.get("matchPattern", row["match_pattern"])
+    _validate_process_filter(match_mode, match_pattern, strict_regex=True)
     alert_condition = payload.get("alertCondition", row["alert_condition"])
     if alert_condition not in ("below", "above", "changed"):
         raise ToolboxError("INVALID_ALERT_CONDITION", "报警条件类型无效", status_code=400, tool_id=TOOL_ID)
@@ -427,7 +427,7 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
                 payload.get("name", row["name"]),
                 payload.get("description", row["description"]),
                 match_mode,
-                payload.get("matchPattern", row["match_pattern"]),
+                match_pattern,
                 payload.get("filterUser", row["filter_user"]),
                 alert_condition,
                 int(payload.get("alertThreshold", row["alert_threshold"])),
@@ -475,55 +475,90 @@ def delete_monitor_task(task_id: str, user: User) -> None:
 # Process Filter Preview
 # ============================================================
 
-def preview_process_filter(server_id: str, match_mode: str, match_pattern: str, filter_user: str, user: User) -> dict[str, Any]:
-    """Preview which processes would be matched by the given filter settings."""
-    server = get_server(server_id, user)
-
+def _validate_process_filter(match_mode: str, match_pattern: str, *, strict_regex: bool = False) -> None:
     if match_mode not in ("simple", "regex"):
         raise ToolboxError("INVALID_MATCH_MODE", "匹配模式必须是 simple 或 regex", status_code=400, tool_id=TOOL_ID)
 
-    # Validate regex pattern upfront
-    if match_mode == "regex" and match_pattern:
+    if strict_regex and match_mode == "regex" and match_pattern:
         try:
             re.compile(match_pattern)
         except re.error as exc:
             raise ToolboxError("INVALID_REGEX", f"正则表达式无效: {exc}", status_code=400, tool_id=TOOL_ID) from exc
 
-    # Build ps command
+
+def _build_process_list_command(filter_user: str) -> str:
     if filter_user:
-        ps_cmd = f"ps -u {shlex_quote(filter_user)} -o pid=,user=,args= 2>/dev/null"
-    else:
-        ps_cmd = "ps -eo pid=,user=,args= 2>/dev/null"
+        return f"ps -u {shlex_quote(filter_user)} -o pid=,user=,args= 2>/dev/null"
+    return "ps -eo pid=,user=,args= 2>/dev/null"
+
+
+def _collect_process_snapshot(
+    server_row: sqlite3.Row | Any,
+    *,
+    filter_user: str,
+    match_mode: str,
+    match_pattern: str,
+    include_screen_check: bool = False,
+) -> dict[str, Any]:
+    _validate_process_filter(match_mode, match_pattern, strict_regex=True)
+
+    ps_cmd = _build_process_list_command(filter_user)
 
     try:
-        output = _run_ssh(server, ps_cmd, timeout=15)
+        ps_output = _run_ssh(server_row, ps_cmd, timeout=15)
     except Exception as exc:
         raise ToolboxError("SSH_ERROR", f"SSH 连接失败: {exc}", status_code=503, tool_id=TOOL_ID) from exc
 
+    has_screen = False
+    if include_screen_check:
+        try:
+            screen_output = _run_ssh(
+                server_row,
+                'which screen >/dev/null 2>&1 && echo "HAS_SCREEN" || echo "NO_SCREEN"',
+                timeout=10,
+            )
+            has_screen = "HAS_SCREEN" in screen_output
+        except Exception:
+            has_screen = False
+
     all_processes: list[str] = []
     matched_processes: list[str] = []
+    simple_pattern = match_pattern.lower()
 
-    for line in output.splitlines():
-        line = line.strip()
+    for raw_line in ps_output.splitlines():
+        line = raw_line.strip()
         if not line:
             continue
         all_processes.append(line)
         if not match_pattern:
             continue
         if match_mode == "simple":
-            if match_pattern.lower() in line.lower():
+            if simple_pattern in line.lower():
                 matched_processes.append(line)
-        elif match_mode == "regex":
-            try:
-                if re.search(match_pattern, line):
-                    matched_processes.append(line)
-            except re.error:
-                pass
+        elif match_mode == "regex" and re.search(match_pattern, line):
+            matched_processes.append(line)
 
     return {
-        "totalCount": len(all_processes),
-        "matchedCount": len(matched_processes),
+        "allProcesses": all_processes,
         "matchedProcesses": matched_processes,
+        "hasScreen": has_screen,
+    }
+
+
+def preview_process_filter(server_id: str, match_mode: str, match_pattern: str, filter_user: str, user: User) -> dict[str, Any]:
+    """Preview which processes would be matched by the given filter settings."""
+    server = get_server(server_id, user)
+    snapshot = _collect_process_snapshot(
+        server,
+        filter_user=filter_user,
+        match_mode=match_mode,
+        match_pattern=match_pattern,
+    )
+
+    return {
+        "totalCount": len(snapshot["allProcesses"]),
+        "matchedCount": len(snapshot["matchedProcesses"]),
+        "matchedProcesses": snapshot["matchedProcesses"],
     }
 
 
@@ -948,46 +983,17 @@ def _get_sessions_for_group(group_id: str) -> list[dict[str, Any]]:
 # Process Monitoring & Alert Engine
 # ============================================================
 
-def check_process_count(task_row: sqlite3.Row, server_row: sqlite3.Row) -> tuple[int, list[str]]:
-    """Execute SSH command to count matching processes. Returns (count, process_info_list)."""
-    username_filter = task_row["filter_user"]
-    pattern = task_row["match_pattern"]
-    mode = task_row["match_mode"]
-
-    # Build ps command to list processes
-    if username_filter:
-        ps_cmd = f"ps -u {shlex_quote(username_filter)} -o pid=,user=,args= 2>/dev/null"
-    else:
-        ps_cmd = "ps -eo pid=,user=,args= 2>/dev/null"
-
-    # Full command: get processes and check screen availability
-    full_cmd = f'{ps_cmd}; echo "---SCREEN_CHECK---"; which screen >/dev/null 2>&1 && echo "HAS_SCREEN" || echo "NO_SCREEN"'
-
-    output = _run_ssh(server_row, full_cmd, timeout=15)
-
-    # Parse output
-    parts = output.split("---SCREEN_CHECK---")
-    ps_output = parts[0] if parts else output
-    has_screen = len(parts) > 1 and "HAS_SCREEN" in parts[1]
-
-    matched_processes: list[str] = []
-    for line in ps_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if mode == "simple":
-            if pattern.lower() in line.lower():
-                matched_processes.append(line)
-        elif mode == "regex":
-            try:
-                if re.search(pattern, line):
-                    matched_processes.append(line)
-            except re.error:
-                # If regex is invalid, fall back to simple matching
-                if pattern.lower() in line.lower():
-                    matched_processes.append(line)
-
-    return len(matched_processes), matched_processes, has_screen
+def check_process_count(task_row: sqlite3.Row, server_row: sqlite3.Row) -> tuple[int, list[str], bool]:
+    """Execute SSH command to count matching processes. Returns (count, process_info_list, has_screen)."""
+    snapshot = _collect_process_snapshot(
+        server_row,
+        filter_user=task_row["filter_user"],
+        match_mode=task_row["match_mode"],
+        match_pattern=task_row["match_pattern"],
+        include_screen_check=True,
+    )
+    matched_processes = snapshot["matchedProcesses"]
+    return len(matched_processes), matched_processes, bool(snapshot["hasScreen"])
 
 
 def evaluate_condition(current_count: int, task_row: sqlite3.Row, alert_state: sqlite3.Row | None) -> tuple[bool, str]:

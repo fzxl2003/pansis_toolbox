@@ -8,10 +8,13 @@ from backend.app.db.database import get_connection
 from backend.app.main import app
 from backend.app.registry.loader import discover_tools
 from backend.app.registry.models import ToolStatus
+from backend.app.services.auth_service import User
+from tools.experiment_monitor.backend import service as experiment_service
 from tools.server_monitor.backend import service as monitor_service
 
 
 client = TestClient(app)
+EXPERIMENT_USER = User(id="experiment_test_user", username="experiment_user", display_name="Experiment User")
 
 
 def test_health() -> None:
@@ -221,6 +224,63 @@ def test_admin_can_clear_one_tool_storage() -> None:
     assert unrelated_table is not None
 
 
+def test_experiment_monitor_create_task_uses_preview_processes() -> None:
+    _cleanup_experiment_test_data()
+    experiment_service.init_database()
+    with get_connection() as connection:
+        server_id = "experiment_preview_server"
+        connection.execute(
+            """
+            INSERT INTO em_servers (
+                id, name, host, port, ssh_username, ssh_password_encrypted,
+                owner_user_id, enabled, created_at, updated_at
+            ) VALUES (?, 'Preview Server', '127.0.0.1', 22, 'tester', ?, ?, 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """,
+            (server_id, experiment_service.encrypt_secret("secret"), EXPERIMENT_USER.id),
+        )
+        connection.commit()
+
+    preview_processes = [f"tester {idx} 1 S 00:01 python train.py --rank {idx}" for idx in range(10)]
+    task = experiment_service.create_monitor_task(
+        {
+            "serverId": server_id,
+            "name": "Preview Count",
+            "matchMode": "simple",
+            "matchPattern": "python train.py",
+            "filterUser": "tester",
+            "alertCondition": "below",
+            "alertThreshold": 5,
+            "initialMatchedProcesses": preview_processes,
+        },
+        EXPERIMENT_USER,
+    )
+
+    history = experiment_service.get_task_history(task["id"], EXPERIMENT_USER)
+    assert history["samples"][-1]["processCount"] == 10
+    assert history["samples"][-1]["matchedProcesses"] == preview_processes
+    assert history["alertState"]["lastCheckCount"] == 10
+    with get_connection() as connection:
+        task_row = connection.execute(
+            "SELECT id, last_checked_at, check_interval_seconds FROM em_monitor_tasks WHERE id = ?",
+            (task["id"],),
+        ).fetchone()
+    assert experiment_service._task_check_due(task_row, experiment_service.datetime.now(experiment_service.timezone.utc)) is False
+    updated_processes = preview_processes[:2]
+    experiment_service.update_monitor_task(
+        task["id"],
+        {
+            "matchPattern": "SCREEN -dmS op_",
+            "initialMatchedProcesses": updated_processes,
+        },
+        EXPERIMENT_USER,
+    )
+    edited_history = experiment_service.get_task_history(task["id"], EXPERIMENT_USER)
+    assert edited_history["samples"][-1]["processCount"] == 2
+    assert edited_history["samples"][-1]["matchedProcesses"] == updated_processes
+    assert edited_history["alertState"]["lastCheckCount"] == 2
+    _cleanup_experiment_test_data()
+
+
 def test_memo_demo_requires_login() -> None:
     client.cookies.clear()
     response = client.get("/api/tools/memo-demo/memos")
@@ -406,6 +466,26 @@ def _cleanup_monitor_test_data() -> None:
             "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user'))"
         )
         connection.execute("DELETE FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user')")
+        connection.commit()
+
+
+def _cleanup_experiment_test_data() -> None:
+    experiment_service.init_database()
+    with get_connection() as connection:
+        task_ids = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM em_monitor_tasks WHERE owner_user_id = ?",
+                (EXPERIMENT_USER.id,),
+            ).fetchall()
+        ]
+        for task_id in task_ids:
+            connection.execute("DELETE FROM em_alert_actions WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM em_alert_events WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM em_alert_states WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM em_samples WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM em_monitor_tasks WHERE id = ?", (task_id,))
+        connection.execute("DELETE FROM em_servers WHERE owner_user_id = ?", (EXPERIMENT_USER.id,))
         connection.commit()
 
 

@@ -5,6 +5,9 @@ const dataDir = process.env.PANSIS_WEB_PROXY_DATA_DIR || path.join(__dirname, '.
 const port = Number(process.env.PANSIS_WEB_PROXY_PORT || 8787);
 const crossDomainPort = Number(process.env.PANSIS_WEB_PROXY_CROSS_PORT || 8788);
 const host = process.env.PANSIS_WEB_PROXY_HOST || '127.0.0.1';
+const publicHost = process.env.PANSIS_WEB_PROXY_PUBLIC_HOST || host;
+const publicPort = Number(process.env.PANSIS_WEB_PROXY_PUBLIC_PORT || port);
+const publicProtocol = process.env.PANSIS_WEB_PROXY_PUBLIC_PROTOCOL || 'http:';
 const password = process.env.PANSIS_WEB_PROXY_PASSWORD || null;
 
 module.exports = {
@@ -15,7 +18,7 @@ module.exports = {
     enableWorkers: false,
     workers: 1,
     ssl: null,
-    getServerInfo: () => ({ hostname: host, port, crossDomainPort, protocol: 'http:' }),
+    getServerInfo: () => ({ hostname: publicHost, port: publicPort, crossDomainPort: publicPort, protocol: publicProtocol }),
     password,
     disableLocalStorageSync: false,
     restrictSessionToIP: true,

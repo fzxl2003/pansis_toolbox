@@ -598,6 +598,15 @@ textarea.monospace {
   padding-right: 4px;
 }
 
+.em-log-truncated {
+  text-align: center;
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 2px;
+}
+
 .em-log-empty {
   display: flex;
   flex-direction: column;

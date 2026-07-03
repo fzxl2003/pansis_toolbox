@@ -27,12 +27,20 @@ CHECK_INTERVAL_SECONDS = 30
 RETENTION_DAYS = 7
 DEFAULT_CONFIRM_COUNT = 3
 
+# 模块级初始化标志：避免每次 API 请求都重复执行建表/建索引/迁移语句
+# CREATE TABLE IF NOT EXISTS 虽然幂等，但每次都要查 sqlite_master 并解析 DDL，
+# 再加上 3 条 ALTER TABLE 的 try/except 开销，在高频请求下显著拖慢响应。
+_db_initialized = False
+
 
 # ============================================================
 # Database Initialization
 # ============================================================
 
 def init_database() -> None:
+    global _db_initialized
+    if _db_initialized:
+        return
     with get_connection() as connection:
         connection.executescript(
             """
@@ -73,6 +81,8 @@ def init_database() -> None:
                 confirm_count INTEGER NOT NULL DEFAULT 3,
                 -- 检查间隔秒数
                 check_interval_seconds INTEGER NOT NULL DEFAULT 30,
+                -- 上次检查时间（用于按任务间隔调度）
+                last_checked_at TEXT,
                 -- 是否启用
                 enabled INTEGER NOT NULL DEFAULT 1,
                 -- 上次确认的进程数（用于 changed 模式）
@@ -204,12 +214,14 @@ def init_database() -> None:
         for col_sql in [
             "ALTER TABLE em_alert_states ADD COLUMN last_matched_processes TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE em_alert_states ADD COLUMN baseline_processes TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE em_monitor_tasks ADD COLUMN last_checked_at TEXT",
         ]:
             try:
                 connection.execute(col_sql)
                 connection.commit()
             except Exception:
                 pass  # 字段已存在，忽略
+    _db_initialized = True
 
 
 # ============================================================
@@ -354,6 +366,7 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
     init_database()
     # Validate server belongs to user
     get_server(payload["serverId"], user)
+    initial_matched_processes = _initial_matched_processes(payload)
 
     task_id = secrets.token_hex(12)
     now = now_iso()
@@ -401,11 +414,16 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
         )
         connection.commit()
         row = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
+    if initial_matched_processes is not None:
+        _record_initial_sample(task_id, initial_matched_processes)
+        with get_connection() as connection:
+            row = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
     return _public_task(row)
 
 
 def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
     row = get_monitor_task(task_id, user)
+    initial_matched_processes = _initial_matched_processes(payload)
     match_mode = payload.get("matchMode", row["match_mode"])
     match_pattern = payload.get("matchPattern", row["match_pattern"])
     _validate_process_filter(match_mode, match_pattern, strict_regex=True)
@@ -441,6 +459,10 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
         )
         connection.commit()
         updated = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
+    if initial_matched_processes is not None:
+        _record_initial_sample(task_id, initial_matched_processes)
+        with get_connection() as connection:
+            updated = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
     return _public_task(updated)
 
 
@@ -468,6 +490,74 @@ def delete_monitor_task(task_id: str, user: User) -> None:
         connection.execute("DELETE FROM em_alert_states WHERE task_id = ?", (task_id,))
         connection.execute("DELETE FROM em_samples WHERE task_id = ?", (task_id,))
         connection.execute("DELETE FROM em_monitor_tasks WHERE id = ?", (task_id,))
+        connection.commit()
+
+
+def _initial_matched_processes(payload: dict[str, Any]) -> list[str] | None:
+    if "initialMatchedProcesses" not in payload:
+        return None
+    value = payload.get("initialMatchedProcesses")
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _record_initial_sample(task_id: str, matched_processes: list[str]) -> None:
+    """Persist preview results as the task's current sample without firing actions."""
+    init_database()
+    with get_connection() as connection:
+        task = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
+        state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
+    if task is None:
+        return
+
+    now = now_iso()
+    process_count = len(matched_processes)
+    condition_met, _ = evaluate_condition(process_count, task, state)
+    clipped_processes = matched_processes[:50]
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO em_samples (id, task_id, checked_at, process_count, matched_processes, condition_met, error)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                secrets.token_hex(12),
+                task_id,
+                now,
+                process_count,
+                json.dumps(clipped_processes, ensure_ascii=False),
+                1 if condition_met else 0,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO em_alert_states (
+                task_id, consecutive_meets, last_check_count,
+                last_matched_processes, baseline_processes,
+                is_alerting, updated_at
+            ) VALUES (?, 0, ?, ?, ?, 0, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                consecutive_meets = 0,
+                last_check_count = excluded.last_check_count,
+                last_matched_processes = excluded.last_matched_processes,
+                baseline_processes = excluded.baseline_processes,
+                is_alerting = 0,
+                updated_at = excluded.updated_at
+            """,
+            (
+                task_id,
+                process_count,
+                json.dumps(clipped_processes, ensure_ascii=False),
+                json.dumps(clipped_processes, ensure_ascii=False),
+                now,
+            ),
+        )
+        connection.execute(
+            "UPDATE em_monitor_tasks SET last_checked_at = ? WHERE id = ?",
+            (now, task_id),
+        )
         connection.commit()
 
 
@@ -644,6 +734,10 @@ def update_alert_action(action_id: str, payload: dict[str, Any], user: User) -> 
                 int(payload.get("sortOrder", row["sort_order"])),
                 action_id,
             ),
+        )
+        connection.execute(
+            "UPDATE em_monitor_tasks SET last_checked_at = ? WHERE id = ?",
+            (now, task_id),
         )
         connection.commit()
         updated = connection.execute("SELECT * FROM em_alert_actions WHERE id = ?", (action_id,)).fetchone()
@@ -1390,17 +1484,20 @@ def get_task_history(task_id: str, user: User, hours: int = 24) -> dict[str, Any
     get_monitor_task(task_id, user)
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * RETENTION_DAYS)))
     with get_connection() as connection:
+        # 轻量查询：不加载 matched_processes（每条最多 50 个进程字符串的大 JSON），
+        # 前端图表/日志面板只用 processCount/checkedAt/conditionMet/error，
+        # 24h × 30s 间隔 ≈ 2880 条采样，去掉该列后传输体积大幅下降。
         samples = connection.execute(
-            "SELECT * FROM em_samples WHERE task_id = ? AND checked_at >= ? ORDER BY checked_at ASC",
+            "SELECT id, checked_at, process_count, condition_met, error FROM em_samples WHERE task_id = ? AND checked_at >= ? ORDER BY checked_at ASC",
             (task_id, since.isoformat()),
         ).fetchall()
         events = connection.execute(
-            "SELECT * FROM em_alert_events WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
+            "SELECT * FROM em_alert_events WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 200",
             (task_id, since.isoformat()),
         ).fetchall()
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
     return {
-        "samples": [_public_sample(s) for s in samples],
+        "samples": [_public_sample_light(s) for s in samples],
         "events": [_public_event(e) for e in events],
         "alertState": _public_alert_state(state) if state else None,
     }
@@ -1443,18 +1540,33 @@ def reset_alert_state(task_id: str, user: User) -> dict[str, Any]:
 def collect_due_checks() -> None:
     """Called by scheduler to run all due monitoring checks."""
     init_database()
+    now = datetime.now(timezone.utc)
     with get_connection() as connection:
         tasks = connection.execute(
-            "SELECT id FROM em_monitor_tasks WHERE enabled = 1",
+            "SELECT id, last_checked_at, check_interval_seconds FROM em_monitor_tasks WHERE enabled = 1",
         ).fetchall()
 
     for task_row in tasks:
         task_id = task_row["id"]
-        if task_id:
+        if task_id and _task_check_due(task_row, now):
             try:
                 run_monitor_check(task_id)
             except Exception:
                 logger.exception("Failed to run monitor check for task %s", task_id)
+
+
+def _task_check_due(task_row: sqlite3.Row, now: datetime) -> bool:
+    last_checked_at = task_row["last_checked_at"]
+    if not last_checked_at:
+        return True
+    try:
+        last_checked = datetime.fromisoformat(last_checked_at)
+    except ValueError:
+        return True
+    if last_checked.tzinfo is None:
+        last_checked = last_checked.replace(tzinfo=timezone.utc)
+    interval_seconds = max(1, int(task_row["check_interval_seconds"] or CHECK_INTERVAL_SECONDS))
+    return last_checked + timedelta(seconds=interval_seconds) <= now
 
 
 # ============================================================
@@ -1601,6 +1713,18 @@ def _public_sample(row: sqlite3.Row) -> dict[str, Any]:
         "checkedAt": row["checked_at"],
         "processCount": row["process_count"],
         "matchedProcesses": _json_list(row["matched_processes"]),
+        "conditionMet": bool(row["condition_met"]),
+        "error": row["error"],
+    }
+
+
+def _public_sample_light(row: sqlite3.Row) -> dict[str, Any]:
+    """轻量采样序列化：不含 matched_processes，用于历史列表加载。"""
+    return {
+        "id": row["id"],
+        "checkedAt": row["checked_at"],
+        "processCount": row["process_count"],
+        "matchedProcesses": [],
         "conditionMet": bool(row["condition_met"]),
         "error": row["error"],
     }

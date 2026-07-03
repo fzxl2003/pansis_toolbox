@@ -163,6 +163,12 @@ type SshTestResult = {
   error?: string;
 };
 
+type TaskDetailState = {
+  samples: Sample[];
+  events: AlertEvent[];
+  alertState: AlertState | null;
+};
+
 // ============================================================
 // Form States
 // ============================================================
@@ -247,6 +253,12 @@ const emptyEmailAction: EmailActionFormState = {
 此邮件由实验监控系统自动发送。`,
 };
 
+const emptyTaskDetail: TaskDetailState = {
+  samples: [],
+  events: [],
+  alertState: null,
+};
+
 
 // ============================================================
 // Main Component
@@ -257,11 +269,8 @@ export default function ExperimentMonitorTool() {
   const [servers, setServers] = useState<EmServer[]>([]);
   const [tasks, setTasks] = useState<MonitorTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string>('');
-  const [history, setHistory] = useState<{ samples: Sample[]; events: AlertEvent[]; alertState: AlertState | null }>({
-    samples: [],
-    events: [],
-    alertState: null,
-  });
+  const [taskDetailsById, setTaskDetailsById] = useState<Record<string, TaskDetailState>>({});
+  const [actionsByTaskId, setActionsByTaskId] = useState<Record<string, AlertAction[]>>({});
 
   // Log filter state
   const [logFilter, setLogFilter] = useState<'all' | LogEntry['type']>('all');
@@ -271,7 +280,9 @@ export default function ExperimentMonitorTool() {
     | 'action-email'
     | 'script-groups' | 'script-group-create' | null>(null);
   const [editingServerId, setEditingServerId] = useState<string>('');
+  const [editingTaskId, setEditingTaskId] = useState<string>('');
   const [editingActionId, setEditingActionId] = useState<string>('');
+  const [actionModalTaskId, setActionModalTaskId] = useState<string>('');
   // currently open action for script groups panel
   const [groupsActionId, setGroupsActionId] = useState<string>('');
   // currently open single group id for the single-group config panel
@@ -292,11 +303,9 @@ export default function ExperimentMonitorTool() {
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
   const [sshTestResult, setSshTestResult] = useState<SshTestResult | null>(null);
 
-  // Actions for selected task
-  const [actions, setActions] = useState<AlertAction[]>([]);
-
   const isAdmin = me?.role === 'admin';
-  const selectedTask = tasks.find((t) => t.id === selectedTaskId) || tasks[0] || null;
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
+  const selectedTaskDetail = selectedTaskId ? (taskDetailsById[selectedTaskId] || emptyTaskDetail) : emptyTaskDetail;
 
   useEffect(() => {
     fetchMe().then((state) => setMe(state.user)).catch(() => setMe(null));
@@ -305,12 +314,20 @@ export default function ExperimentMonitorTool() {
   }, []);
 
   useEffect(() => {
-    if (selectedTask) {
-      setSelectedTaskId(selectedTask.id);
-      void loadTaskDetail(selectedTask.id);
-      void loadActions(selectedTask.id);
-    }
-  }, [selectedTask?.id]);
+    const taskIds = new Set(tasks.map((task) => task.id));
+    setSelectedTaskId((prev) => {
+      if (tasks.length === 0) return '';
+      return prev && taskIds.has(prev) ? prev : tasks[0].id;
+    });
+    setExpandedTasks((prev) => new Set([...prev].filter((taskId) => taskIds.has(taskId))));
+    setTaskDetailsById((prev) => pickRecord(prev, taskIds));
+    setActionsByTaskId((prev) => pickRecord(prev, taskIds));
+  }, [tasks]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    void loadTaskData(selectedTaskId);
+  }, [selectedTaskId]);
 
   // Auto-refresh history
   useEffect(() => {
@@ -342,12 +359,13 @@ export default function ExperimentMonitorTool() {
         : '/api/tools/experiment-monitor/tasks';
       const payload = await apiGet<{ tasks: MonitorTask[] }>(url);
       setTasks(payload.tasks);
-      if (payload.tasks.length && !selectedTaskId && !serverId) {
-        setSelectedTaskId(payload.tasks[0].id);
-      }
     } catch (err) {
       handleError(err);
     }
+  }
+
+  async function loadTaskData(taskId: string) {
+    await Promise.all([loadTaskDetail(taskId), loadActions(taskId)]);
   }
 
   async function loadTaskDetail(taskId: string) {
@@ -363,7 +381,7 @@ export default function ExperimentMonitorTool() {
       const payload = await apiGet<{ samples: Sample[]; events: AlertEvent[]; alertState: AlertState | null }>(
         `/api/tools/experiment-monitor/tasks/${taskId}/history?hours=24`,
       );
-      setHistory(payload);
+      setTaskDetailsById((prev) => ({ ...prev, [taskId]: payload }));
     } catch (err) {
       handleError(err);
     }
@@ -374,7 +392,13 @@ export default function ExperimentMonitorTool() {
       const payload = await apiGet<{ alertState: AlertState | null }>(
         `/api/tools/experiment-monitor/tasks/${taskId}/alert-state`,
       );
-      setHistory((prev) => ({ ...prev, alertState: payload.alertState }));
+      setTaskDetailsById((prev) => ({
+        ...prev,
+        [taskId]: {
+          ...(prev[taskId] || emptyTaskDetail),
+          alertState: payload.alertState,
+        },
+      }));
     } catch (err) {
       handleError(err);
     }
@@ -385,7 +409,7 @@ export default function ExperimentMonitorTool() {
       const payload = await apiGet<{ actions: AlertAction[] }>(
         `/api/tools/experiment-monitor/tasks/${taskId}/actions`,
       );
-      setActions(payload.actions);
+      setActionsByTaskId((prev) => ({ ...prev, [taskId]: payload.actions }));
       // Also preload groups for script actions
       for (const action of payload.actions) {
         if (action.actionType === 'script') {
@@ -488,10 +512,13 @@ export default function ExperimentMonitorTool() {
 
   function openCreateTask() {
     setTaskForm({ ...emptyTask, serverId: servers[0]?.id || '' });
+    setEditingTaskId('');
     setModal('task-create');
   }
 
   function openEditTask(task: MonitorTask) {
+    setSelectedTaskId(task.id);
+    setEditingTaskId(task.id);
     setTaskForm({
       serverId: task.serverId,
       name: task.name,
@@ -514,14 +541,25 @@ export default function ExperimentMonitorTool() {
     setIsLoading(true);
     setError(null);
     try {
-      if (modal === 'task-edit' && selectedTask) {
-        await apiPut(`/api/tools/experiment-monitor/tasks/${selectedTask.id}`, taskForm);
+      let savedTaskId = editingTaskId;
+      if (modal === 'task-edit' && editingTaskId) {
+        const response = await apiPut<{ task: MonitorTask }>(
+          `/api/tools/experiment-monitor/tasks/${editingTaskId}`,
+          taskForm,
+        );
+        savedTaskId = response.task.id;
       } else {
-        await apiPost('/api/tools/experiment-monitor/tasks', taskForm);
+        const response = await apiPost<{ task: MonitorTask }>('/api/tools/experiment-monitor/tasks', taskForm);
+        savedTaskId = response.task.id;
       }
       setModal(null);
+      setEditingTaskId('');
       showSuccess('监控任务保存成功');
       await loadTasks();
+      if (savedTaskId) {
+        setSelectedTaskId(savedTaskId);
+        void loadTaskData(savedTaskId);
+      }
     } catch (err) {
       handleError(err);
     } finally {
@@ -536,6 +574,13 @@ export default function ExperimentMonitorTool() {
       await apiDelete(`/api/tools/experiment-monitor/tasks/${taskId}`);
       showSuccess('任务已删除');
       if (selectedTaskId === taskId) setSelectedTaskId('');
+      setExpandedTasks((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+      setTaskDetailsById((prev) => omitRecordKey(prev, taskId));
+      setActionsByTaskId((prev) => omitRecordKey(prev, taskId));
       await loadTasks();
     } catch (err) {
       handleError(err);
@@ -568,10 +613,12 @@ export default function ExperimentMonitorTool() {
   // Action CRUD
   // ============================================================
 
-  function openCreateEmailAction() {
-    if (!selectedTask) return;
+  function openCreateEmailAction(taskId: string) {
+    if (!tasks.some((task) => task.id === taskId)) return;
+    setSelectedTaskId(taskId);
     setEmailActionForm({ ...emptyEmailAction });
     setEditingActionId('');
+    setActionModalTaskId(taskId);
     setModal('action-email');
   }
 
@@ -580,17 +627,19 @@ export default function ExperimentMonitorTool() {
    * - 若当前 task 下还没有 script action，先自动创建一个
    * - 然后弹出「新建分组」表单（只填分组名称即可快速创建一个分组）
    */
-  async function openCreateGroupModal() {
-    if (!selectedTask) return;
-    let scriptAction = actions.find((a) => a.actionType === 'script');
+  async function openCreateGroupModal(taskId: string) {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    setSelectedTaskId(taskId);
+    let scriptAction = (actionsByTaskId[taskId] || []).find((a) => a.actionType === 'script');
     if (!scriptAction) {
       try {
         const res = await apiPost<{ action: AlertAction }>(
-          `/api/tools/experiment-monitor/tasks/${selectedTask.id}/actions`,
+          `/api/tools/experiment-monitor/tasks/${task.id}/actions`,
           { actionType: 'script' as ActionType, scriptCommands: [], scriptScreenName: '', scriptsPerTrigger: 1 },
         );
         scriptAction = res.action;
-        await loadActions(selectedTask.id);
+        await loadActions(task.id);
       } catch (err) {
         handleError(err);
         return;
@@ -610,9 +659,11 @@ export default function ExperimentMonitorTool() {
     void loadScriptGroups(actionId);
   }
 
-  function editAction(action: AlertAction) {
+  function editAction(action: AlertAction, taskId: string) {
     if (action.actionType === 'email') {
+      setSelectedTaskId(taskId);
       setEditingActionId(action.id);
+      setActionModalTaskId(taskId);
       setEmailActionForm({
         emailRecipients: action.emailRecipients.join(', '),
         emailSubjectTemplate: action.emailSubjectTemplate,
@@ -627,7 +678,8 @@ export default function ExperimentMonitorTool() {
 
   async function saveEmailAction(event: FormEvent) {
     event.preventDefault();
-    if (!selectedTask) return;
+    const targetTaskId = actionModalTaskId || selectedTaskId;
+    if (!targetTaskId) return;
     setIsLoading(true);
     setError(null);
     try {
@@ -640,11 +692,13 @@ export default function ExperimentMonitorTool() {
       if (editingActionId) {
         await apiPut(`/api/tools/experiment-monitor/actions/${editingActionId}`, payload);
       } else {
-        await apiPost(`/api/tools/experiment-monitor/tasks/${selectedTask.id}/actions`, payload);
+        await apiPost(`/api/tools/experiment-monitor/tasks/${targetTaskId}/actions`, payload);
       }
       setModal(null);
+      setEditingActionId('');
+      setActionModalTaskId('');
       showSuccess('邮件动作保存成功');
-      await loadActions(selectedTask.id);
+      await loadActions(targetTaskId);
     } catch (err) {
       handleError(err);
     } finally {
@@ -652,12 +706,13 @@ export default function ExperimentMonitorTool() {
     }
   }
 
-  async function removeAction(actionId: string) {
+  async function removeAction(actionId: string, taskId: string) {
     if (!window.confirm('确认删除该报警动作？')) return;
     try {
       await apiDelete(`/api/tools/experiment-monitor/actions/${actionId}`);
       showSuccess('动作已删除');
-      if (selectedTask) await loadActions(selectedTask.id);
+      setScriptGroupsMap((prev) => omitRecordKey(prev, actionId));
+      await loadActions(taskId);
     } catch (err) {
       handleError(err);
     }
@@ -757,12 +812,25 @@ export default function ExperimentMonitorTool() {
   // UI Helpers
   // ============================================================
 
+  function selectTask(taskId: string, options?: { toggleExpanded?: boolean }) {
+    setSelectedTaskId(taskId);
+    if (options?.toggleExpanded) {
+      toggleExpand(taskId);
+    } else {
+      void loadTaskData(taskId);
+    }
+  }
+
   function toggleExpand(taskId: string) {
+    const willExpand = !expandedTasks.has(taskId);
     setExpandedTasks((prev) => {
       const next = new Set(prev);
       if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
       return next;
     });
+    if (willExpand) {
+      void loadTaskData(taskId);
+    }
   }
 
   function showSuccess(msg: string) {
@@ -818,31 +886,34 @@ export default function ExperimentMonitorTool() {
             <p>暂无监控任务，点击「新建监控」开始创建。</p>
           </div>
         ) : (
-          tasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              server={servers.find((s) => s.id === task.serverId)}
-              isExpanded={expandedTasks.has(task.id)}
-              isSelected={selectedTaskId === task.id}
-              actions={selectedTaskId === task.id ? actions : []}
-              alertState={selectedTaskId === task.id ? history.alertState : null}
-              latestSample={selectedTaskId === task.id ? history.samples[history.samples.length - 1] : null}
-              scriptGroupsMap={scriptGroupsMap}
-              onSelect={() => { setSelectedTaskId(task.id); toggleExpand(task.id); }}
-              onToggleExpand={() => toggleExpand(task.id)}
-              onEdit={() => openEditTask(task)}
-              onDelete={() => removeTask(task.id)}
-              onCheckNow={() => void runCheckNow(task.id)}
-              onResetAlert={() => void resetAlert(task.id)}
-              onAddEmailAction={openCreateEmailAction}
-              onAddScriptAction={() => void openCreateGroupModal()}
-              onOpenGroupPanel={(groupId, actionId) => openSingleGroupPanel(groupId, actionId)}
-              onEditAction={(action) => editAction(action)}
-              onDeleteAction={(actionId) => void removeAction(actionId)}
-              onDeleteGroup={(groupId, actionId) => void deleteGroup(groupId, actionId)}
-            />
-          ))
+          tasks.map((task) => {
+            const detail = taskDetailsById[task.id] || emptyTaskDetail;
+            return (
+              <TaskCard
+                key={task.id}
+                task={task}
+                server={servers.find((s) => s.id === task.serverId)}
+                isExpanded={expandedTasks.has(task.id)}
+                isSelected={selectedTaskId === task.id}
+                actions={actionsByTaskId[task.id] || []}
+                alertState={detail.alertState}
+                latestSample={detail.samples[detail.samples.length - 1] || null}
+                scriptGroupsMap={scriptGroupsMap}
+                onSelect={() => selectTask(task.id, { toggleExpanded: true })}
+                onToggleExpand={() => selectTask(task.id, { toggleExpanded: true })}
+                onEdit={() => openEditTask(task)}
+                onDelete={() => removeTask(task.id)}
+                onCheckNow={() => void runCheckNow(task.id)}
+                onResetAlert={() => void resetAlert(task.id)}
+                onAddEmailAction={() => openCreateEmailAction(task.id)}
+                onAddScriptAction={() => void openCreateGroupModal(task.id)}
+                onOpenGroupPanel={(groupId, actionId) => openSingleGroupPanel(groupId, actionId)}
+                onEditAction={(action) => editAction(action, task.id)}
+                onDeleteAction={(actionId) => void removeAction(actionId, task.id)}
+                onDeleteGroup={(groupId, actionId) => void deleteGroup(groupId, actionId)}
+              />
+            );
+          })
         )}
       </section>
 
@@ -851,11 +922,11 @@ export default function ExperimentMonitorTool() {
         <section className="em-detail-panel">
           <div className="result-header">
             <span><Clock size={15} />监控日志</span>
-            <span className="muted">{history.samples.length + history.events.length} 条记录</span>
+            <span className="muted">{selectedTaskDetail.samples.length + selectedTaskDetail.events.length} 条记录</span>
           </div>
 
           {/* Alert State */}
-{history.alertState?.isAlerting && (
+{selectedTaskDetail.alertState?.isAlerting && (
 <div className="em-alert-state alerting">
 <button className="chip small" type="button" onClick={() => void resetAlert(selectedTaskId)}>
 <RotateCcw size={13} />重置报警
@@ -864,7 +935,7 @@ export default function ExperimentMonitorTool() {
           )}
 
           {/* Process Count Chart */}
-          <MiniChart samples={history.samples} />
+          <MiniChart samples={selectedTaskDetail.samples} />
 
           {/* Log Filter Tabs */}
           <div className="em-log-filter">
@@ -878,8 +949,8 @@ export default function ExperimentMonitorTool() {
 
           {/* Unified Log Timeline */}
           <UnifiedLogPanel
-            samples={history.samples}
-            events={history.events}
+            samples={selectedTaskDetail.samples}
+            events={selectedTaskDetail.events}
             filter={logFilter}
           />
         </section>
@@ -962,6 +1033,22 @@ export default function ExperimentMonitorTool() {
       )}
     </div>
   );
+}
+
+function pickRecord<T>(record: Record<string, T>, keys: Set<string>): Record<string, T> {
+  const next: Record<string, T> = {};
+  for (const key of keys) {
+    if (record[key] !== undefined) {
+      next[key] = record[key];
+    }
+  }
+  return next;
+}
+
+function omitRecordKey<T>(record: Record<string, T>, keyToOmit: string): Record<string, T> {
+  const next = { ...record };
+  delete next[keyToOmit];
+  return next;
 }
 
 // ============================================================
@@ -1150,6 +1237,12 @@ function UnifiedLogPanel({ samples, events, filter }: { samples: Sample[]; event
 
   const filtered = filter === 'all' ? allEntries : allEntries.filter((e) => e.type === filter || (filter === 'email_sent' && e.type === 'email_failed') || (filter === 'script_executed' && e.type === 'script_failed'));
 
+  // 限制渲染条目数量：24h × 30s 间隔可达数千条采样，全部渲染会严重卡顿 DOM。
+  // entries 已按时间倒序排列，截取最近 MAX_LOG_ENTRIES 条即可。
+  const MAX_LOG_ENTRIES = 200;
+  const truncated = filtered.length > MAX_LOG_ENTRIES;
+  const visibleEntries = truncated ? filtered.slice(0, MAX_LOG_ENTRIES) : filtered;
+
   if (filtered.length === 0) {
     return (
       <div className="em-log-empty">
@@ -1161,7 +1254,10 @@ function UnifiedLogPanel({ samples, events, filter }: { samples: Sample[]; event
 
   return (
     <div className="em-log-timeline">
-      {filtered.map((entry) => (
+      {truncated && (
+        <div className="em-log-truncated">仅显示最近 {MAX_LOG_ENTRIES} 条记录（共 {filtered.length} 条）</div>
+      )}
+      {visibleEntries.map((entry) => (
         <div className={`em-log-entry ${entry.type}`} key={entry.id}>
           <span className={`log-type-icon ${entry.type}`}>
             {entry.type === 'sample' && <Monitor size={13} />}

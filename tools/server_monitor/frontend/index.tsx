@@ -1,5 +1,5 @@
 import './style.css';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Activity,
@@ -135,6 +135,12 @@ export default function ServerMonitorTool() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
+  // 跟踪当前选中的服务器 ID，用于防御异步竞态：
+  // 切换服务器时，旧服务器的 loadSnapshot/loadHistory/loadDirectories 请求可能仍在飞行中，
+  // 返回后若直接 setState 会短暂显示旧服务器数据（下次轮询才恢复）。
+  // 通过 ref 检查响应的 serverId 是否仍为当前选中的服务器，避免过期响应污染状态。
+  const activeServerIdRef = useRef<string>('');
+
   const selected = servers.find((serverItem) => serverItem.id === selectedId) ?? servers[0];
   const isAdmin = me?.role === 'admin';
   const canEditSelected = Boolean(me && selected && (!selected.isDefault || isAdmin) && (!selected.ownerUserId || selected.ownerUserId === me.id || isAdmin));
@@ -172,6 +178,9 @@ export default function ServerMonitorTool() {
 
   useEffect(() => {
     if (!selected) return;
+    // 同步更新 ref：在发起任何请求之前先标记当前服务器，
+    // 这样旧服务器的飞行中请求返回时 ref 已指向新服务器，guard 检查会丢弃过期响应。
+    activeServerIdRef.current = selected.id;
     setSelectedId(selected.id);
     void refreshSelected(selected.id);
     const gpuTimer = window.setInterval(() => void loadSnapshot(selected.id, true), 5000);
@@ -202,28 +211,32 @@ export default function ServerMonitorTool() {
   async function loadSnapshot(serverId: string, force = false) {
     try {
       const payload = await apiGet<{ sample: Sample }>(`/api/tools/server-monitor/servers/${serverId}/snapshot${force ? '?force=true' : ''}`);
+      // 防御异步竞态：若用户已切换到其他服务器，丢弃该过期响应
+      if (activeServerIdRef.current !== serverId) return;
       setSample(payload.sample);
       setActiveGpuIndex((current) => current ?? payload.sample.gpus[0]?.index ?? null);
     } catch (err) {
-      handleError(err);
+      if (activeServerIdRef.current === serverId) handleError(err);
     }
   }
 
   async function loadHistory(serverId: string) {
     try {
       const payload = await apiGet<{ samples: Sample[] }>(`/api/tools/server-monitor/servers/${serverId}/history?hours=24`);
+      if (activeServerIdRef.current !== serverId) return;
       setHistory(payload.samples);
     } catch (err) {
-      handleError(err);
+      if (activeServerIdRef.current === serverId) handleError(err);
     }
   }
 
   async function loadDirectories(serverId: string) {
     try {
       const payload = await apiGet<{ directories: DirectoryUsage[] }>(`/api/tools/server-monitor/servers/${serverId}/directories`);
+      if (activeServerIdRef.current !== serverId) return;
       setDirectories(payload.directories);
     } catch (err) {
-      handleError(err);
+      if (activeServerIdRef.current === serverId) handleError(err);
     }
   }
 

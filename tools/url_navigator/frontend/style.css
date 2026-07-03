@@ -225,8 +225,14 @@
 
 .navigator-modal {
   width: min(760px, 100%);
-  max-height: min(760px, calc(100vh - 48px));
+  max-height: min(760px, calc(100dvh - 48px));
   overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .navigator-modal {
+    max-height: calc(100dvh - 20px);
+  }
 }
 
 .navigator-modal form {

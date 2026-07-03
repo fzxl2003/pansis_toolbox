@@ -4,6 +4,7 @@
 
 .dm-tool {
   max-width: 1440px;
+  min-width: 0;
 }
 
 /* ── Top Nav Tabs ── */
@@ -15,6 +16,8 @@
   border-bottom: 1px solid #e2e8f0;
   padding-bottom: 0;
   margin-bottom: 20px;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .dm-nav-tab {
@@ -31,6 +34,7 @@
   cursor: pointer;
   border-radius: 6px 6px 0 0;
   transition: color 0.15s, border-color 0.15s;
+  flex: 0 0 auto;
 }
 
 .dm-nav-tab:hover {
@@ -63,6 +67,7 @@
   flex-wrap: wrap;
   align-items: center;
   margin-bottom: 16px;
+  min-width: 0;
 }
 
 .dm-server-chip {
@@ -107,7 +112,7 @@
 
 .dm-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -298,7 +303,7 @@ animation: dm-pulse 1s ease-in-out infinite;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
   width: 100%;
   max-width: 680px;
-  max-height: 90vh;
+  max-height: 90dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -984,6 +989,64 @@ transform: translateX(18px);
 /* ── Responsive ── */
 
 @media (max-width: 768px) {
+  .dm-nav,
+  .dm-server-selector {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .dm-server-chip {
+    flex: 0 0 auto;
+  }
+
+  .dm-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dm-card-header,
+  .dm-card-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dm-card-actions .btn,
+  .dm-card-actions .dm-btn,
+  .dm-card-actions button {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .dm-modal-backdrop {
+    align-items: flex-end;
+    padding: 10px;
+  }
+
+  .dm-modal,
+  .dm-modal.wide {
+    max-width: none;
+    max-height: calc(100dvh - 20px);
+    border-radius: 12px;
+  }
+
+  .dm-modal-head,
+  .dm-modal-body,
+  .dm-modal-foot {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .dm-modal-foot {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .dm-modal-foot button,
+  .dm-modal-foot .btn {
+    justify-content: center;
+    width: 100%;
+  }
+
   .dm-form-grid {
     grid-template-columns: 1fr;
   }
@@ -992,9 +1055,41 @@ transform: translateX(18px);
     grid-template-columns: 1fr;
   }
 
-  .dm-table-header,
+  .dm-table {
+    display: grid;
+    gap: 10px;
+    border: 0;
+    background: transparent;
+    overflow: visible;
+  }
+
+  .dm-table-header {
+    display: none;
+  }
+
   .dm-table-row {
     grid-template-columns: 1fr !important;
+    gap: 8px;
+    border: 1px solid #dce3ec;
+    border-radius: 10px;
+    background: #ffffff;
+    padding: 12px;
+    overflow: hidden;
+  }
+
+  .dm-table-row > * {
+    min-width: 0;
+  }
+
+  .dm-table-row > *:last-child {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .dm-table-row > *:last-child button,
+  .dm-table-row > *:last-child .btn {
+    flex: 1 1 120px;
   }
 }
 

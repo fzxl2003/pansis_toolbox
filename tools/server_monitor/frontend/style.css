@@ -5,6 +5,7 @@
 
 .monitor-tool {
   max-width: 1440px;
+  min-width: 0;
 }
 
 .monitor-titlebar {
@@ -26,6 +27,7 @@
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 2px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .server-tab,
@@ -543,6 +545,10 @@
 /* ── Responsive ── */
 
 @media (max-width: 900px) {
+  .monitor-tool {
+    max-width: none;
+  }
+
   .monitor-table-row {
     grid-template-columns: 1fr;
   }
@@ -565,5 +571,54 @@
   .disk-grid,
   .directory-grid {
     grid-template-columns: 1fr;
+  }
+
+  .server-strip {
+    align-items: stretch;
+  }
+
+  .server-tabs {
+    min-width: 0;
+  }
+
+  .server-tab {
+    flex: 0 0 auto;
+  }
+
+  .metric-grid,
+  .chart-grid,
+  .directory-query,
+  .monitor-form,
+  .user-form {
+    grid-template-columns: 1fr;
+  }
+
+  .monitor-section {
+    padding: 14px;
+  }
+
+  .process-row,
+  .process-row.with-gpu,
+  .gpu-overview-row {
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .process-row > *,
+  .gpu-overview-row > * {
+    min-width: 0;
+  }
+
+  .process-name strong,
+  .process-row small,
+  .gpu-overview-row small {
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  .check-row,
+  .danger-row {
+    justify-content: center;
+    width: 100%;
   }
 }

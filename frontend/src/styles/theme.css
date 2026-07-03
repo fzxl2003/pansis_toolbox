@@ -42,7 +42,7 @@ body {
   position: sticky;
   top: 16px;
   align-self: start;
-  min-height: calc(100vh - 32px);
+  min-height: calc(100dvh - 32px);
   color: #3c4043;
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(255, 255, 255, 0.72);
@@ -119,7 +119,7 @@ body {
 }
 
 .shell-fullscreen .main-content {
-  min-height: 100vh;
+  min-height: 100dvh;
   padding: 0;
   overflow: auto;
 }
@@ -136,7 +136,7 @@ body {
 }
 
 .tool-page-fullscreen {
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .fullscreen-exit-button {
@@ -484,7 +484,7 @@ body {
 
 /* ── Responsive overrides ── */
 
-@media (max-width: 920px) {
+@media (max-width: 1024px) {
   .app-shell {
     grid-template-columns: 1fr;
     gap: 14px;
@@ -495,7 +495,7 @@ body {
     top: 12px;
     z-index: 10;
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr) minmax(0, auto);
     align-items: center;
     min-height: auto;
     border-radius: 24px;
@@ -515,14 +515,137 @@ body {
     display: flex;
     justify-content: center;
     margin: 0;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .nav-list::-webkit-scrollbar {
+    display: none;
   }
 
   .nav-item {
     min-height: 42px;
     padding: 0 12px;
+    flex: 0 0 auto;
   }
 
   .main-content {
     padding: 0 0 24px;
+  }
+}
+
+@media (max-width: 640px) {
+  body {
+    background: #f6f8fc;
+  }
+
+  .app-shell {
+    gap: 10px;
+    padding: 8px;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+    border-radius: 18px;
+    padding: 8px;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .brand-mark {
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+  }
+
+  .brand-copy span {
+    max-width: 94px;
+    overflow: hidden;
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nav-item {
+    min-height: 38px;
+    gap: 6px;
+    padding: 0 10px;
+    border-radius: 14px;
+  }
+
+  .nav-item.active,
+  .nav-item:hover {
+    transform: none;
+  }
+
+  .auth-status.button-like {
+    width: auto;
+    max-width: 42px;
+    min-height: 38px;
+    padding: 0 10px;
+    overflow: hidden;
+  }
+
+  .auth-status.button-like .auth-name,
+  .auth-status.button-like .auth-role,
+  .auth-status.button-like svg:last-child {
+    display: none;
+  }
+
+  .page-stack {
+    gap: 14px;
+  }
+
+  .page-header,
+  .tool-header,
+  .tool-page-actions {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .page-header h1,
+  .tool-header h1 {
+    font-size: 26px;
+  }
+
+  .search-box,
+  .toolbar {
+    width: 100%;
+  }
+
+  .tool-grid-list,
+  .widget-grid,
+  .disk-grid,
+  .directory-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .content-band,
+  .tool-card,
+  .widget,
+  .panel,
+  .empty-state,
+  .error-box {
+    border-radius: 16px;
+  }
+
+  .tool-card,
+  .widget,
+  .panel {
+    padding: 14px;
+  }
+
+  .fullscreen-exit-button {
+    top: 10px;
+    right: 10px;
+    min-height: 40px;
+    padding: 0 12px;
   }
 }

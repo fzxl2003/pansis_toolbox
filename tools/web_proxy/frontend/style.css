@@ -1,5 +1,5 @@
 .web-proxy-shell {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -25,6 +25,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) 52px;
   gap: 10px;
+  min-width: 0;
 }
 
 .web-proxy-input {
@@ -74,4 +75,20 @@
 
 .web-proxy-status {
   color: #4a5568;
+}
+
+@media (max-width: 420px) {
+  .web-proxy-shell {
+    padding: 16px;
+  }
+
+  .web-proxy-row {
+    grid-template-columns: minmax(0, 1fr) 52px;
+    gap: 8px;
+  }
+
+  .web-proxy-input {
+    padding: 0 12px;
+    font-size: 16px;
+  }
 }

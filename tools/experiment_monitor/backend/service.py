@@ -19,6 +19,8 @@ from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User
 from backend.app.services.email_service import send_email as platform_send_email
+from backend.app.services import ssh_connection_service
+from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +301,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
         )
         connection.commit()
         updated = connection.execute("SELECT * FROM em_servers WHERE id = ?", (server_id,)).fetchone()
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
     return _public_server(updated)
 
 
@@ -312,6 +315,7 @@ def delete_server(server_id: str, user: User) -> None:
             (now_iso(), server_id),
         )
         connection.commit()
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
 
 def test_ssh_connection(server_id: str, user: User) -> dict[str, Any]:
@@ -1575,37 +1579,33 @@ def _task_check_due(task_row: sqlite3.Row, now: datetime) -> bool:
 
 def _run_ssh(row: sqlite3.Row | Any, command: str, timeout: int = 20) -> str:
     """Run a command via SSH. `row` can be a real Row or an object with dict-like access."""
-    try:
-        import paramiko
-    except ImportError as exc:
-        raise ToolboxError("SSH_DEPENDENCY_MISSING", "缺少 paramiko 依赖，无法执行 SSH 命令", status_code=500, tool_id=TOOL_ID) from exc
+    output, error, _ = ssh_connection_service.exec_command(_ssh_spec(row, timeout=timeout), command, timeout=timeout)
+    error = error.strip()
+    if error and not output:
+        raise ToolboxError("SSH_COMMAND_FAILED", error[:300], status_code=502, tool_id=TOOL_ID)
+    return output
 
-    # Extract values from either sqlite3.Row or dict-like object
+
+def _ssh_spec(row: sqlite3.Row | Any, timeout: int = 20) -> SSHConnectionSpec:
     def _get(key: str) -> str:
-        if hasattr(row, 'keys'):
+        if hasattr(row, "keys"):
             return row[key]
-        return getattr(row, key, '')
+        return getattr(row, key, "")
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=_get("host"),
-            port=int(_get("port")),
-            username=_get("ssh_username"),
-            password=decrypt_secret(_get("ssh_password_encrypted")),
-            timeout=timeout,
-            banner_timeout=timeout,
-            auth_timeout=timeout,
-        )
-        _, stdout, stderr = client.exec_command(command, timeout=timeout)
-        output = stdout.read().decode("utf-8", errors="replace")
-        error = stderr.read().decode("utf-8", errors="replace").strip()
-        if error and not output:
-            raise ToolboxError("SSH_COMMAND_FAILED", error[:300], status_code=502, tool_id=TOOL_ID)
-        return output
-    finally:
-        client.close()
+    encrypted_password = _get("ssh_password_encrypted")
+    return SSHConnectionSpec(
+        tool_id=TOOL_ID,
+        server_id=_get("id"),
+        host=_get("host"),
+        port=int(_get("port")),
+        username=_get("ssh_username"),
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(encrypted_password),
+        password=decrypt_secret(encrypted_password),
+        connect_timeout=timeout,
+        connect_error_code="SSH_CONNECT_FAILED",
+        missing_dependency_code="SSH_DEPENDENCY_MISSING",
+        missing_dependency_message="缺少 paramiko 依赖，无法执行 SSH 命令",
+    )
 
 
 def shlex_quote(s: str) -> str:

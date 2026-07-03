@@ -114,11 +114,6 @@ def check_servers_status(user: User) -> dict[str, str]:
     使用短超时（5 秒）做快速连接测试，返回 {server_id: "online"|"offline"} 映射。
     """
     init_docker_database()
-    try:
-        import paramiko
-    except ImportError:
-        return {}
-
     # 获取用户可见的服务器列表
     with get_connection() as conn:
         all_rows = conn.execute("SELECT * FROM docker_servers ORDER BY name").fetchall()
@@ -131,25 +126,17 @@ def check_servers_status(user: User) -> dict[str, str]:
     statuses: dict[str, str] = {}
     for row in visible_rows:
         srv_id = row["id"]
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        password = _decrypt(row["ssh_password_encrypted"])
+        client = None
         try:
-            client.connect(
-                hostname=row["host"],
-                port=row["port"],
-                username=row["ssh_username"],
-                password=password,
-                timeout=5,
-                banner_timeout=5,
-                auth_timeout=5,
-            )
+            client = ssh_connection_service.borrow_client(_ssh_spec(row, timeout=5))
             statuses[srv_id] = "online"
-            client.close()
         except Exception:
+            ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=srv_id)
             statuses[srv_id] = "offline"
+        finally:
             try:
-                client.close()
+                if client is not None:
+                    client.close()
             except Exception:
                 pass
     return statuses
@@ -184,6 +171,7 @@ def delete_server(server_id: str, user: User) -> None:
         conn.execute("DELETE FROM docker_df_containers WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_df_volumes WHERE server_id = ?", (server_id,))
         conn.execute("DELETE FROM docker_servers WHERE id = ?", (server_id,))
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
 
 def list_server_permissions(server_id: str, user: User) -> list[dict[str, Any]]:
@@ -328,5 +316,4 @@ def get_my_quota(server_id: str, user: User) -> dict[str, Any]:
         perms["volumeTotalGb"] = vol_usage["quotaGb"]
         perms["volumeRemainingGb"] = vol_usage["remainingGb"]
     return perms
-
 

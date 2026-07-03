@@ -4,6 +4,7 @@
 
 .sshw-tool {
   max-width: 1440px;
+  min-width: 0;
 }
 
 /* ── Spinner ── */
@@ -21,6 +22,8 @@
   gap: 4px;
   border-bottom: 1px solid #e2e8f0;
   margin-bottom: 20px;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .sw-topnav-tab {
@@ -37,6 +40,7 @@
   cursor: pointer;
   border-radius: 6px 6px 0 0;
   transition: color 0.15s, border-color 0.15s, background 0.15s;
+  flex: 0 0 auto;
 }
 
 .sw-topnav-tab:hover {
@@ -53,6 +57,7 @@
 
 .sw-body {
   min-height: 600px;
+  min-width: 0;
 }
 
 /* ── Buttons ── */
@@ -231,7 +236,7 @@
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 80px);
+  max-height: calc(100dvh - 80px);
 }
 
 .sw-modal-head {
@@ -372,7 +377,7 @@
 .sw-workspace {
   display: flex;
   flex-direction: row;
-  height: calc(100vh - 200px);
+  height: calc(100dvh - 200px);
   min-height: 500px;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
@@ -1302,7 +1307,128 @@
   .sw-server-pick-grid { grid-template-columns: 1fr; }
   .sw-server-card-actions { flex-wrap: wrap; }
   .sw-code-cell { max-width: 200px; }
-  .sw-sidebar { width: 240px; }
-  .sw-workspace { flex-direction: column; }
-  .sw-sidebar { width: 100%; border-left: none; border-top: 1px solid #334155; max-height: 250px; }
+
+  .sw-topnav {
+    margin-bottom: 12px;
+  }
+
+  .sw-body {
+    min-height: 0;
+  }
+
+  .sw-modal-backdrop {
+    align-items: flex-end;
+    padding: 10px;
+  }
+
+  .sw-modal {
+    max-height: calc(100dvh - 20px);
+    border-radius: 12px;
+  }
+
+  .sw-modal-body,
+  .sw-modal-foot,
+  .sw-modal-head {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .sw-modal-foot {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .sw-modal-foot .sw-btn,
+  .sw-inline-form .sw-btn {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .sw-inline-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sw-workspace {
+    height: calc(100dvh - 132px);
+    min-height: 460px;
+    position: relative;
+  }
+
+  .sw-tab-text {
+    max-width: 112px;
+  }
+
+  .sw-term-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sw-sidebar {
+    position: absolute;
+    inset: auto 0 0;
+    z-index: 5;
+    width: 100%;
+    max-height: min(52dvh, 320px);
+    border-top: 1px solid #334155;
+    border-left: none;
+    box-shadow: 0 -18px 38px rgba(0, 0, 0, 0.32);
+    transform: translateY(100%);
+    transition: transform 160ms ease;
+  }
+
+  .sw-workspace.sidebar-visible .sw-sidebar {
+    transform: translateY(0);
+  }
+
+  .sw-table-wrap {
+    border: 0;
+    background: transparent;
+    overflow: visible;
+  }
+
+  .sw-table,
+  .sw-table tbody,
+  .sw-table tr,
+  .sw-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .sw-table thead {
+    display: none;
+  }
+
+  .sw-table tr {
+    margin-bottom: 10px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #fff;
+    overflow: hidden;
+  }
+
+  .sw-table td {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
+    padding: 9px 12px;
+  }
+
+  .sw-table td::before {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .sw-table td:nth-child(1)::before { content: "时间"; }
+  .sw-table td:nth-child(2)::before { content: "来源"; }
+  .sw-table td:nth-child(3)::before { content: "命令"; }
+  .sw-table td:nth-child(4)::before { content: "服务器"; }
+
+  .sw-code-cell {
+    max-width: none;
+    white-space: normal;
+    word-break: break-all;
+  }
 }

@@ -25,6 +25,8 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User
+from backend.app.services import ssh_connection_service
+from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 TOOL_ID = "docker_manager"
 DF_CACHE_REFRESH_INTERVAL_SECONDS = 10
@@ -573,32 +575,35 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
 
 def _ssh_connect(server_row: sqlite3.Row):
     """建立 paramiko SSH 连接"""
-    try:
-        import paramiko
-    except ImportError as exc:
-        raise ToolboxError("MISSING_DEP", "缺少 paramiko 依赖", status_code=500, tool_id=TOOL_ID) from exc
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    password = _decrypt(server_row["ssh_password_encrypted"])
-    try:
-        client.connect(
-            hostname=server_row["host"],
-            port=server_row["port"],
-            username=server_row["ssh_username"],
-            password=password,
-            timeout=15,
-        )
-    except Exception as exc:
-        raise ToolboxError("SSH_CONNECT_FAILED", f"SSH 连接失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
-    return client
+    return ssh_connection_service.borrow_client(_ssh_spec(server_row, timeout=15))
 
 
 def _ssh_exec(client, cmd: str, timeout: int = 60) -> tuple[str, str, int]:
     """执行命令，返回 (stdout, stderr, exit_code)"""
-    stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-    exit_code = stdout.channel.recv_exit_status()
-    return stdout.read().decode("utf-8", errors="replace"), stderr.read().decode("utf-8", errors="replace"), exit_code
+    try:
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        return stdout.read().decode("utf-8", errors="replace"), stderr.read().decode("utf-8", errors="replace"), exit_code
+    except Exception:
+        if hasattr(client, "invalidate"):
+            client.invalidate()
+        raise
+
+
+def _ssh_spec(server_row: sqlite3.Row, timeout: int = 15) -> SSHConnectionSpec:
+    return SSHConnectionSpec(
+        tool_id=TOOL_ID,
+        server_id=server_row["id"],
+        host=server_row["host"],
+        port=int(server_row["port"]),
+        username=server_row["ssh_username"],
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(server_row["ssh_password_encrypted"]),
+        password=_decrypt(server_row["ssh_password_encrypted"]),
+        connect_timeout=timeout,
+        connect_error_code="SSH_CONNECT_FAILED",
+        missing_dependency_code="MISSING_DEP",
+        missing_dependency_message="缺少 paramiko 依赖",
+    )
 
 
 def _get_server_row(conn: sqlite3.Connection, server_id: str) -> sqlite3.Row:
@@ -1302,4 +1307,3 @@ def _sync_legacy_meta(conn: sqlite3.Connection, server_id: str, resource_type: s
                 "DELETE FROM docker_volumes_meta WHERE server_id=? AND volume_name=?",
                 (server_id, resource_ref),
             )
-

@@ -12,6 +12,7 @@ from backend.app.core.logging import configure_logging
 from backend.app.registry.loader import discover_tools, register_tool_routers
 from backend.app.services.auth_service import ensure_default_user
 from backend.app.services.scheduler_service import scheduler
+from backend.app.services.ssh_connection_service import close_all as close_ssh_connections
 
 
 def create_app() -> FastAPI:
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def stop_scheduler() -> None:
         await scheduler.stop()
+        close_ssh_connections()
 
     return app
 

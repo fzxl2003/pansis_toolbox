@@ -20,6 +20,8 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User, get_user_by_session_token
+from backend.app.services import ssh_connection_service
+from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 TOOL_ID = "ssh_workspace"
 SCHEDULER_INTERVAL_SECONDS = 30
@@ -260,6 +262,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
         )
         connection.commit()
         updated = connection.execute("SELECT * FROM ssh_servers WHERE id = ?", (server_id,)).fetchone()
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
     return _public_server(updated)
 
 
@@ -271,6 +274,7 @@ def delete_server(server_id: str, user: User) -> None:
         connection.execute("UPDATE ssh_scheduled_tasks SET enabled = 0, updated_at = ? WHERE server_id = ? AND owner_user_id = ?", (now, server_id, user.id))
         connection.execute("DELETE FROM ssh_terminal_tabs WHERE server_id = ? AND owner_user_id = ?", (server_id, user.id))
         connection.commit()
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
 
 def copy_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
@@ -360,6 +364,7 @@ def test_server(server_id: str, user: User) -> dict[str, Any]:
         error = ""
         result = {"connected": True, "hasScreen": has_screen}
     except Exception as exc:  # noqa: BLE001
+        ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
         has_screen = False
         status = "failed"
         error = str(exc)
@@ -944,36 +949,7 @@ def _resolve_screen_target(client: Any, session_name: str) -> str:
 
 
 def _ssh_connect(row: sqlite3.Row | Any, timeout: int = 20):
-    try:
-        import paramiko
-    except ImportError as exc:
-        raise ToolboxError("SSH_DEPENDENCY_MISSING", "缺少 paramiko 依赖，无法执行 SSH 命令", status_code=500, tool_id=TOOL_ID) from exc
-
-    auth_type = row["auth_type"]
-    kwargs: dict[str, Any] = {}
-    if auth_type == "private_key":
-        kwargs["pkey"] = _load_private_key(row, paramiko)
-    else:
-        kwargs["password"] = _decrypt(row["ssh_password_encrypted"])
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=row["host"],
-            port=int(row["port"]),
-            username=row["ssh_username"],
-            timeout=timeout,
-            banner_timeout=timeout,
-            auth_timeout=timeout,
-            look_for_keys=False,
-            allow_agent=False,
-            **kwargs,
-        )
-        return client
-    except Exception as exc:
-        client.close()
-        raise ToolboxError("SSH_CONNECT_FAILED", f"SSH 连接失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
+    return ssh_connection_service.borrow_client(_ssh_spec(row, timeout=timeout))
 
 
 def _load_private_key(row: sqlite3.Row, paramiko: Any) -> Any:
@@ -992,22 +968,63 @@ def _load_private_key(row: sqlite3.Row, paramiko: Any) -> Any:
 
 
 def _ssh_exec(client: Any, command: str, timeout: int = 30) -> tuple[str, str, int]:
-    _, stdout, stderr = client.exec_command(command, timeout=timeout)
-    out = stdout.read().decode("utf-8", errors="replace")
-    err = stderr.read().decode("utf-8", errors="replace")
-    code = stdout.channel.recv_exit_status()
-    return out, err, code
+    try:
+        _, stdout, stderr = client.exec_command(command, timeout=timeout)
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        code = stdout.channel.recv_exit_status()
+        return out, err, code
+    except Exception:
+        if hasattr(client, "invalidate"):
+            client.invalidate()
+        raise
 
 
 def _run_ssh(row: sqlite3.Row, command: str, timeout: int = 30) -> str:
-    client = _ssh_connect(row, timeout=timeout)
-    try:
-        out, err, code = _ssh_exec(client, command, timeout=timeout)
-    finally:
-        client.close()
+    out, err, code = ssh_connection_service.exec_command(_ssh_spec(row, timeout=timeout), command, timeout=timeout)
     if code != 0 and err.strip():
         raise ToolboxError("SSH_COMMAND_FAILED", err.strip()[:500], status_code=502, tool_id=TOOL_ID)
     return out
+
+
+def _ssh_spec(row: sqlite3.Row | Any, timeout: int = 20) -> SSHConnectionSpec:
+    try:
+        import paramiko
+    except ImportError as exc:
+        raise ToolboxError("SSH_DEPENDENCY_MISSING", "缺少 paramiko 依赖，无法执行 SSH 命令", status_code=500, tool_id=TOOL_ID) from exc
+
+    auth_type = row["auth_type"]
+    if auth_type == "private_key":
+        return SSHConnectionSpec(
+            tool_id=TOOL_ID,
+            server_id=row["id"],
+            host=row["host"],
+            port=int(row["port"]),
+            username=row["ssh_username"],
+            auth_fingerprint=ssh_connection_service.auth_fingerprint(
+                auth_type,
+                row["private_key_encrypted"],
+                row["private_key_passphrase_encrypted"],
+            ),
+            pkey=_load_private_key(row, paramiko),
+            connect_timeout=timeout,
+            connect_error_code="SSH_CONNECT_FAILED",
+            missing_dependency_code="SSH_DEPENDENCY_MISSING",
+            missing_dependency_message="缺少 paramiko 依赖，无法执行 SSH 命令",
+        )
+    return SSHConnectionSpec(
+        tool_id=TOOL_ID,
+        server_id=row["id"],
+        host=row["host"],
+        port=int(row["port"]),
+        username=row["ssh_username"],
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, row["ssh_password_encrypted"]),
+        password=_decrypt(row["ssh_password_encrypted"]),
+        connect_timeout=timeout,
+        connect_error_code="SSH_CONNECT_FAILED",
+        missing_dependency_code="SSH_DEPENDENCY_MISSING",
+        missing_dependency_message="缺少 paramiko 依赖，无法执行 SSH 命令",
+    )
 
 
 def _require_screen(server: sqlite3.Row) -> None:

@@ -17,6 +17,8 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User
+from backend.app.services import ssh_connection_service
+from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 TOOL_ID = "server_monitor"
 SAMPLE_SECONDS = 30
@@ -163,6 +165,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
         )
         connection.commit()
         updated = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
     return _public_server(updated)
 
 
@@ -172,6 +175,7 @@ def delete_server(server_id: str, user: User) -> None:
     with get_connection() as connection:
         connection.execute("UPDATE monitor_servers SET enabled = 0, updated_at = ? WHERE id = ?", (now_iso(), server_id))
         connection.commit()
+    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
 
 def collect_snapshot(server_id: str, user: User | None, force: bool = False) -> dict[str, Any]:
@@ -390,31 +394,28 @@ def _collect_directory(row: sqlite3.Row, path: str, user_id: str) -> sqlite3.Row
 
 
 def _run_ssh(row: sqlite3.Row, command: str, timeout: int = 20) -> str:
-    try:
-        import paramiko
-    except ImportError as exc:
-        raise ToolboxError("SSH_DEPENDENCY_MISSING", "缺少 paramiko 依赖，无法执行 SSH 采集", status_code=500, tool_id=TOOL_ID) from exc
+    output, error, _ = ssh_connection_service.exec_command(_ssh_spec(row, timeout=timeout), command, timeout=timeout)
+    error = error.strip()
+    if error and not output:
+        raise ToolboxError("SSH_COMMAND_FAILED", error[:300], status_code=502, tool_id=TOOL_ID)
+    return output
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=row["host"],
-            port=int(row["port"]),
-            username=row["ssh_username"],
-            password=decrypt_secret(row["ssh_password_encrypted"]),
-            timeout=timeout,
-            banner_timeout=timeout,
-            auth_timeout=timeout,
-        )
-        _, stdout, stderr = client.exec_command(command, timeout=timeout)
-        output = stdout.read().decode("utf-8", errors="replace")
-        error = stderr.read().decode("utf-8", errors="replace").strip()
-        if error and not output:
-            raise ToolboxError("SSH_COMMAND_FAILED", error[:300], status_code=502, tool_id=TOOL_ID)
-        return output
-    finally:
-        client.close()
+
+def _ssh_spec(row: sqlite3.Row, timeout: int = 20) -> SSHConnectionSpec:
+    encrypted_password = row["ssh_password_encrypted"]
+    return SSHConnectionSpec(
+        tool_id=TOOL_ID,
+        server_id=row["id"],
+        host=row["host"],
+        port=int(row["port"]),
+        username=row["ssh_username"],
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(encrypted_password),
+        password=decrypt_secret(encrypted_password),
+        connect_timeout=timeout,
+        connect_error_code="SSH_CONNECT_FAILED",
+        missing_dependency_code="SSH_DEPENDENCY_MISSING",
+        missing_dependency_message="缺少 paramiko 依赖，无法执行 SSH 采集",
+    )
 
 
 def _monitor_command() -> str:

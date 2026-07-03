@@ -923,7 +923,7 @@ function EmailTab({
       </div>
       {emailConfigLoaded && (
         <form className="monitor-form" onSubmit={(e) => void handleSaveEmailConfig(e)}>
-          <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '8px', alignItems: 'end' }}>
+          <div className="responsive-grid host-port">
             <div className="form-group" style={{ margin: 0 }}>
               <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
                 SMTP 服务器地址 *
@@ -948,7 +948,7 @@ function EmailTab({
               />
             </div>
           </div>
-          <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+          <div className="responsive-grid two">
             <div className="form-group" style={{ margin: 0 }}>
               <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
                 SMTP 用户名
@@ -973,7 +973,7 @@ function EmailTab({
               />
             </div>
           </div>
-          <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+          <div className="responsive-grid two">
             <div className="form-group" style={{ margin: 0 }}>
               <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
                 发件人地址
@@ -997,7 +997,7 @@ function EmailTab({
               />
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '4px' }}>
+          <div className="responsive-actions" style={{ marginTop: '4px' }}>
             <button className="primary-button" type="submit" disabled={emailLoading}>
               <Globe size={16} />保存邮件配置
             </button>

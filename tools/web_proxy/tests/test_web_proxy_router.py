@@ -446,3 +446,112 @@ def test_http_proxy_forwards_post_body(monkeypatch: pytest.MonkeyPatch) -> None:
             await server.wait_closed()
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Mixed-content prevention – forwarded headers reach the sidecar
+# ---------------------------------------------------------------------------
+
+
+def test_http_proxy_forwards_forwarded_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """X-Forwarded-Proto / X-Forwarded-Host must reach the sidecar so that
+    rammerhead's per-request getServerInfo rewrites asset URLs with the
+    correct (https) protocol – preventing mixed-content blocks."""
+
+    async def run() -> None:
+        received_headers: dict[str, str] = {}
+
+        async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readline()  # request line
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n", b""):
+                    break
+                k, _, v = line.rstrip(b"\r\n").partition(b": ")
+                received_headers[k.decode("ascii").lower()] = v.decode("latin-1")
+            resp = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            writer.write(resp)
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(web_proxy_router, "SIDECAR_HOST", "127.0.0.1")
+        monkeypatch.setattr(web_proxy_router, "SIDECAR_PORT", port)
+
+        async def noop_ensure(scope):
+            pass
+
+        monkeypatch.setattr(web_proxy_router, "_ensure_sidecar_for_scope", noop_ensure)
+
+        try:
+            middleware = web_proxy_router.RammerheadProxyMiddleware(lambda *a: None)
+            scope = {
+                "type": "http",
+                "method": "GET",
+                "path": f"/{VALID_SESSION_ID}/https://example.com",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"az.pansis.site:8799"),
+                    (b"x-forwarded-proto", b"https"),
+                    (b"x-forwarded-host", b"az.pansis.site:8799"),
+                ],
+            }
+            sent: list[dict] = []
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(msg):
+                sent.append(msg)
+
+            await middleware(scope, receive, send)
+            # The sidecar must see the real client protocol and host so that
+            # getServerInfo(req) rewrites URLs with https://az.pansis.site:8799
+            assert received_headers.get("x-forwarded-proto") == "https"
+            assert received_headers.get("x-forwarded-host") == "az.pansis.site:8799"
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_public_server_info_hostname_only_drives_restart() -> None:
+    """Switching between http and https (same host) must NOT be considered a
+    public-info change – the sidecar resolves the protocol per request now."""
+
+    https_request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/x",
+            "headers": [
+                (b"host", b"az.pansis.site:8799"),
+                (b"x-forwarded-proto", b"https"),
+            ],
+            "query_string": b"",
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+        }
+    )
+    http_request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/x",
+            "headers": [
+                (b"host", b"az.pansis.site:8799"),
+                (b"x-forwarded-proto", b"http"),
+            ],
+            "query_string": b"",
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+        }
+    )
+    https_info = web_proxy_router._public_server_info(https_request)
+    http_info = web_proxy_router._public_server_info(http_request)
+    # Protocol differs (used as sidecar env default), but hostname is the same.
+    assert https_info[0] == http_info[0] == "az.pansis.site"
+    assert https_info[2] == "https:"
+    assert http_info[2] == "http:"

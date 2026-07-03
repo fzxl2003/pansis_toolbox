@@ -10,6 +10,49 @@ const publicPort = Number(process.env.PANSIS_WEB_PROXY_PUBLIC_PORT || port);
 const publicProtocol = process.env.PANSIS_WEB_PROXY_PUBLIC_PROTOCOL || 'http:';
 const password = process.env.PANSIS_WEB_PROXY_PASSWORD || null;
 
+// Resolve the public origin for the *current* request so that URL rewriting
+// matches how the browser actually reached us.  The toolbox reverse proxy
+// forwards ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` from the real client,
+// so when the site is served over HTTPS the rewritten asset URLs use
+// ``https:`` too (preventing mixed-content blocks).  Falls back to the
+// environment-variable defaults for direct (non-proxied) access.
+const parseHostPort = (raw) => {
+    if (!raw) return { hostname: publicHost, port: publicPort };
+    let hostname = raw;
+    let port = publicPort;
+    if (raw.startsWith('[') && raw.includes(']')) {
+        // IPv6 literal, e.g. [::1]:8799
+        const end = raw.indexOf(']');
+        hostname = raw.slice(0, end + 1);
+        const tail = raw.slice(end + 1);
+        if (tail.startsWith(':') && /^\d+$/.test(tail.slice(1))) port = Number(tail.slice(1));
+    } else if (raw.includes(':')) {
+        const idx = raw.lastIndexOf(':');
+        const maybePort = raw.slice(idx + 1);
+        if (/^\d+$/.test(maybePort)) {
+            hostname = raw.slice(0, idx);
+            port = Number(maybePort);
+        }
+    }
+    return { hostname, port };
+};
+
+const resolveServerInfo = (req) => {
+    const headers = (req && req.headers) || {};
+    let proto = (headers['x-forwarded-proto'] || '').toString().split(',')[0].trim();
+    if (proto === 'ws' || proto === 'ws:') proto = 'http';
+    else if (proto === 'wss' || proto === 'wss:') proto = 'https';
+    if (!proto) proto = publicProtocol.replace(':', '');
+    const forwardedHost = (headers['x-forwarded-host'] || '').toString().split(',')[0].trim();
+    const { hostname, port } = parseHostPort(forwardedHost || headers['host']);
+    return {
+        hostname: hostname || publicHost,
+        port: port || publicPort,
+        crossDomainPort: port || publicPort,
+        protocol: proto.endsWith(':') ? proto : `${proto}:`
+    };
+};
+
 module.exports = {
     bindingAddress: host,
     port,
@@ -18,7 +61,7 @@ module.exports = {
     enableWorkers: false,
     workers: 1,
     ssl: null,
-    getServerInfo: () => ({ hostname: publicHost, port: publicPort, crossDomainPort: publicPort, protocol: publicProtocol }),
+    getServerInfo: resolveServerInfo,
     password,
     disableLocalStorageSync: false,
     restrictSessionToIP: true,

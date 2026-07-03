@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -222,6 +223,212 @@ def test_admin_can_clear_one_tool_storage() -> None:
         connection.commit()
     assert memo_table is None
     assert unrelated_table is not None
+
+
+def _create_test_user(cookies, username: str, role: str = "user") -> dict:
+    created = client.post(
+        "/api/auth/users",
+        json={"username": username, "displayName": username.title(), "password": "pw123", "role": role},
+        cookies=cookies,
+    )
+    if created.status_code == 409:
+        users = client.get("/api/auth/users", cookies=cookies).json()["users"]
+        return next(item for item in users if item["username"] == username)
+    assert created.status_code == 200
+    return created.json()["user"]
+
+
+def test_regular_admin_respects_tool_visibility() -> None:
+    """Regular admins should be subject to tool visibility settings on the homepage."""
+    _reset_tool_access("text_cleaner")
+    super_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    super_cookies = super_auth.cookies
+
+    # Create a regular admin
+    sub_admin = _create_test_user(super_cookies, "vis_admin_test", role="admin")
+    sub_auth = client.post("/api/auth/login", json={"username": "vis_admin_test", "password": "pw123"})
+    sub_cookies = sub_auth.cookies
+
+    # Hide text_cleaner from everyone
+    client.post(
+        "/api/tools-admin/text_cleaner/access",
+        json={"globalPublic": False, "allowedUserIds": []},
+        cookies=super_cookies,
+    )
+
+    # Super admin can still see it
+    super_tools = client.get("/api/tools", cookies=super_cookies).json()
+    assert any(t["id"] == "text_cleaner" for t in super_tools)
+
+    # Regular admin cannot see it on the homepage
+    sub_tools = client.get("/api/tools", cookies=sub_cookies).json()
+    assert all(t["id"] != "text_cleaner" for t in sub_tools)
+
+    # Regular admin cannot access the tool directly
+    detail = client.get("/api/tools/text_cleaner", cookies=sub_cookies)
+    assert detail.status_code == 403
+    assert detail.json()["error"]["code"] == "TOOL_ACCESS_DENIED"
+
+    # But regular admin can still manage it in settings (tool list is unfiltered)
+    access_list = client.get("/api/tools-admin/access", cookies=sub_cookies)
+    assert access_list.status_code == 200
+    assert any(item["tool"]["id"] == "text_cleaner" for item in access_list.json()["items"])
+
+    # Grant access to the regular admin → now visible
+    client.post(
+        "/api/tools-admin/text_cleaner/access",
+        json={"globalPublic": False, "allowedUserIds": [sub_admin["id"]]},
+        cookies=super_cookies,
+    )
+    sub_tools_after = client.get("/api/tools", cookies=sub_cookies).json()
+    assert any(t["id"] == "text_cleaner" for t in sub_tools_after)
+
+    # Cleanup
+    client.post(
+        "/api/tools-admin/text_cleaner/access",
+        json={"globalPublic": True, "allowedUserIds": []},
+        cookies=super_cookies,
+    )
+    client.delete(f"/api/auth/users/{sub_admin['id']}", cookies=super_cookies)
+    _reset_tool_access("text_cleaner")
+
+
+def test_storage_usage_reports_user_and_tool_sizes() -> None:
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    storage_dir = get_settings().storage_dir
+    user_dir = storage_dir / "user_data" / "usage_test_user" / "tools" / "memo_demo"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "data.bin").write_bytes(b"x" * 200)
+
+    response = client.get("/api/tools-admin/storage-usage", cookies=cookies)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["grandTotal"] >= 200
+    tool_entry = next(t for t in payload["tools"] if t["toolId"] == "memo_demo")
+    assert tool_entry["userBytes"] >= 200
+    assert any(m["userId"] == "usage_test_user" and m["toolId"] == "memo_demo" for m in payload["matrix"])
+
+    shutil.rmtree(user_dir.parent.parent, ignore_errors=True)
+
+
+def test_admin_can_clear_single_user_tool_storage() -> None:
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    storage_dir = get_settings().storage_dir
+    user_dir = storage_dir / "user_data" / "clear_ut_user" / "tools" / "memo_demo"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "file.txt").write_text("hello", encoding="utf-8")
+
+    cleared = client.delete("/api/tools-admin/memo_demo/users/clear_ut_user/storage", cookies=cookies)
+    assert cleared.status_code == 200
+    assert not user_dir.exists()
+
+
+def test_admin_can_clear_all_user_storage() -> None:
+    auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = auth.cookies
+    storage_dir = get_settings().storage_dir
+    user_tools = storage_dir / "user_data" / "clear_all_user" / "tools"
+    dir_a = user_tools / "memo_demo"
+    dir_b = user_tools / "text_cleaner"
+    dir_a.mkdir(parents=True, exist_ok=True)
+    dir_b.mkdir(parents=True, exist_ok=True)
+    (dir_a / "a.txt").write_text("a", encoding="utf-8")
+    (dir_b / "b.txt").write_text("b", encoding="utf-8")
+
+    cleared = client.delete("/api/tools-admin/users/clear_all_user/storage", cookies=cookies)
+    assert cleared.status_code == 200
+    assert not dir_a.exists()
+    assert not dir_b.exists()
+
+
+def test_user_can_view_and_clear_own_storage() -> None:
+    admin_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    user = _create_test_user(admin_auth.cookies, "self_storage_user")
+    user_auth = client.post("/api/auth/login", json={"username": "self_storage_user", "password": "pw123"})
+    user_cookies = user_auth.cookies
+
+    storage_dir = get_settings().storage_dir
+    user_dir = storage_dir / "user_data" / user["id"] / "tools" / "memo_demo"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "note.txt").write_text("my note", encoding="utf-8")
+
+    usage = client.get("/api/tools/my-storage", cookies=user_cookies)
+    assert usage.status_code == 200
+    assert usage.json()["totalBytes"] >= 7
+
+    cleared = client.delete("/api/tools/my-storage/memo_demo", cookies=user_cookies)
+    assert cleared.status_code == 200
+    assert not user_dir.exists()
+
+    client.delete(f"/api/auth/users/{user['id']}", cookies=admin_auth.cookies)
+
+
+def test_super_admin_can_promote_and_demote() -> None:
+    admin_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = admin_auth.cookies
+    user = _create_test_user(cookies, "role_test_user")
+
+    promoted = client.post(f"/api/auth/users/{user['id']}/role", json={"role": "admin"}, cookies=cookies)
+    assert promoted.status_code == 200
+    assert promoted.json()["user"]["role"] == "admin"
+
+    demoted = client.post(f"/api/auth/users/{user['id']}/role", json={"role": "user"}, cookies=cookies)
+    assert demoted.status_code == 200
+    assert demoted.json()["user"]["role"] == "user"
+
+    client.delete(f"/api/auth/users/{user['id']}", cookies=cookies)
+
+
+def test_regular_admin_cannot_create_admin() -> None:
+    admin_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    super_cookies = admin_auth.cookies
+    sub_admin = _create_test_user(super_cookies, "sub_admin_test", role="admin")
+    sub_auth = client.post("/api/auth/login", json={"username": "sub_admin_test", "password": "pw123"})
+    sub_cookies = sub_auth.cookies
+
+    attempt = client.post(
+        "/api/auth/users",
+        json={"username": "should_fail_admin", "displayName": "Fail", "password": "pw", "role": "admin"},
+        cookies=sub_cookies,
+    )
+    assert attempt.status_code == 403
+    assert attempt.json()["error"]["code"] == "SUPER_ADMIN_REQUIRED"
+
+    client.delete(f"/api/auth/users/{sub_admin['id']}", cookies=super_cookies)
+
+
+def test_regular_admin_cannot_delete_admin() -> None:
+    admin_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    super_cookies = admin_auth.cookies
+    sub_admin = _create_test_user(super_cookies, "del_admin_test", role="admin")
+    sub_auth = client.post("/api/auth/login", json={"username": "del_admin_test", "password": "pw123"})
+    sub_cookies = sub_auth.cookies
+
+    attempt = client.delete(f"/api/auth/users/{sub_admin['id']}", cookies=sub_cookies)
+    assert attempt.status_code == 403
+
+    client.delete(f"/api/auth/users/{sub_admin['id']}", cookies=super_cookies)
+
+
+def test_super_admin_can_delete_admin() -> None:
+    admin_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    super_cookies = admin_auth.cookies
+    sub_admin = _create_test_user(super_cookies, "del_admin_test2", role="admin")
+
+    deleted = client.delete(f"/api/auth/users/{sub_admin['id']}", cookies=super_cookies)
+    assert deleted.status_code == 200
+
+
+def test_cannot_delete_super_admin() -> None:
+    admin_auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    cookies = admin_auth.cookies
+    admin_user = next(u for u in client.get("/api/auth/users", cookies=cookies).json()["users"] if u["username"] == "admin")
+
+    attempt = client.delete(f"/api/auth/users/{admin_user['id']}", cookies=cookies)
+    assert attempt.status_code == 400
+    assert attempt.json()["error"]["code"] == "CANNOT_DELETE_SUPER_ADMIN"
 
 
 def test_experiment_monitor_create_task_uses_preview_processes() -> None:

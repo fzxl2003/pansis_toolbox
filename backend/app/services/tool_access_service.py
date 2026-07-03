@@ -32,7 +32,7 @@ def ensure_tool_access_tables() -> None:
 
 def can_access_tool(tool_id: str, user: User | None) -> bool:
     ensure_tool_access_tables()
-    if user and user.role == "admin":
+    if user and user.is_super_admin:
         return True
     with get_connection() as connection:
         policy = connection.execute(
@@ -151,6 +151,166 @@ def clear_tool_storage(tool: RegisteredTool) -> dict[str, Any]:
     return {"toolId": tool.tool_id, "droppedTables": dropped_tables, "removedPaths": removed_paths}
 
 
+def clear_user_tool_storage(tool_id: str, user_id: str) -> dict[str, Any]:
+    """Clear file storage for a specific user+tool combination (user-scoped files only)."""
+    ensure_tool_access_tables()
+    removed_paths = _remove_user_tool_paths(tool_id, user_id)
+    return {"toolId": tool_id, "userId": user_id, "droppedTables": [], "removedPaths": removed_paths}
+
+
+def clear_user_storage(user_id: str) -> dict[str, Any]:
+    """Clear all tool file storage for a specific user (user-scoped files only)."""
+    ensure_tool_access_tables()
+    settings = get_settings()
+    user_root = settings.storage_dir / "user_data" / user_id / "tools"
+    removed_paths: list[str] = []
+    if user_root.exists() and _is_within_storage(user_root.resolve(), settings.storage_dir.resolve()):
+        for child in sorted(user_root.iterdir()):
+            resolved = child.resolve()
+            if not _is_within_storage(resolved, settings.storage_dir.resolve()):
+                continue
+            label = str(resolved)
+            if resolved.is_dir():
+                shutil.rmtree(resolved)
+                removed_paths.append(label)
+            elif resolved.exists():
+                resolved.unlink()
+                removed_paths.append(label)
+    return {"userId": user_id, "droppedTables": [], "removedPaths": removed_paths}
+
+
+def get_storage_usage(tools: list[RegisteredTool]) -> dict[str, Any]:
+    """Return detailed storage usage breakdown per tool and per user.
+
+    Structure::
+
+        {
+          "grandTotal": int,
+          "tools": [
+            {"toolId", "toolName", "totalBytes", "sharedBytes", "userBytes", "dbBytes"}
+          ],
+          "users": [
+            {"userId", "username", "displayName", "totalBytes"}
+          ],
+          "matrix": [
+            {"userId", "toolId", "bytes"}
+          ]
+        }
+    """
+    ensure_tool_access_tables()
+    settings = get_settings()
+    user_data_root = settings.storage_dir / "user_data"
+
+    all_users = list_users()
+    user_info = {u.id: u for u in all_users}
+
+    # Collect user-data directories that exist on disk (may include users since deleted).
+    user_dirs: dict[str, Path] = {}
+    if user_data_root.exists():
+        for child in user_data_root.iterdir():
+            if child.is_dir():
+                user_dirs[child.name] = child
+
+    # Ensure all known users are represented even if their dir is missing.
+    for uid in user_info:
+        user_dirs.setdefault(uid, user_data_root / uid)
+
+    tool_ids = [tool.tool_id for tool in tools]
+
+    # Per-tool shared file bytes (data/tools/<id> + temp/<id>).
+    tool_shared_file_bytes: dict[str, int] = {}
+    for tid in tool_ids:
+        shared = _dir_size(settings.storage_dir / "data" / "tools" / tid)
+        temp = _dir_size(settings.storage_dir / "temp" / tid)
+        tool_shared_file_bytes[tid] = shared + temp
+
+    # Per-tool DB bytes (via dbstat with graceful fallback).
+    tool_db_bytes = _compute_tool_db_bytes(tool_ids)
+
+    # Per-user-per-tool file bytes.
+    matrix: dict[tuple[str, str], int] = {}
+    for uid, uroot in user_dirs.items():
+        tools_dir = uroot / "tools"
+        if not tools_dir.exists():
+            continue
+        for tid in tool_ids:
+            size = _dir_size(tools_dir / tid)
+            if size > 0:
+                matrix[(uid, tid)] = size
+
+    # Aggregate per-tool totals.
+    tool_rows: list[dict[str, Any]] = []
+    for tool in tools:
+        tid = tool.tool_id
+        user_bytes = sum(v for (uid, t), v in matrix.items() if t == tid)
+        shared_bytes = tool_shared_file_bytes.get(tid, 0)
+        db_bytes = tool_db_bytes.get(tid, 0)
+        tool_rows.append({
+            "toolId": tid,
+            "toolName": tool.manifest.name,
+            "totalBytes": user_bytes + shared_bytes + db_bytes,
+            "sharedBytes": shared_bytes + db_bytes,
+            "userBytes": user_bytes,
+            "dbBytes": db_bytes,
+        })
+
+    # Aggregate per-user totals.
+    user_rows: list[dict[str, Any]] = []
+    for uid, uroot in user_dirs.items():
+        total = sum(v for (u, _t), v in matrix.items() if u == uid)
+        info = user_info.get(uid)
+        if info is not None:
+            username = info.username
+            display_name = info.display_name
+        else:
+            username = uid
+            display_name = uid
+        user_rows.append({
+            "userId": uid,
+            "username": username,
+            "displayName": display_name,
+            "totalBytes": total,
+        })
+
+    # Sort: tools by total desc, users by total desc.
+    tool_rows.sort(key=lambda r: r["totalBytes"], reverse=True)
+    user_rows.sort(key=lambda r: r["totalBytes"], reverse=True)
+
+    grand_total = sum(r["totalBytes"] for r in tool_rows)
+
+    matrix_rows = [
+        {"userId": uid, "toolId": tid, "bytes": size}
+        for (uid, tid), size in sorted(matrix.items())
+    ]
+
+    return {
+        "grandTotal": grand_total,
+        "tools": tool_rows,
+        "users": user_rows,
+        "matrix": matrix_rows,
+    }
+
+
+def get_user_storage_usage(user: User, tools: list[RegisteredTool]) -> dict[str, Any]:
+    """Return storage usage for a single user (self-service view)."""
+    ensure_tool_access_tables()
+    settings = get_settings()
+    tools_dir = settings.storage_dir / "user_data" / user.id / "tools"
+
+    tool_rows: list[dict[str, Any]] = []
+    total = 0
+    for tool in tools:
+        size = _dir_size(tools_dir / tool.tool_id)
+        tool_rows.append({
+            "toolId": tool.tool_id,
+            "toolName": tool.manifest.name,
+            "bytes": size,
+        })
+        total += size
+    tool_rows.sort(key=lambda r: r["bytes"], reverse=True)
+    return {"userId": user.id, "totalBytes": total, "tools": tool_rows}
+
+
 def enforce_tool_access_dependency(tool_id: str):
     def dependency(connection: HTTPConnection) -> None:
         from backend.app.core.security import get_optional_user
@@ -201,6 +361,75 @@ def _remove_tool_paths(tool_id: str) -> list[str]:
             resolved.unlink()
             removed.append(str(resolved))
     return removed
+
+
+def _remove_user_tool_paths(tool_id: str, user_id: str) -> list[str]:
+    """Remove user-scoped file storage for a single user+tool combination."""
+    settings = get_settings()
+    safe_tool_id = tool_id.replace("/", "_").replace("\\", "_")
+    path = settings.storage_dir / "user_data" / user_id / "tools" / safe_tool_id
+    removed: list[str] = []
+    resolved = path.resolve()
+    if not _is_within_storage(resolved, settings.storage_dir.resolve()):
+        return removed
+    if resolved.is_dir():
+        shutil.rmtree(resolved)
+        removed.append(str(resolved))
+    elif resolved.exists():
+        resolved.unlink()
+        removed.append(str(resolved))
+    return removed
+
+
+def _dir_size(path: Path) -> int:
+    """Recursively compute total file size under *path* (0 if missing)."""
+    if not path.exists():
+        return 0
+    total = 0
+    try:
+        for item in path.rglob("*"):
+            if item.is_file():
+                try:
+                    total += item.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _compute_tool_db_bytes(tool_ids: list[str]) -> dict[str, int]:
+    """Estimate per-tool database table sizes using the ``dbstat`` virtual table.
+
+    Falls back to 0 for every tool if ``dbstat`` is unavailable.
+    """
+    result: dict[str, int] = {tid: 0 for tid in tool_ids}
+    try:
+        with get_connection() as connection:
+            # Verify dbstat is available.
+            try:
+                connection.execute("SELECT COUNT(*) FROM dbstat LIMIT 1").fetchone()
+            except Exception:
+                return result
+            rows = connection.execute(
+                "SELECT name, SUM(pgsize) AS size FROM dbstat GROUP BY name"
+            ).fetchall()
+    except Exception:
+        return result
+
+    for tid in tool_ids:
+        prefixes = TOOL_TABLE_PREFIXES.get(tid, (f"{tid}_",))
+        total = 0
+        for row in rows:
+            name = row["name"]
+            if name.startswith("platform_"):
+                continue
+            if any(name.startswith(prefix) for prefix in prefixes):
+                size = row["size"]
+                if size is not None:
+                    total += int(size)
+        result[tid] = total
+    return result
 
 
 def _is_within_storage(path: Path, storage_root: Path) -> bool:

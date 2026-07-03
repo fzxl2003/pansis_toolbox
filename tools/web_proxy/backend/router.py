@@ -132,7 +132,7 @@ def _ensure_sidecar(request: Request | None = None) -> None:
             _sidecar_process is not None
             and _sidecar_process.poll() is None
             and _sidecar_ready()
-            and (_sidecar_public_info is None or _sidecar_public_info == public_info)
+            and (_sidecar_public_info is None or _sidecar_public_info[0] == public_info[0])
         ):
             return
         if _sidecar_process is not None and _sidecar_process.poll() is None:
@@ -298,6 +298,15 @@ def _external_origin(request: Request) -> str:
 
 
 def _public_server_info(request: Request | None) -> tuple[str, int, str]:
+    """Return the public host/port the sidecar should rewrite URLs for.
+
+    Since rammerhead's ``getServerInfo`` now reads ``X-Forwarded-Proto`` /
+    ``X-Forwarded-Host`` per request, the protocol here is only used as a
+    sensible default when the sidecar cannot determine the real protocol
+    (e.g. direct localhost access).  The returned tuple is also used to decide
+    whether the sidecar needs restarting: only the *hostname* matters for that
+    decision, so a switch between http and https no longer causes a restart.
+    """
     if request is None:
         return (SIDECAR_HOST, SIDECAR_PORT, "http:")
     proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
@@ -418,6 +427,10 @@ async def _ensure_sidecar_for_scope(scope: dict[str, Any]) -> None:
     health-check on every call.  Once the sidecar is up we can skip that work
     on the hot path (every proxied asset request) and only fall back to the
     slow path when the process is missing or the public host changed.
+
+    Only the *hostname* is compared – the sidecar resolves the protocol per
+    request from ``X-Forwarded-Proto``, so switching between http and https
+    must not trigger a restart.
     """
     request = Request(scope)
     public_info = _public_server_info(request)
@@ -425,7 +438,7 @@ async def _ensure_sidecar_for_scope(scope: dict[str, Any]) -> None:
         _sidecar_process is not None
         and _sidecar_process.poll() is None
         and _sidecar_public_info is not None
-        and _sidecar_public_info == public_info
+        and _sidecar_public_info[0] == public_info[0]
     ):
         return
     await asyncio.to_thread(_ensure_sidecar, request)

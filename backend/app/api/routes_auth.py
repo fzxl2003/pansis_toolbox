@@ -4,17 +4,20 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ToolboxError
 from backend.app.core.security import get_optional_user, require_admin, require_user
 from backend.app.services.auth_service import (
     change_user_password,
     create_user,
     delete_user,
     ensure_default_user,
+    is_super_admin,
     list_users,
     login,
     logout,
     reset_user_password,
     set_user_disabled,
+    update_user_role,
 )
 
 router = APIRouter()
@@ -43,6 +46,10 @@ class ChangePasswordRequest(BaseModel):
 
 class SetDisabledRequest(BaseModel):
     disabled: bool
+
+
+class UpdateRoleRequest(BaseModel):
+    role: str
 
 
 @router.post("/auth/login")
@@ -98,15 +105,15 @@ def list_users_basic_route(request: Request) -> dict:
 
 @router.post("/auth/users")
 def create_user_route(request: Request, payload: CreateUserRequest) -> dict:
-    require_admin(request)
-    user = create_user(payload.username, payload.displayName, payload.password, payload.role)
+    actor = require_admin(request)
+    user = create_user(payload.username, payload.displayName, payload.password, payload.role, actor=actor)
     return {"user": user.public_dict()}
 
 
 @router.post("/auth/users/{user_id}/password")
 def reset_user_password_route(request: Request, user_id: str, payload: ResetPasswordRequest) -> dict:
-    require_admin(request)
-    user = reset_user_password(user_id, payload.password)
+    actor = require_admin(request)
+    user = reset_user_password(user_id, payload.password, actor=actor)
     return {"user": user.public_dict()}
 
 
@@ -119,15 +126,24 @@ def change_password_route(request: Request, payload: ChangePasswordRequest) -> d
 
 @router.post("/auth/users/{user_id}/disabled")
 def set_user_disabled_route(request: Request, user_id: str, payload: SetDisabledRequest) -> dict:
-    require_admin(request)
-    user = set_user_disabled(user_id, payload.disabled)
+    actor = require_admin(request)
+    user = set_user_disabled(user_id, payload.disabled, actor=actor)
+    return {"user": user.public_dict()}
+
+
+@router.post("/auth/users/{user_id}/role")
+def update_user_role_route(request: Request, user_id: str, payload: UpdateRoleRequest) -> dict:
+    actor = require_admin(request)
+    if not is_super_admin(actor):
+        raise ToolboxError("SUPER_ADMIN_REQUIRED", "需要超级管理员权限才能调整管理员角色", status_code=403)
+    user = update_user_role(user_id, payload.role, actor)
     return {"user": user.public_dict()}
 
 
 @router.delete("/auth/users/{user_id}")
 def delete_user_route(request: Request, user_id: str) -> dict[str, bool]:
-    require_admin(request)
-    delete_user(user_id)
+    actor = require_admin(request)
+    delete_user(user_id, actor=actor)
     return {"deleted": True}
 
 

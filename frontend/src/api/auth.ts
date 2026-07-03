@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from './client';
+import { apiDelete, apiGet, apiPost } from './client';
 
 export type AuthUser = {
   id: string;
@@ -6,6 +6,7 @@ export type AuthUser = {
   displayName: string;
   role: 'admin' | 'user';
   disabled: boolean;
+  isSuperAdmin: boolean;
 };
 
 export type AuthState = {
@@ -34,4 +35,16 @@ export function changePassword(currentPassword: string, newPassword: string) {
 
 export function resetUserPassword(userId: string, password: string) {
   return apiPost<{ user: AuthUser }>(`/api/auth/users/${userId}/password`, { password });
+}
+
+export function deleteUser(userId: string) {
+  return apiDelete<{ deleted: boolean }>(`/api/auth/users/${userId}`);
+}
+
+export function updateUserRole(userId: string, role: 'admin' | 'user') {
+  return apiPost<{ user: AuthUser }>(`/api/auth/users/${userId}/role`, { role });
+}
+
+export function setUserDisabled(userId: string, disabled: boolean) {
+  return apiPost<{ user: AuthUser }>(`/api/auth/users/${userId}/disabled`, { disabled });
 }

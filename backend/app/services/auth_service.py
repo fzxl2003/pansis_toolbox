@@ -22,6 +22,10 @@ class User:
     role: str = "user"
     disabled: bool = False
 
+    @property
+    def is_super_admin(self) -> bool:
+        return self.username == get_settings().default_admin_username
+
     def public_dict(self) -> dict[str, str | bool]:
         return {
             "id": self.id,
@@ -29,6 +33,7 @@ class User:
             "displayName": self.display_name,
             "role": self.role,
             "disabled": self.disabled,
+            "isSuperAdmin": self.is_super_admin,
         }
 
 
@@ -120,10 +125,26 @@ def list_users() -> list[User]:
     return [user_from_row(row) for row in rows]
 
 
-def create_user(username: str, display_name: str, password: str, role: str = "user") -> User:
+def is_super_admin(user: User) -> bool:
+    return user.username == get_settings().default_admin_username
+
+
+def create_user(
+    username: str,
+    display_name: str,
+    password: str,
+    role: str = "user",
+    actor: User | None = None,
+) -> User:
     ensure_default_user()
     if role not in {"admin", "user"}:
         raise ToolboxError("INVALID_ROLE", "用户角色不合法", status_code=400)
+    if role == "admin" and actor is not None and not is_super_admin(actor):
+        raise ToolboxError(
+            "SUPER_ADMIN_REQUIRED",
+            "需要超级管理员权限才能创建管理员账号",
+            status_code=403,
+        )
     if not username.strip() or not password:
         raise ToolboxError("INVALID_USER", "用户名和密码不能为空", status_code=400)
     salt = secrets.token_hex(16)
@@ -155,21 +176,28 @@ def create_user(username: str, display_name: str, password: str, role: str = "us
     return user_from_row(row)
 
 
-def set_user_disabled(user_id: str, disabled: bool) -> User:
+def set_user_disabled(user_id: str, disabled: bool, actor: User | None = None) -> User:
     ensure_default_user()
     with get_connection() as connection:
         target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         if target is None:
             raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
-        if target["role"] == "admin" and disabled:
-            raise ToolboxError("CANNOT_DISABLE_ADMIN", "不能禁用管理员账号", status_code=400)
+        target_super = target["username"] == get_settings().default_admin_username
+        if target_super and disabled:
+            raise ToolboxError("CANNOT_DISABLE_SUPER_ADMIN", "不能禁用超级管理员账号", status_code=400)
+        if target["role"] == "admin" and disabled and actor is not None and not is_super_admin(actor):
+            raise ToolboxError(
+                "CANNOT_DISABLE_ADMIN",
+                "需要超级管理员权限才能禁用管理员账号",
+                status_code=403,
+            )
         connection.execute("UPDATE users SET disabled = ? WHERE id = ?", (1 if disabled else 0, user_id))
         connection.commit()
         row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return user_from_row(row)
 
 
-def reset_user_password(user_id: str, password: str) -> User:
+def reset_user_password(user_id: str, password: str, actor: User | None = None) -> User:
     ensure_default_user()
     if not password:
         raise ToolboxError("INVALID_PASSWORD", "密码不能为空", status_code=400)
@@ -178,6 +206,12 @@ def reset_user_password(user_id: str, password: str) -> User:
         row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         if row is None:
             raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
+        if row["role"] == "admin" and actor is not None and not is_super_admin(actor):
+            raise ToolboxError(
+                "CANNOT_RESET_ADMIN_PASSWORD",
+                "需要超级管理员权限才能重置管理员密码",
+                status_code=403,
+            )
         connection.execute(
             "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?",
             (hash_password(password, salt), salt, user_id),
@@ -208,14 +242,42 @@ def change_user_password(user: User, current_password: str, new_password: str) -
     return user_from_row(updated)
 
 
-def delete_user(user_id: str) -> None:
+def update_user_role(user_id: str, role: str, actor: User) -> User:
+    ensure_default_user()
+    if role not in {"admin", "user"}:
+        raise ToolboxError("INVALID_ROLE", "用户角色不合法", status_code=400)
+    if not is_super_admin(actor):
+        raise ToolboxError(
+            "SUPER_ADMIN_REQUIRED",
+            "需要超级管理员权限才能调整管理员角色",
+            status_code=403,
+        )
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
+        if row["username"] == get_settings().default_admin_username and role != "admin":
+            raise ToolboxError("CANNOT_DEMOTE_SUPER_ADMIN", "不能降级超级管理员账号", status_code=400)
+        connection.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        connection.commit()
+        updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return user_from_row(updated)
+
+
+def delete_user(user_id: str, actor: User | None = None) -> None:
     ensure_default_user()
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         if row is None:
             raise ToolboxError("USER_NOT_FOUND", "用户不存在", status_code=404)
-        if row["role"] == "admin":
-            raise ToolboxError("CANNOT_DELETE_ADMIN", "不能删除管理员账号", status_code=400)
+        if row["username"] == get_settings().default_admin_username:
+            raise ToolboxError("CANNOT_DELETE_SUPER_ADMIN", "不能删除超级管理员账号", status_code=400)
+        if row["role"] == "admin" and actor is not None and not is_super_admin(actor):
+            raise ToolboxError(
+                "CANNOT_DELETE_ADMIN",
+                "需要超级管理员权限才能删除管理员账号",
+                status_code=403,
+            )
         connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
         connection.commit()

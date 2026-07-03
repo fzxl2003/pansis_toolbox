@@ -17,7 +17,7 @@ export type TerminalSessionProps = {
   registerApi: (api: TerminalApi | null) => void;
 };
 
-type ConnStatus = 'connecting' | 'connected' | 'error' | 'closed';
+type ConnStatus = 'connecting' | 'connected ' | 'error' | 'closed';
 
 export function TerminalSession({ tab, serverName, active, registerApi }: TerminalSessionProps) {
   const containerRef = useRef<HTMLDivElement>(null);

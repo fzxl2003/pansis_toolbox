@@ -70,13 +70,19 @@ def register_tool_routers(app: FastAPI, tools: list[RegisteredTool]) -> None:
         if assets_dir.exists():
             app.mount(f"/tool-assets/{tool.tool_id}", StaticFiles(directory=assets_dir), name=f"tool-assets:{tool.tool_id}")
         try:
-            router = load_backend_router(tool)
+            module = load_backend_module(tool)
+            router = getattr(module, "router", None)
+            if not isinstance(router, APIRouter):
+                raise RuntimeError("Tool backend entry must expose a FastAPI APIRouter named 'router'")
             app.include_router(
                 router,
                 prefix=tool.api_prefix,
                 tags=[f"tool:{tool.tool_id}"],
                 dependencies=[Depends(enforce_tool_access_dependency(tool.tool_id))],
             )
+            mount_extra = getattr(module, "mount_extra", None)
+            if callable(mount_extra):
+                mount_extra(app)
             register_tool_scheduled_tasks(tool, scheduler)
         except Exception as exc:  # noqa: BLE001 - isolate bad tools from the host app.
             logger.exception("Failed to load tool router for %s", tool.tool_id)
@@ -87,7 +93,13 @@ def register_tool_routers(app: FastAPI, tools: list[RegisteredTool]) -> None:
     widget_registry.rebuild_from_tools(tools)
 
 
-def load_backend_router(tool: RegisteredTool) -> APIRouter:
+def load_backend_module(tool: RegisteredTool):
+    """Import the tool's backend entry module and return it.
+
+    The module must expose a FastAPI ``APIRouter`` named ``router``. It may also
+    expose an optional ``mount_extra(app)`` callable to register root-level
+    routes or middleware on the host application.
+    """
     router_path = tool.root_path / tool.manifest.entry.backend
     module_name = f"toolbox_tools.{tool.tool_id}.router"
     spec = importlib.util.spec_from_file_location(module_name, router_path)
@@ -95,10 +107,7 @@ def load_backend_router(tool: RegisteredTool) -> APIRouter:
         raise RuntimeError(f"Cannot import router from {router_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    router = getattr(module, "router", None)
-    if not isinstance(router, APIRouter):
-        raise RuntimeError("Tool backend entry must expose a FastAPI APIRouter named 'router'")
-    return router
+    return module
 
 
 def register_tool_scheduled_tasks(tool: RegisteredTool, target_scheduler: Scheduler) -> None:

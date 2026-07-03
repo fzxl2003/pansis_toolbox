@@ -1237,6 +1237,12 @@ function UnifiedLogPanel({ samples, events, filter }: { samples: Sample[]; event
 
   const filtered = filter === 'all' ? allEntries : allEntries.filter((e) => e.type === filter || (filter === 'email_sent' && e.type === 'email_failed') || (filter === 'script_executed' && e.type === 'script_failed'));
 
+  // 限制渲染条目数量：24h × 30s 间隔可达数千条采样，全部渲染会严重卡顿 DOM。
+  // entries 已按时间倒序排列，截取最近 MAX_LOG_ENTRIES 条即可。
+  const MAX_LOG_ENTRIES = 200;
+  const truncated = filtered.length > MAX_LOG_ENTRIES;
+  const visibleEntries = truncated ? filtered.slice(0, MAX_LOG_ENTRIES) : filtered;
+
   if (filtered.length === 0) {
     return (
       <div className="em-log-empty">
@@ -1248,7 +1254,10 @@ function UnifiedLogPanel({ samples, events, filter }: { samples: Sample[]; event
 
   return (
     <div className="em-log-timeline">
-      {filtered.map((entry) => (
+      {truncated && (
+        <div className="em-log-truncated">仅显示最近 {MAX_LOG_ENTRIES} 条记录（共 {filtered.length} 条）</div>
+      )}
+      {visibleEntries.map((entry) => (
         <div className={`em-log-entry ${entry.type}`} key={entry.id}>
           <span className={`log-type-icon ${entry.type}`}>
             {entry.type === 'sample' && <Monitor size={13} />}

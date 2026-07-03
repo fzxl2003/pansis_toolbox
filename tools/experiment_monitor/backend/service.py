@@ -27,12 +27,20 @@ CHECK_INTERVAL_SECONDS = 30
 RETENTION_DAYS = 7
 DEFAULT_CONFIRM_COUNT = 3
 
+# 模块级初始化标志：避免每次 API 请求都重复执行建表/建索引/迁移语句
+# CREATE TABLE IF NOT EXISTS 虽然幂等，但每次都要查 sqlite_master 并解析 DDL，
+# 再加上 3 条 ALTER TABLE 的 try/except 开销，在高频请求下显著拖慢响应。
+_db_initialized = False
+
 
 # ============================================================
 # Database Initialization
 # ============================================================
 
 def init_database() -> None:
+    global _db_initialized
+    if _db_initialized:
+        return
     with get_connection() as connection:
         connection.executescript(
             """
@@ -213,6 +221,7 @@ def init_database() -> None:
                 connection.commit()
             except Exception:
                 pass  # 字段已存在，忽略
+    _db_initialized = True
 
 
 # ============================================================
@@ -1475,17 +1484,20 @@ def get_task_history(task_id: str, user: User, hours: int = 24) -> dict[str, Any
     get_monitor_task(task_id, user)
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * RETENTION_DAYS)))
     with get_connection() as connection:
+        # 轻量查询：不加载 matched_processes（每条最多 50 个进程字符串的大 JSON），
+        # 前端图表/日志面板只用 processCount/checkedAt/conditionMet/error，
+        # 24h × 30s 间隔 ≈ 2880 条采样，去掉该列后传输体积大幅下降。
         samples = connection.execute(
-            "SELECT * FROM em_samples WHERE task_id = ? AND checked_at >= ? ORDER BY checked_at ASC",
+            "SELECT id, checked_at, process_count, condition_met, error FROM em_samples WHERE task_id = ? AND checked_at >= ? ORDER BY checked_at ASC",
             (task_id, since.isoformat()),
         ).fetchall()
         events = connection.execute(
-            "SELECT * FROM em_alert_events WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
+            "SELECT * FROM em_alert_events WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 200",
             (task_id, since.isoformat()),
         ).fetchall()
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
     return {
-        "samples": [_public_sample(s) for s in samples],
+        "samples": [_public_sample_light(s) for s in samples],
         "events": [_public_event(e) for e in events],
         "alertState": _public_alert_state(state) if state else None,
     }
@@ -1701,6 +1713,18 @@ def _public_sample(row: sqlite3.Row) -> dict[str, Any]:
         "checkedAt": row["checked_at"],
         "processCount": row["process_count"],
         "matchedProcesses": _json_list(row["matched_processes"]),
+        "conditionMet": bool(row["condition_met"]),
+        "error": row["error"],
+    }
+
+
+def _public_sample_light(row: sqlite3.Row) -> dict[str, Any]:
+    """轻量采样序列化：不含 matched_processes，用于历史列表加载。"""
+    return {
+        "id": row["id"],
+        "checkedAt": row["checked_at"],
+        "processCount": row["process_count"],
+        "matchedProcesses": [],
         "conditionMet": bool(row["condition_met"]),
         "error": row["error"],
     }

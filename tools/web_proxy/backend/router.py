@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import logging
 import os
+import re
 import secrets
 import shutil
+import struct
 import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from backend.app.core.config import get_settings
@@ -21,6 +27,8 @@ from backend.app.core.errors import ToolboxError
 from backend.app.core.security import get_optional_user, require_user, require_user_tool_data_dir
 
 router = APIRouter()
+
+logger = logging.getLogger("toolbox.web_proxy")
 
 TOOL_ID = "web_proxy"
 SIDECAR_HOST = "127.0.0.1"
@@ -281,6 +289,10 @@ def _normalize_target_url(url: str) -> str:
 
 def _external_origin(request: Request) -> str:
     proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    if proto in ("ws", "ws:"):
+        proto = "http"
+    elif proto in ("wss", "wss:"):
+        proto = "https"
     host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
     return f"{proto}://{host}"
 
@@ -289,6 +301,13 @@ def _public_server_info(request: Request | None) -> tuple[str, int, str]:
     if request is None:
         return (SIDECAR_HOST, SIDECAR_PORT, "http:")
     proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    # Normalise WebSocket schemes to their HTTP equivalents – the middleware may
+    # call this from a websocket scope where ``request.url.scheme`` is ``ws``/
+    # ``wss`` but the sidecar must rewrite URLs with ``http``/``https``.
+    if proto in ("ws", "ws:"):
+        proto = "http"
+    elif proto in ("wss", "wss:"):
+        proto = "https"
     host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
     port = 443 if proto == "https" else 80
     hostname = host
@@ -334,3 +353,475 @@ def _direct_entry_page() -> HTMLResponse:
 </body>
 </html>"""
     )
+
+
+# ---------------------------------------------------------------------------
+# Reverse proxy – forwards rammerhead traffic from the public toolbox origin
+# to the local sidecar process (127.0.0.1:8787).
+#
+# The sidecar rewrites all URLs in proxied pages so that they point back to the
+# toolbox's public origin (see ``_public_server_info``).  The toolbox backend
+# must therefore reverse-proxy every request whose path belongs to rammerhead
+# (session traffic ``/<sessionId>/...`` and the reserved client-script routes
+# such as ``/hammerhead.js``) to the sidecar.  Without this proxy those paths
+# fall through to the SPA catch-all and the browser shows a React Router 404.
+# ---------------------------------------------------------------------------
+
+# UUID v4 without dashes – 32 hex characters (matches rammerhead getSessionId).
+_SESSION_ID_RE = re.compile(r"^/[0-9a-f]{32}(/|$)", re.IGNORECASE)
+
+# Hammerhead / rammerhead reserved root-level routes that the browser loads
+# directly (not under a session id prefix).
+_RAMMERHEAD_ROOT_PATHS = frozenset(
+    {
+        "/rammerhead.js",
+        "/hammerhead.js",
+        "/worker-hammerhead.js",
+        "/transport-worker.js",
+        "/task.js",
+        "/iframe-task.js",
+        "/messaging",
+        "/syncLocalStorage",
+        "/api/shuffleDict",
+    }
+)
+
+# Hop-by-hop headers that must not be forwarded by a proxy (RFC 7230 §6.1).
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+# Extra request headers to strip before forwarding to the sidecar.
+_STRIP_REQUEST_HEADERS = _HOP_BY_HOP_HEADERS | {"host", "expect"}
+
+
+def _is_rammerhead_path(path: str) -> bool:
+    """Return True when *path* should be served by the rammerhead sidecar."""
+    if _SESSION_ID_RE.match(path):
+        return True
+    return path in _RAMMERHEAD_ROOT_PATHS
+
+
+async def _ensure_sidecar_for_scope(scope: dict[str, Any]) -> None:
+    """Make sure the sidecar process is running, using a fast in-process check.
+
+    The full ``_ensure_sidecar`` acquires a lock and performs a blocking HTTP
+    health-check on every call.  Once the sidecar is up we can skip that work
+    on the hot path (every proxied asset request) and only fall back to the
+    slow path when the process is missing or the public host changed.
+    """
+    request = Request(scope)
+    public_info = _public_server_info(request)
+    if (
+        _sidecar_process is not None
+        and _sidecar_process.poll() is None
+        and _sidecar_public_info is not None
+        and _sidecar_public_info == public_info
+    ):
+        return
+    await asyncio.to_thread(_ensure_sidecar, request)
+
+
+# -- HTTP proxy -------------------------------------------------------------
+
+
+async def _proxy_http(scope: dict[str, Any], receive: Callable[[], Awaitable[dict[str, Any]]], send: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+    method = scope["method"]
+    path = scope["path"]
+    query_string = scope.get("query_string", b"")
+    target = f"{path}?{query_string.decode('ascii')}" if query_string else path
+
+    # Collect request headers, stripping hop-by-hop / host headers.
+    req_headers: list[tuple[str, str]] = []
+    for raw_key, raw_value in scope["headers"]:
+        key = raw_key.decode("ascii")
+        if key.lower() in _STRIP_REQUEST_HEADERS:
+            continue
+        req_headers.append((key, raw_value.decode("latin-1")))
+    req_headers.append(("Host", f"{SIDECAR_HOST}:{SIDECAR_PORT}"))
+    req_headers.append(("Connection", "close"))
+
+    # Buffer the request body.  Rammerhead request bodies (form submits, AJAX
+    # payloads) are small; streaming would complicate the raw-socket write for
+    # little gain.
+    body_chunks: list[bytes] = []
+    more_body = True
+    while more_body:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return
+        if message["type"] == "http.request":
+            body_chunks.append(message.get("body", b""))
+            more_body = message.get("more_body", False)
+    body = b"".join(body_chunks)
+    if body or method in ("POST", "PUT", "PATCH"):
+        req_headers.append(("Content-Length", str(len(body))))
+
+    request_line = f"{method} {target} HTTP/1.1\r\n".encode("ascii")
+    header_block = "".join(f"{k}: {v}\r\n" for k, v in req_headers).encode("latin-1")
+    request_bytes = request_line + header_block + b"\r\n" + body
+
+    try:
+        reader, writer = await asyncio.open_connection(SIDECAR_HOST, SIDECAR_PORT)
+    except OSError:
+        await _send_http_error(send, 502, "网页代理进程不可用")
+        return
+
+    try:
+        writer.write(request_bytes)
+        await writer.drain()
+
+        # --- response status line ---
+        status_line = await reader.readline()
+        if not status_line:
+            await _send_http_error(send, 502, "网页代理进程返回空响应")
+            return
+        parts = status_line.decode("ascii").strip().split(" ", 2)
+        if len(parts) < 2 or not parts[1].isdigit():
+            await _send_http_error(send, 502, "网页代理进程响应格式错误")
+            return
+        status_code = int(parts[1])
+
+        # --- response headers ---
+        resp_headers: list[tuple[bytes, bytes]] = []
+        transfer_encoding: str | None = None
+        content_length: int | None = None
+        while True:
+            line = await reader.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            key, sep, val = line.rstrip(b"\r\n").partition(b": ")
+            if not sep:
+                continue
+            key_lower = key.decode("ascii").lower()
+            if key_lower in _HOP_BY_HOP_HEADERS:
+                if key_lower == "transfer-encoding":
+                    transfer_encoding = val.decode("latin-1").lower()
+                continue
+            if key_lower == "content-length":
+                try:
+                    content_length = int(val)
+                except ValueError:
+                    content_length = None
+            resp_headers.append((key, val))
+
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status_code,
+                "headers": resp_headers,
+            }
+        )
+
+        # --- response body (streamed) ---
+        if transfer_encoding and "chunked" in transfer_encoding:
+            await _stream_chunked(reader, send)
+        elif content_length is not None:
+            await _stream_fixed(reader, send, content_length)
+        else:
+            await _stream_until_eof(reader, send)
+    except (asyncio.IncompleteReadError, ConnectionError, OSError):
+        # Connection broke mid-stream – tell the client we're done.
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _stream_chunked(
+    reader: asyncio.StreamReader,
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    while True:
+        size_line = await reader.readline()
+        if not size_line:
+            break
+        size_str = size_line.decode("ascii").strip().split(";")[0]
+        try:
+            chunk_size = int(size_str, 16)
+        except ValueError:
+            break
+        if chunk_size == 0:
+            # consume trailing headers up to the final CRLF
+            while True:
+                trailer = await reader.readline()
+                if trailer in (b"\r\n", b"\n", b""):
+                    break
+            break
+        chunk = await reader.readexactly(chunk_size)
+        await reader.readexactly(2)  # CRLF after chunk data
+        await send({"type": "http.response.body", "body": chunk, "more_body": True})
+    await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+async def _stream_fixed(
+    reader: asyncio.StreamReader,
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+    length: int,
+) -> None:
+    remaining = length
+    while remaining > 0:
+        chunk = await reader.read(min(remaining, 65536))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        await send({"type": "http.response.body", "body": chunk, "more_body": True})
+    await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+async def _stream_until_eof(
+    reader: asyncio.StreamReader,
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    while True:
+        chunk = await reader.read(65536)
+        if not chunk:
+            break
+        await send({"type": "http.response.body", "body": chunk, "more_body": True})
+    await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+async def _send_http_error(send: Callable[[dict[str, Any]], Awaitable[None]], status_code: int, message: str) -> None:
+    body = message.encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+# -- WebSocket proxy --------------------------------------------------------
+
+
+async def _proxy_websocket(
+    scope: dict[str, Any],
+    receive: Callable[[], Awaitable[dict[str, Any]]],
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    path = scope["path"]
+    query_string = scope.get("query_string", b"")
+    target = f"{path}?{query_string.decode('ascii')}" if query_string else path
+
+    try:
+        reader, writer = await asyncio.open_connection(SIDECAR_HOST, SIDECAR_PORT)
+    except OSError:
+        await send({"type": "websocket.close", "code": 1011})
+        return
+
+    # --- client-side WebSocket handshake to the sidecar ---
+    ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+    handshake_lines = [
+        f"GET {target} HTTP/1.1",
+        f"Host: {SIDECAR_HOST}:{SIDECAR_PORT}",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {ws_key}",
+        "Sec-WebSocket-Version: 13",
+    ]
+    for raw_key, raw_value in scope["headers"]:
+        key = raw_key.decode("ascii")
+        if key.lower() in _STRIP_REQUEST_HEADERS or key.lower() in (
+            "sec-websocket-key",
+            "sec-websocket-version",
+        ):
+            continue
+        handshake_lines.append(f"{key}: {raw_value.decode('latin-1')}")
+    handshake = "\r\n".join(handshake_lines) + "\r\n\r\n"
+
+    writer.write(handshake.encode("latin-1"))
+    await writer.drain()
+
+    status_line = await reader.readline()
+    status_parts = status_line.decode("ascii").strip().split(" ", 2)
+    if len(status_parts) < 2 or status_parts[1] != "101":
+        writer.close()
+        await send({"type": "websocket.close", "code": 1011})
+        return
+
+    resp_subprotocol: str | None = None
+    while True:
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+        key, sep, val = line.rstrip(b"\r\n").partition(b": ")
+        if sep and key.decode("ascii").lower() == "sec-websocket-protocol":
+            resp_subprotocol = val.decode("latin-1")
+
+    accept_msg: dict[str, Any] = {"type": "websocket.accept"}
+    if resp_subprotocol:
+        accept_msg["subprotocol"] = resp_subprotocol
+    await send(accept_msg)
+
+    # --- bidirectional pipe ---
+    async def browser_to_sidecar() -> None:
+        try:
+            while True:
+                message = await receive()
+                mtype = message.get("type")
+                if mtype == "websocket.disconnect":
+                    break
+                if mtype == "websocket.receive":
+                    data = message.get("bytes")
+                    if data is not None:
+                        await _send_ws_frame(writer, 0x2, data)
+                    elif message.get("text") is not None:
+                        await _send_ws_frame(writer, 0x1, message["text"].encode("utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def sidecar_to_browser() -> None:
+        try:
+            while True:
+                opcode, payload = await _recv_ws_frame(reader)
+                if opcode == 0x1:  # text
+                    await send({"type": "websocket.send", "text": payload.decode("utf-8")})
+                elif opcode == 0x2:  # binary
+                    await send({"type": "websocket.send", "bytes": payload})
+                elif opcode == 0x8:  # close
+                    code = 1000
+                    if len(payload) >= 2:
+                        code = struct.unpack("!H", payload[:2])[0]
+                    await send({"type": "websocket.close", "code": code})
+                    break
+                elif opcode == 0x9:  # ping → pong
+                    await _send_ws_frame(writer, 0xA, payload)
+                # 0x0 (continuation) and 0xA (pong) are ignored; rammerhead
+                # sends unfragmented frames so we don't need reassembly.
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    browser_task = asyncio.create_task(browser_to_sidecar())
+    sidecar_task = asyncio.create_task(sidecar_to_browser())
+    done, pending = await asyncio.wait({browser_task, sidecar_task}, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    for task in done:
+        exc = task.exception()
+        if exc is not None and not isinstance(exc, (asyncio.CancelledError,)):
+            logger.debug("websocket proxy task ended: %r", exc)
+
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _apply_mask(payload: bytes, mask: bytes) -> bytes:
+    """Apply/remove the WebSocket XOR masking (RFC 6455 §5.3)."""
+    if not payload:
+        return b""
+    result = bytearray(payload)
+    for i in range(4):
+        result[i::4] = bytes(b ^ mask[i] for b in payload[i::4])
+    return bytes(result)
+
+
+async def _send_ws_frame(writer: asyncio.StreamWriter, opcode: int, payload: bytes) -> None:
+    """Send a single masked WebSocket frame (client → server)."""
+    mask = os.urandom(4)
+    header = bytearray([0x80 | opcode])  # FIN + opcode
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)  # MASK bit set
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack("!Q", length))
+    header.extend(mask)
+    writer.write(bytes(header))
+    if payload:
+        writer.write(_apply_mask(payload, mask))
+    await writer.drain()
+
+
+async def _recv_ws_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
+    """Read a single WebSocket frame (server → client, unmasked)."""
+    data = await reader.readexactly(2)
+    opcode = data[0] & 0x0F
+    masked = data[1] & 0x80
+    length = data[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", await reader.readexactly(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", await reader.readexactly(8))[0]
+    mask = await reader.readexactly(4) if masked else b""
+    payload = await reader.readexactly(length) if length > 0 else b""
+    if masked:
+        payload = _apply_mask(payload, mask)
+    return opcode, payload
+
+
+# -- ASGI middleware --------------------------------------------------------
+
+class RammerheadProxyMiddleware:
+    """ASGI middleware that reverse-proxies rammerhead traffic to the sidecar.
+
+    Runs as a pure ASGI middleware (not ``BaseHTTPMiddleware``) so that both
+    HTTP and WebSocket scopes are intercepted and request/response bodies can
+    be streamed without buffering.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Callable[[], Awaitable[dict[str, Any]]], send: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+        if scope.get("type") not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        if not _is_rammerhead_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+
+        try:
+            await _ensure_sidecar_for_scope(scope)
+        except ToolboxError as exc:
+            if scope["type"] == "http":
+                await _send_http_error(send, exc.status_code, exc.message)
+            else:
+                await send({"type": "websocket.close", "code": 1011})
+            return
+        except Exception:  # noqa: BLE001
+            if scope["type"] == "http":
+                await _send_http_error(send, 502, "网页代理进程启动失败")
+            else:
+                await send({"type": "websocket.close", "code": 1011})
+            return
+
+        if scope["type"] == "http":
+            await _proxy_http(scope, receive, send)
+        else:
+            await _proxy_websocket(scope, receive, send)
+
+
+def mount_extra(app: FastAPI) -> None:
+    """Register root-level middleware on the host application.
+
+    Called by the tool loader after the tool's API router has been mounted.
+    The middleware must be added *after* CORS so that it becomes the outermost
+    layer and rammerhead traffic is intercepted before any other middleware.
+    """
+    app.add_middleware(RammerheadProxyMiddleware)

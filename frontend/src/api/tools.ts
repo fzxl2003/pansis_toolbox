@@ -139,3 +139,53 @@ export function clearMyToolStorage(toolId: string) {
 export function clearMyStorage() {
   return apiDelete<{ userId: string; removedPaths: string[] }>('/api/tools/my-storage');
 }
+
+// ── Data category & time-based deletion APIs ───────────────────────────────
+
+export type DataCategoryInfo = {
+  name: string;
+  description: string;
+  timeColumn: string | null;
+  storage: 'user_tool_db' | 'platform_db';
+  tables: string[];
+};
+
+export type ToolDataCategories = {
+  toolId: string;
+  toolName: string;
+  categories: DataCategoryInfo[];
+};
+
+export type DataCategoryUsage = {
+  category: string;
+  description: string;
+  timeColumn: string | null;
+  totalRows: number;
+  dbBytes: number;
+  tables: Array<{ table: string; rows: number }>;
+};
+
+export type DataDeletionResult = {
+  toolId: string;
+  deleted: Record<string, Record<string, number>>;
+  message?: string;
+};
+
+export function fetchDataCategories() {
+  return apiGet<{ tools: ToolDataCategories[] }>('/api/settings/data-categories');
+}
+
+export function fetchDataUsage(toolId: string) {
+  return apiGet<{ toolId: string; userId: string; categories: DataCategoryUsage[] }>(
+    `/api/settings/data-usage/${toolId}`,
+  );
+}
+
+export function deleteData(payload: {
+  toolId: string;
+  category?: string | null;
+  beforeDays?: number | null;
+  userId?: string | null;
+}) {
+  return apiDelete<DataDeletionResult>('/api/settings/data', payload);
+}

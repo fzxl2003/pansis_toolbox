@@ -18,21 +18,35 @@ from starlette.websockets import WebSocketDisconnect
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.db.database import get_connection
+from backend.app.db.database import (
+    list_user_tool_dbs,
+    user_tool_connection_context,
+)
 from backend.app.services.auth_service import User, get_user_by_session_token
+from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services import ssh_connection_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 TOOL_ID = "ssh_workspace"
 SCHEDULER_INTERVAL_SECONDS = 30
 _SESSION_RE = re.compile(r"^\s*(?P<pid>\d+)\.(?P<name>[^\t\s]+)\s+\((?P<state>[^)]+)\)")
 _SAFE_SESSION_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
+# Module-level init flag: track which user DBs have been initialized
+_initialized_dbs: set[str] = set()
+
 # ---- Database ----
 
 
-def init_database() -> None:
-    with get_connection() as connection:
+def init_database(user_id: str) -> None:
+    """Create tables in the user's per-tool database if not already done."""
+    if user_id in _initialized_dbs:
+        return
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS ssh_servers (
@@ -186,6 +200,43 @@ def init_database() -> None:
             connection.execute("SELECT pid FROM ssh_screen_sessions LIMIT 1")
         except sqlite3.OperationalError:
             connection.execute("ALTER TABLE ssh_screen_sessions ADD COLUMN pid TEXT NOT NULL DEFAULT ''")
+    _initialized_dbs.add(user_id)
+
+
+# ============================================================
+# Data category registration
+# ============================================================
+
+register_tool_categories(TOOL_ID, [
+    DataCategory(
+        name="config",
+        tables=["ssh_servers", "ssh_command_templates", "ssh_scheduled_tasks", "ssh_terminal_tabs"],
+        time_column=None,
+        description="配置数据（服务器、命令模板、定时任务、终端标签）",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="history",
+        tables=["ssh_command_history"],
+        time_column="created_at",
+        description="命令执行历史",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="screen_sessions",
+        tables=["ssh_screen_sessions"],
+        time_column="started_at",
+        description="Screen 会话记录",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="task_runs",
+        tables=["ssh_task_runs"],
+        time_column="started_at",
+        description="定时任务执行记录",
+        storage="user_tool_db",
+    ),
+])
 
 
 # ============================================================
@@ -194,8 +245,8 @@ def init_database() -> None:
 
 
 def list_servers(user: User) -> list[dict[str, Any]]:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM ssh_servers WHERE owner_user_id = ? AND enabled = 1 ORDER BY name ASC",
             (user.id,),
@@ -204,12 +255,12 @@ def list_servers(user: User) -> list[dict[str, Any]]:
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_database()
+    init_database(user.id)
     auth_type = _clean_auth_type(payload.get("authType", "password"))
     _validate_server_payload(payload, auth_type, creating=True)
     now = _now()
     server_id = _new_id()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO ssh_servers (
@@ -241,7 +292,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
     password = payload.get("sshPassword")
     private_key = payload.get("privateKey")
     passphrase = payload.get("privateKeyPassphrase")
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             UPDATE ssh_servers
@@ -269,7 +320,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
 def delete_server(server_id: str, user: User) -> None:
     get_server(server_id, user)
     now = _now()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("UPDATE ssh_servers SET enabled = 0, updated_at = ? WHERE id = ?", (now, server_id))
         connection.execute("UPDATE ssh_scheduled_tasks SET enabled = 0, updated_at = ? WHERE server_id = ? AND owner_user_id = ?", (now, server_id, user.id))
         connection.execute("DELETE FROM ssh_terminal_tabs WHERE server_id = ? AND owner_user_id = ?", (server_id, user.id))
@@ -283,7 +334,7 @@ def copy_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str
     now = _now()
     new_id = _new_id()
     new_name = (payload.get("name") or f"{row['name']} (副本)").strip()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         # Copy server record
         connection.execute(
             """
@@ -338,8 +389,8 @@ def copy_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str
 
 
 def get_server(server_id: str, user: User) -> sqlite3.Row:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
             "SELECT * FROM ssh_servers WHERE id = ? AND owner_user_id = ? AND enabled = 1",
             (server_id, user.id),
@@ -369,7 +420,7 @@ def test_server(server_id: str, user: User) -> dict[str, Any]:
         status = "failed"
         error = str(exc)
         result = {"connected": False, "error": error, "hasScreen": False}
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "UPDATE ssh_servers SET has_screen = ?, last_test_status = ?, last_test_error = ?, last_tested_at = ?, updated_at = ? WHERE id = ?",
             (1 if has_screen else 0, status, error[:500], now, now, server_id),
@@ -388,7 +439,7 @@ def list_screen_sessions(server_id: str, user: User, refresh: bool = True) -> li
     _require_screen(server)
     if refresh:
         _refresh_screen_rows(server, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM ssh_screen_sessions WHERE owner_user_id = ? AND server_id = ? ORDER BY started_at DESC",
             (user.id, server_id),
@@ -407,7 +458,7 @@ def create_screen_session(server_id: str, payload: dict[str, Any], user: User) -
         shell_cmd = f"screen -dmS {shlex.quote(name)} bash"
     _run_ssh(server, shell_cmd, timeout=15)
     now = _now()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT OR REPLACE INTO ssh_screen_sessions (id, owner_user_id, server_id, session_name, status, created_by_tool, command, started_at, checked_at)
@@ -429,7 +480,7 @@ def rename_screen_session(server_id: str, session_name: str, payload: dict[str, 
     old_name = _safe_session_name(session_name)
     new_name = _safe_session_name(_required(payload, "name"))
     _run_ssh(server, f"screen -S {shlex.quote(old_name)} -X sessionname {shlex.quote(new_name)}", timeout=10)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         now = _now()
         connection.execute(
             "UPDATE ssh_screen_sessions SET session_name = ?, checked_at = ?, status = 'running' WHERE owner_user_id = ? AND server_id = ? AND session_name = ?",
@@ -449,7 +500,7 @@ def delete_screen_session(server_id: str, session_name: str, user: User) -> None
     _require_screen(server)
     clean_name = _safe_session_name(session_name)
     _run_ssh(server, f"screen -S {shlex.quote(clean_name)} -X quit", timeout=10)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "DELETE FROM ssh_screen_sessions WHERE owner_user_id = ? AND server_id = ? AND session_name = ?",
             (user.id, server_id, clean_name),
@@ -463,7 +514,7 @@ def delete_screen_session(server_id: str, session_name: str, user: User) -> None
 
 
 def list_history(user: User, server_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-    init_database()
+    init_database(user.id)
     limit = max(1, min(limit, 300))
     params: list[Any] = [user.id]
     where = "owner_user_id = ?"
@@ -472,7 +523,7 @@ def list_history(user: User, server_id: str | None = None, limit: int = 100) -> 
         where += " AND server_id = ?"
         params.append(server_id)
     params.append(limit)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             f"SELECT * FROM ssh_command_history WHERE {where} ORDER BY created_at DESC LIMIT ?",
             params,
@@ -485,7 +536,7 @@ def record_history(payload: dict[str, Any], user: User) -> dict[str, Any]:
     if server_id:
         get_server(server_id, user)
     command = _required(payload, "command")
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         history_id = _new_id()
         connection.execute(
             "INSERT INTO ssh_command_history (id, owner_user_id, server_id, source, command, exit_status, screen_session, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -502,9 +553,9 @@ def record_history(payload: dict[str, Any], user: User) -> dict[str, Any]:
 
 
 def list_templates(server_id: str, user: User) -> list[dict[str, Any]]:
-    init_database()
+    init_database(user.id)
     get_server(server_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM ssh_command_templates WHERE owner_user_id = ? AND server_id = ? ORDER BY updated_at DESC",
             (user.id, server_id),
@@ -513,13 +564,13 @@ def list_templates(server_id: str, user: User) -> list[dict[str, Any]]:
 
 
 def create_template(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_database()
+    init_database(user.id)
     server_id = _required(payload, "serverId")
     get_server(server_id, user)
     now = _now()
     template_id = _new_id()
     variables = payload.get("variables") or _detect_variables(payload.get("command") or "")
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "INSERT INTO ssh_command_templates (id, owner_user_id, server_id, name, command, description, variables_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (template_id, user.id, server_id, _required(payload, "name"), _required(payload, "command"), payload.get("description") or "", json.dumps(_clean_variables(variables), ensure_ascii=False), now, now),
@@ -537,7 +588,7 @@ def update_template(template_id: str, payload: dict[str, Any], user: User) -> di
         variables = _detect_variables(command)
     elif variables is None:
         variables = json.loads(row["variables_json"])
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "UPDATE ssh_command_templates SET name = ?, command = ?, description = ?, variables_json = ?, updated_at = ? WHERE id = ?",
             (payload.get("name", row["name"]), command, payload.get("description", row["description"]), json.dumps(_clean_variables(variables), ensure_ascii=False), _now(), template_id),
@@ -549,7 +600,7 @@ def update_template(template_id: str, payload: dict[str, Any], user: User) -> di
 
 def delete_template(template_id: str, user: User) -> None:
     _get_template(template_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("DELETE FROM ssh_command_templates WHERE id = ?", (template_id,))
         connection.commit()
 
@@ -560,14 +611,14 @@ def delete_template(template_id: str, user: User) -> None:
 
 
 def list_scheduled_tasks(user: User, server_id: str | None = None) -> list[dict[str, Any]]:
-    init_database()
+    init_database(user.id)
     params: list[Any] = [user.id]
     where = "owner_user_id = ?"
     if server_id:
         get_server(server_id, user)
         where += " AND server_id = ?"
         params.append(server_id)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             f"SELECT * FROM ssh_scheduled_tasks WHERE {where} ORDER BY enabled DESC, updated_at DESC",
             params,
@@ -581,7 +632,7 @@ def create_scheduled_task(payload: dict[str, Any], user: User) -> dict[str, Any]
     interval = _clean_interval(payload.get("intervalSeconds"))
     now = _now_dt()
     task_id = _new_id()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "INSERT INTO ssh_scheduled_tasks (id, owner_user_id, server_id, name, command, interval_seconds, screen_name_prefix, enabled, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (task_id, user.id, server["id"], _required(payload, "name"), _required(payload, "command"), interval, payload.get("screenNamePrefix") or "", 1 if payload.get("enabled", True) else 0, (now + timedelta(seconds=interval)).isoformat(), now.isoformat(), now.isoformat()),
@@ -602,7 +653,7 @@ def update_scheduled_task(task_id: str, payload: dict[str, Any], user: User) -> 
     next_run_at = row["next_run_at"]
     if interval != row["interval_seconds"] or enabled != bool(row["enabled"]):
         next_run_at = (now + timedelta(seconds=interval)).isoformat()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "UPDATE ssh_scheduled_tasks SET server_id = ?, name = ?, command = ?, interval_seconds = ?, screen_name_prefix = ?, enabled = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
             (server_id, payload.get("name", row["name"]), payload.get("command", row["command"]), interval, payload.get("screenNamePrefix", row["screen_name_prefix"]), 1 if enabled else 0, next_run_at, now.isoformat(), task_id),
@@ -614,14 +665,14 @@ def update_scheduled_task(task_id: str, payload: dict[str, Any], user: User) -> 
 
 def delete_scheduled_task(task_id: str, user: User) -> None:
     _get_task(task_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("DELETE FROM ssh_scheduled_tasks WHERE id = ?", (task_id,))
         connection.commit()
 
 
 def list_task_runs(task_id: str, user: User, limit: int = 50) -> list[dict[str, Any]]:
     _get_task(task_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM ssh_task_runs WHERE owner_user_id = ? AND task_id = ? ORDER BY started_at DESC LIMIT ?",
             (user.id, task_id, max(1, min(limit, 200))),
@@ -630,15 +681,24 @@ def list_task_runs(task_id: str, user: User, limit: int = 50) -> list[dict[str, 
 
 
 def collect_due_tasks() -> None:
-    init_database()
+    """Called by scheduler to run all due scheduled tasks across all users."""
     now = _now()
-    with get_connection() as connection:
-        tasks = connection.execute(
-            "SELECT * FROM ssh_scheduled_tasks WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT 20",
-            (now,),
-        ).fetchall()
-    for task in tasks:
-        _run_due_task(task)
+    for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
+        init_database(user_id)
+        try:
+            with user_tool_connection_context(user_id, TOOL_ID) as connection:
+                tasks = connection.execute(
+                    "SELECT * FROM ssh_scheduled_tasks WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT 20",
+                    (now,),
+                ).fetchall()
+        except Exception:
+            logger.exception("Failed to read scheduled tasks for user %s", user_id)
+            continue
+        for task in tasks:
+            try:
+                _run_due_task(task)
+            except Exception:
+                logger.exception("Failed to run scheduled task %s", task["id"])
 
 
 # ============================================================
@@ -647,8 +707,8 @@ def collect_due_tasks() -> None:
 
 
 def list_terminal_tabs(user: User) -> list[dict[str, Any]]:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM ssh_terminal_tabs WHERE owner_user_id = ? ORDER BY tab_order ASC",
             (user.id,),
@@ -658,9 +718,9 @@ def list_terminal_tabs(user: User) -> list[dict[str, Any]]:
 
 def save_terminal_tabs(tabs: list[dict[str, Any]], user: User) -> list[dict[str, Any]]:
     """Replace all terminal tabs for this user."""
-    init_database()
+    init_database(user.id)
     now = _now()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("DELETE FROM ssh_terminal_tabs WHERE owner_user_id = ?", (user.id,))
         for idx, tab in enumerate(tabs):
             server_id = tab.get("serverId", "")
@@ -842,6 +902,7 @@ async def _handle_terminal_control(channel: Any, text: str) -> bool:
 
 
 def _run_due_task(task: sqlite3.Row) -> None:
+    user_id = task["owner_user_id"]
     started = _now()
     run_id = _new_id()
     status = "started"
@@ -849,7 +910,7 @@ def _run_due_task(task: sqlite3.Row) -> None:
     screen_session = _safe_session_name(f"{task['screen_name_prefix'] or 'ssh_task'}_{int(time.time())}_{task['id'][:6]}")
     server = None
     try:
-        with get_connection() as connection:
+        with user_tool_connection_context(user_id, TOOL_ID) as connection:
             server = connection.execute(
                 "SELECT * FROM ssh_servers WHERE id = ? AND owner_user_id = ? AND enabled = 1",
                 (task["server_id"], task["owner_user_id"]),
@@ -865,7 +926,7 @@ def _run_due_task(task: sqlite3.Row) -> None:
         screen_session = ""
     finished = _now()
     next_run_at = (_now_dt() + timedelta(seconds=max(60, int(task["interval_seconds"])))).isoformat()
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute(
             "INSERT INTO ssh_task_runs (id, owner_user_id, task_id, server_id, command, screen_session, status, error, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run_id, task["owner_user_id"], task["id"], task["server_id"], task["command"], screen_session, status, error, started, finished),
@@ -891,7 +952,7 @@ def _refresh_screen_rows(server: sqlite3.Row, user: User) -> None:
     parsed = parse_screen_ls(output)
     now = _now()
     alive = {item["sessionName"]: item for item in parsed}
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         for item in parsed:
             connection.execute(
                 "INSERT OR IGNORE INTO ssh_screen_sessions (id, owner_user_id, server_id, session_name, pid, status, created_by_tool, started_at, checked_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
@@ -1033,8 +1094,8 @@ def _require_screen(server: sqlite3.Row) -> None:
 
 
 def _get_template(template_id: str, user: User) -> sqlite3.Row:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
             "SELECT * FROM ssh_command_templates WHERE id = ? AND owner_user_id = ?",
             (template_id, user.id),
@@ -1045,8 +1106,8 @@ def _get_template(template_id: str, user: User) -> sqlite3.Row:
 
 
 def _get_task(task_id: str, user: User) -> sqlite3.Row:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
             "SELECT * FROM ssh_scheduled_tasks WHERE id = ? AND owner_user_id = ?",
             (task_id, user.id),

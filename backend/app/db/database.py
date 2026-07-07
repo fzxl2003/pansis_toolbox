@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -15,6 +16,7 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
+@contextmanager
 def connection_context() -> Iterator[sqlite3.Connection]:
     connection = get_connection()
     try:
@@ -22,6 +24,65 @@ def connection_context() -> Iterator[sqlite3.Connection]:
         connection.commit()
     finally:
         connection.close()
+
+
+# ============================================================
+# Per-user per-tool database connections
+# ============================================================
+
+def get_user_tool_db_path(user_id: str, tool_id: str) -> Path:
+    """Return the path to a user's per-tool SQLite database.
+
+    The database file lives at ``storage/user_data/<user_id>/tools/<tool_id>/data.db``
+    so that all user-specific data stays within the user's folder.
+    """
+    safe_tool_id = tool_id.replace("/", "_").replace("\\", "_")
+    path = get_settings().storage_dir / "user_data" / user_id / "tools" / safe_tool_id / "data.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_user_tool_connection(user_id: str, tool_id: str) -> sqlite3.Connection:
+    """Open a connection to a user's per-tool database."""
+    db_path = get_user_tool_db_path(user_id, tool_id)
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+@contextmanager
+def user_tool_connection_context(user_id: str, tool_id: str) -> Iterator[sqlite3.Connection]:
+    """Context manager for a per-user per-tool database connection.
+
+    Commits on success, always closes on exit.
+    """
+    connection = get_user_tool_connection(user_id, tool_id)
+    try:
+        yield connection
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def list_user_tool_dbs(tool_id: str) -> list[tuple[str, Path]]:
+    """List all existing per-user databases for *tool_id*.
+
+    Returns a list of ``(user_id, db_path)`` tuples.  Used by background
+    schedulers that need to iterate over every user's database.
+    """
+    settings = get_settings()
+    user_data_root = settings.storage_dir / "user_data"
+    result: list[tuple[str, Path]] = []
+    if not user_data_root.exists():
+        return result
+    for user_dir in user_data_root.iterdir():
+        if not user_dir.is_dir():
+            continue
+        db_path = user_dir / "tools" / tool_id / "data.db"
+        if db_path.exists():
+            result.append((user_dir.name, db_path))
+    return result
 
 
 def init_database() -> None:

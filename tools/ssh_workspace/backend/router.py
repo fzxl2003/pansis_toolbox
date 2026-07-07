@@ -17,7 +17,6 @@ from tools.ssh_workspace.backend.service import (
     delete_screen_session,
     delete_server,
     delete_template,
-    init_database,
     list_history,
     list_scheduled_tasks,
     list_screen_sessions,
@@ -298,6 +297,3 @@ async def terminal_ws_route(
     initialCommand: str | None = None,
 ) -> None:
     await terminal_websocket(websocket, serverId, mode=mode, screen_session=screenSession, cols=cols, rows=rows, initial_command=initialCommand)
-
-
-init_database()

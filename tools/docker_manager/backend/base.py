@@ -25,6 +25,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User
+from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services import ssh_connection_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
@@ -34,6 +35,41 @@ DF_CACHE_REFRESH_INTERVAL_SECONDS = 10
 # 模板 MD 文件存储目录（放在 storage 数据目录下，不混入代码文件夹）
 TEMPLATES_DIR = get_settings().storage_dir / "data" / "tools" / "docker_manager" / "templates"
 TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+
+# ==============================================================
+# Data category registration
+# ==============================================================
+
+register_tool_categories(TOOL_ID, [
+    DataCategory(
+        name="config",
+        tables=[
+            "docker_servers", "docker_user_perms", "docker_templates",
+            "docker_template_roles", "docker_volumes_meta", "docker_images_meta",
+            "docker_containers_meta", "docker_resource_roles",
+        ],
+        time_column=None,
+        description="配置数据（服务器、权限、模板、资源所有权）",
+        storage="platform_db",
+    ),
+    DataCategory(
+        name="df_cache",
+        tables=[
+            "docker_df_cache", "docker_df_images",
+            "docker_df_containers", "docker_df_volumes",
+        ],
+        time_column="refreshed_at",
+        description="Docker 磁盘使用量缓存",
+        storage="platform_db",
+    ),
+    DataCategory(
+        name="resource_cache",
+        tables=["docker_container_resource_cache"],
+        time_column="updated_at",
+        description="容器资源关联缓存",
+        storage="platform_db",
+    ),
+])
 
 
 # ==============================================================

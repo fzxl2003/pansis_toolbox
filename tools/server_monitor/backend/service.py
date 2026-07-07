@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import secrets
 import shlex
 import sqlite3
@@ -15,19 +16,41 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.db.database import get_connection
+from backend.app.db.database import (
+    get_connection,
+    get_user_tool_connection,
+    list_user_tool_dbs,
+    user_tool_connection_context,
+)
 from backend.app.services.auth_service import User
+from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services import ssh_connection_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
+
+logger = logging.getLogger(__name__)
 
 TOOL_ID = "server_monitor"
 SAMPLE_SECONDS = 30
 RETENTION_DAYS = 30
 DEFAULT_DIRECTORY_REFRESH_SECONDS = 300
 
+# Module-level init flag: track which user DBs have been initialized
+_initialized_dbs: set[str] = set()
 
-def init_monitor_database() -> None:
-    with get_connection() as connection:
+# In-memory SSH result cache: host -> (timestamp, raw_output)
+# Avoids redundant SSH calls when multiple users monitor the same default server
+_ssh_result_cache: dict[str, tuple[float, str]] = {}
+
+
+# ============================================================
+# Database Initialization
+# ============================================================
+
+def init_monitor_database(user_id: str) -> None:
+    """Create tables in the user's per-tool database if not already done."""
+    if user_id in _initialized_dbs:
+        return
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS monitor_servers (
@@ -77,57 +100,220 @@ def init_monitor_database() -> None:
             );
             """
         )
+    _initialized_dbs.add(user_id)
 
+
+# ============================================================
+# Platform-level default server storage
+# ============================================================
+
+_DEFAULT_SERVERS_TABLE = "monitor_default_servers"
+
+
+def _init_platform_default_servers_table() -> None:
+    """Ensure the platform-level default servers table exists."""
+    with get_connection() as connection:
+        connection.executescript(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_DEFAULT_SERVERS_TABLE} (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                ssh_username TEXT NOT NULL,
+                ssh_password_encrypted TEXT NOT NULL,
+                directory_whitelist TEXT NOT NULL DEFAULT '[]',
+                directory_refresh_seconds INTEGER NOT NULL DEFAULT 300,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+def _sync_default_servers_to_user(user_id: str) -> None:
+    """Copy/update default servers from the platform DB into the user's DB.
+
+    This ensures each user's per-user database is self-contained: the scheduler
+    can iterate user DBs without also consulting the platform DB.
+    """
+    init_monitor_database(user_id)
+    _init_platform_default_servers_table()
+
+    # Fetch all default servers from platform DB
+    with get_connection() as connection:
+        defaults = connection.execute(
+            f"SELECT * FROM {_DEFAULT_SERVERS_TABLE} ORDER BY created_at"
+        ).fetchall()
+
+    now = now_iso()
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
+        # Upsert each default server
+        for d in defaults:
+            connection.execute(
+                """
+                INSERT INTO monitor_servers (
+                    id, name, host, port, ssh_username, ssh_password_encrypted,
+                    is_default, owner_user_id, directory_whitelist,
+                    directory_refresh_seconds, enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, 1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    host = excluded.host,
+                    port = excluded.port,
+                    ssh_username = excluded.ssh_username,
+                    ssh_password_encrypted = excluded.ssh_password_encrypted,
+                    is_default = 1,
+                    directory_whitelist = excluded.directory_whitelist,
+                    directory_refresh_seconds = excluded.directory_refresh_seconds,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    d["id"], d["name"], d["host"], d["port"],
+                    d["ssh_username"], d["ssh_password_encrypted"],
+                    d["directory_whitelist"], d["directory_refresh_seconds"],
+                    d["created_at"], now,
+                ),
+            )
+        # Remove default servers that no longer exist in platform DB
+        default_ids = [d["id"] for d in defaults]
+        if default_ids:
+            placeholders = ",".join("?" * len(default_ids))
+            connection.execute(
+                f"DELETE FROM monitor_servers WHERE is_default = 1 AND id NOT IN ({placeholders})",
+                default_ids,
+            )
+        else:
+            connection.execute("DELETE FROM monitor_servers WHERE is_default = 1")
+        connection.commit()
+
+
+# ============================================================
+# Data category registration
+# ============================================================
+
+register_tool_categories(TOOL_ID, [
+    DataCategory(
+        name="config",
+        tables=["monitor_servers"],
+        time_column=None,
+        description="服务器配置（服务器连接信息、白名单）",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="samples",
+        tables=["monitor_samples"],
+        time_column="collected_at",
+        description="监控采样记录（CPU、内存、磁盘、GPU）",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="directory_cache",
+        tables=["monitor_directory_cache"],
+        time_column="refreshed_at",
+        description="目录使用量缓存",
+        storage="user_tool_db",
+    ),
+])
+
+
+# ============================================================
+# Server Management
+# ============================================================
 
 def list_servers(user: User | None) -> list[dict[str, Any]]:
-    init_monitor_database()
-    with get_connection() as connection:
-        rows = connection.execute("SELECT * FROM monitor_servers WHERE enabled = 1 ORDER BY is_default DESC, name").fetchall()
-    return [_public_server(row) for row in rows if _can_view(row, user)]
+    if user is None:
+        return []
+    _sync_default_servers_to_user(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        rows = connection.execute(
+            "SELECT * FROM monitor_servers WHERE enabled = 1 ORDER BY is_default DESC, name"
+        ).fetchall()
+    return [_public_server(row) for row in rows]
 
 
 def get_server(server_id: str, user: User | None) -> sqlite3.Row:
-    init_monitor_database()
-    with get_connection() as connection:
-        row = connection.execute("SELECT * FROM monitor_servers WHERE id = ? AND enabled = 1", (server_id,)).fetchone()
-    if row is None or not _can_view(row, user):
+    if user is None:
+        raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
+    _sync_default_servers_to_user(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        row = connection.execute(
+            "SELECT * FROM monitor_servers WHERE id = ? AND enabled = 1", (server_id,)
+        ).fetchone()
+    if row is None:
         raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
     return row
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_monitor_database()
     is_default = bool(payload.get("isDefault")) and user.role == "admin"
     if bool(payload.get("isDefault")) and user.role != "admin":
         raise ToolboxError("ADMIN_REQUIRED", "只有管理员可以创建默认服务器", status_code=403, tool_id=TOOL_ID)
+
     server_id = secrets.token_hex(12)
     now = now_iso()
-    with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO monitor_servers (
-                id, name, host, port, ssh_username, ssh_password_encrypted, is_default, owner_user_id,
-                directory_whitelist, directory_refresh_seconds, enabled, created_at, updated_at
+    directory_whitelist = json.dumps(_clean_paths(payload.get("directoryWhitelist") or []), ensure_ascii=False)
+    refresh_seconds = int(payload.get("directoryRefreshSeconds") or DEFAULT_DIRECTORY_REFRESH_SECONDS)
+
+    if is_default:
+        # Store in platform DB
+        _init_platform_default_servers_table()
+        with get_connection() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO {_DEFAULT_SERVERS_TABLE} (
+                    id, name, host, port, ssh_username, ssh_password_encrypted,
+                    directory_whitelist, directory_refresh_seconds, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    server_id,
+                    _required(payload, "name"),
+                    _required(payload, "host"),
+                    int(payload.get("port") or 22),
+                    _required(payload, "sshUsername"),
+                    encrypt_secret(_required(payload, "sshPassword")),
+                    directory_whitelist,
+                    refresh_seconds,
+                    now,
+                    now,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                server_id,
-                _required(payload, "name"),
-                _required(payload, "host"),
-                int(payload.get("port") or 22),
-                _required(payload, "sshUsername"),
-                encrypt_secret(_required(payload, "sshPassword")),
-                1 if is_default else 0,
-                None if is_default else user.id,
-                json.dumps(_clean_paths(payload.get("directoryWhitelist") or []), ensure_ascii=False),
-                int(payload.get("directoryRefreshSeconds") or DEFAULT_DIRECTORY_REFRESH_SECONDS),
-                now,
-                now,
-            ),
-        )
-        connection.commit()
-        row = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
+            connection.commit()
+        # Sync to this user's DB
+        _sync_default_servers_to_user(user.id)
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
+            row = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
+    else:
+        # Store in user's DB only
+        init_monitor_database(user.id)
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
+            connection.execute(
+                """
+                INSERT INTO monitor_servers (
+                    id, name, host, port, ssh_username, ssh_password_encrypted, is_default, owner_user_id,
+                    directory_whitelist, directory_refresh_seconds, enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    server_id,
+                    _required(payload, "name"),
+                    _required(payload, "host"),
+                    int(payload.get("port") or 22),
+                    _required(payload, "sshUsername"),
+                    encrypt_secret(_required(payload, "sshPassword")),
+                    user.id,
+                    directory_whitelist,
+                    refresh_seconds,
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+            row = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
     return _public_server(row)
 
 
@@ -137,60 +323,116 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
     next_default = bool(payload.get("isDefault", bool(row["is_default"])))
     if next_default and user.role != "admin":
         raise ToolboxError("ADMIN_REQUIRED", "只有管理员可以配置默认服务器", status_code=403, tool_id=TOOL_ID)
-    owner_user_id = None if next_default else row["owner_user_id"] or user.id
+
     password = payload.get("sshPassword")
     encrypted_password = encrypt_secret(password) if password else row["ssh_password_encrypted"]
-    with get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE monitor_servers
-            SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?,
-                is_default = ?, owner_user_id = ?, directory_whitelist = ?,
-                directory_refresh_seconds = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                payload.get("name", row["name"]),
-                payload.get("host", row["host"]),
-                int(payload.get("port") or row["port"]),
-                payload.get("sshUsername", row["ssh_username"]),
-                encrypted_password,
-                1 if next_default else 0,
-                owner_user_id,
-                json.dumps(_clean_paths(payload.get("directoryWhitelist", _json_list(row["directory_whitelist"]))), ensure_ascii=False),
-                int(payload.get("directoryRefreshSeconds") or row["directory_refresh_seconds"]),
-                now_iso(),
-                server_id,
-            ),
-        )
-        connection.commit()
-        updated = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
+    directory_whitelist = json.dumps(
+        _clean_paths(payload.get("directoryWhitelist", _json_list(row["directory_whitelist"]))),
+        ensure_ascii=False,
+    )
+    refresh_seconds = int(payload.get("directoryRefreshSeconds") or row["directory_refresh_seconds"])
+    now = now_iso()
+
+    if row["is_default"]:
+        # Update in platform DB
+        _init_platform_default_servers_table()
+        with get_connection() as connection:
+            connection.execute(
+                f"""
+                UPDATE {_DEFAULT_SERVERS_TABLE}
+                SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?,
+                    directory_whitelist = ?, directory_refresh_seconds = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload.get("name", row["name"]),
+                    payload.get("host", row["host"]),
+                    int(payload.get("port") or row["port"]),
+                    payload.get("sshUsername", row["ssh_username"]),
+                    encrypted_password,
+                    directory_whitelist,
+                    refresh_seconds,
+                    now,
+                    server_id,
+                ),
+            )
+            connection.commit()
+        # Sync to this user's DB
+        _sync_default_servers_to_user(user.id)
+    else:
+        owner_user_id = row["owner_user_id"] or user.id
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
+            connection.execute(
+                """
+                UPDATE monitor_servers
+                SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?,
+                    is_default = 0, owner_user_id = ?, directory_whitelist = ?,
+                    directory_refresh_seconds = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload.get("name", row["name"]),
+                    payload.get("host", row["host"]),
+                    int(payload.get("port") or row["port"]),
+                    payload.get("sshUsername", row["ssh_username"]),
+                    encrypted_password,
+                    owner_user_id,
+                    directory_whitelist,
+                    refresh_seconds,
+                    now,
+                    server_id,
+                ),
+            )
+            connection.commit()
+
     ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
+
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        updated = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
     return _public_server(updated)
 
 
 def delete_server(server_id: str, user: User) -> None:
     row = get_server(server_id, user)
     _require_edit(row, user)
-    with get_connection() as connection:
-        connection.execute("UPDATE monitor_servers SET enabled = 0, updated_at = ? WHERE id = ?", (now_iso(), server_id))
-        connection.commit()
+
+    if row["is_default"]:
+        # Delete from platform DB
+        _init_platform_default_servers_table()
+        with get_connection() as connection:
+            connection.execute(f"DELETE FROM {_DEFAULT_SERVERS_TABLE} WHERE id = ?", (server_id,))
+            connection.commit()
+        # Sync to this user's DB (will remove the deleted default)
+        _sync_default_servers_to_user(user.id)
+    else:
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
+            connection.execute(
+                "UPDATE monitor_servers SET enabled = 0, updated_at = ? WHERE id = ?",
+                (now_iso(), server_id),
+            )
+            connection.commit()
+
     ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
 
+# ============================================================
+# Snapshot & History
+# ============================================================
+
 def collect_snapshot(server_id: str, user: User | None, force: bool = False) -> dict[str, Any]:
+    if user is None:
+        raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
-    latest = latest_sample(server_id)
+    latest = _latest_sample(user.id, server_id)
     if latest and not force and _age_seconds(latest["collected_at"]) < SAMPLE_SECONDS:
         return _sample_payload(row, latest)
-    sample = _collect_and_store(row)
-    prune_history()
+    sample = _collect_and_store(user.id, row)
+    _prune_history(user.id)
     return _sample_payload(row, sample)
 
 
-def latest_sample(server_id: str) -> sqlite3.Row | None:
-    init_monitor_database()
-    with get_connection() as connection:
+def _latest_sample(user_id: str, server_id: str) -> sqlite3.Row | None:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         return connection.execute(
             "SELECT * FROM monitor_samples WHERE server_id = ? ORDER BY collected_at DESC LIMIT 1",
             (server_id,),
@@ -198,9 +440,11 @@ def latest_sample(server_id: str) -> sqlite3.Row | None:
 
 
 def history(server_id: str, user: User | None, hours: int = 24) -> dict[str, Any]:
+    if user is None:
+        raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * RETENTION_DAYS)))
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             """
             SELECT * FROM monitor_samples
@@ -212,24 +456,32 @@ def history(server_id: str, user: User | None, hours: int = 24) -> dict[str, Any
     return {"server": _public_server(row), "samples": [_history_sample(item) for item in rows]}
 
 
+# ============================================================
+# Directory Usage
+# ============================================================
+
 def directory_usage(server_id: str, path: str, user: User | None) -> dict[str, Any]:
+    if user is None:
+        raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
     clean_path = _clean_path(path)
     if not _path_allowed(clean_path, _json_list(row["directory_whitelist"])):
         raise ToolboxError("DIRECTORY_NOT_ALLOWED", "目录不在服务器白名单范围内", status_code=403, tool_id=TOOL_ID)
-    cache_user_id = user.id if user else "anonymous"
-    cached = _directory_cache(server_id, cache_user_id, clean_path)
+    cache_user_id = user.id
+    cached = _directory_cache(user.id, server_id, cache_user_id, clean_path)
     refresh_seconds = max(10, int(row["directory_refresh_seconds"]))
     if cached and cached["refreshed_at"] and _age_seconds(cached["refreshed_at"]) < refresh_seconds:
         return _directory_payload(row, cached)
-    result = _collect_directory(row, clean_path, cache_user_id)
+    result = _collect_directory(user.id, row, clean_path, cache_user_id)
     return _directory_payload(row, result)
 
 
 def list_directory_usages(server_id: str, user: User | None) -> dict[str, Any]:
+    if user is None:
+        raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
-    cache_user_id = user.id if user else "anonymous"
-    with get_connection() as connection:
+    cache_user_id = user.id
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             """
             SELECT * FROM monitor_directory_cache
@@ -242,16 +494,22 @@ def list_directory_usages(server_id: str, user: User | None) -> dict[str, Any]:
 
 
 def delete_directory_usage(server_id: str, path: str, user: User | None) -> None:
+    if user is None:
+        raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
-    cache_user_id = user.id if user else "anonymous"
+    cache_user_id = user.id
     clean_path = _clean_path(path)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "DELETE FROM monitor_directory_cache WHERE server_id = ? AND user_id = ? AND path = ?",
             (row["id"], cache_user_id, clean_path),
         )
         connection.commit()
 
+
+# ============================================================
+# Process Management
+# ============================================================
 
 def kill_gpu_process(server_id: str, pid: int, user: User) -> dict[str, Any]:
     row = get_server(server_id, user)
@@ -262,17 +520,63 @@ def kill_gpu_process(server_id: str, pid: int, user: User) -> dict[str, Any]:
     return {"killed": True, "pid": pid, "output": output.strip()}
 
 
-def collect_due_servers() -> None:
-    init_monitor_database()
-    with get_connection() as connection:
-        rows = connection.execute("SELECT * FROM monitor_servers WHERE enabled = 1").fetchall()
-    for row in rows:
-        latest = latest_sample(row["id"])
-        if latest is None or _age_seconds(latest["collected_at"]) >= SAMPLE_SECONDS:
-            _collect_and_store(row)
-        _refresh_due_directories(row)
-    prune_history()
+# ============================================================
+# Scheduler
+# ============================================================
 
+def collect_due_servers() -> None:
+    """Called by scheduler to collect samples for all servers across all users.
+
+    Uses an in-memory SSH result cache to avoid redundant SSH calls when
+    multiple users have the same default server in their databases.
+    """
+    for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
+        init_monitor_database(user_id)
+        # Sync default servers (in case admin added/removed defaults)
+        try:
+            _sync_default_servers_to_user(user_id)
+        except Exception:
+            logger.exception("Failed to sync default servers for user %s", user_id)
+            continue
+
+        try:
+            with user_tool_connection_context(user_id, TOOL_ID) as connection:
+                rows = connection.execute(
+                    "SELECT * FROM monitor_servers WHERE enabled = 1"
+                ).fetchall()
+        except Exception:
+            logger.exception("Failed to read servers for user %s", user_id)
+            continue
+
+        for row in rows:
+            try:
+                latest = _latest_sample(user_id, row["id"])
+                if latest is None or _age_seconds(latest["collected_at"]) >= SAMPLE_SECONDS:
+                    _collect_and_store(user_id, row)
+                _refresh_due_directories(user_id, row)
+            except Exception:
+                logger.exception("Failed to collect data for server %s (user %s)", row["id"], user_id)
+
+        try:
+            _prune_history(user_id)
+        except Exception:
+            logger.exception("Failed to prune history for user %s", user_id)
+
+    # Clean up stale SSH cache entries
+    _cleanup_ssh_cache()
+
+
+def _cleanup_ssh_cache() -> None:
+    """Remove SSH cache entries older than 2x SAMPLE_SECONDS."""
+    cutoff = time.time() - (SAMPLE_SECONDS * 2)
+    stale = [host for host, (ts, _) in _ssh_result_cache.items() if ts < cutoff]
+    for host in stale:
+        _ssh_result_cache.pop(host, None)
+
+
+# ============================================================
+# Monitor output parsing
+# ============================================================
 
 def parse_monitor_output(output: str) -> dict[str, Any]:
     sections: dict[str, list[str]] = {"cpu": [], "meminfo": [], "df": [], "gpu": [], "gpu_processes": [], "proc_stats": [], "gpu_pmon": []}
@@ -314,6 +618,10 @@ def parse_monitor_output(output: str) -> dict[str, Any]:
     }
 
 
+# ============================================================
+# Encryption Utilities
+# ============================================================
+
 def encrypt_secret(value: str) -> str:
     return _fernet().encrypt(value.encode("utf-8")).decode("utf-8")
 
@@ -325,16 +633,20 @@ def decrypt_secret(value: str) -> str:
         raise ToolboxError("INVALID_SECRET", "SSH 密码无法解密，请重新保存服务器配置", status_code=400, tool_id=TOOL_ID) from exc
 
 
-def _collect_and_store(row: sqlite3.Row) -> sqlite3.Row:
+# ============================================================
+# Internal helpers — data collection
+# ============================================================
+
+def _collect_and_store(user_id: str, row: sqlite3.Row) -> sqlite3.Row:
     error = None
     parsed = {"cpuPercent": None, "memoryTotalBytes": None, "memoryUsedBytes": None, "disks": [], "gpus": []}
     try:
-        output = _run_ssh(row, _monitor_command())
+        output = _run_ssh_cached(row, _monitor_command())
         parsed = parse_monitor_output(output)
     except Exception as exc:  # noqa: BLE001 - each server records its own collection error.
         error = str(exc)
     sample_id = secrets.token_hex(12)
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO monitor_samples (
@@ -359,7 +671,7 @@ def _collect_and_store(row: sqlite3.Row) -> sqlite3.Row:
         return connection.execute("SELECT * FROM monitor_samples WHERE id = ?", (sample_id,)).fetchone()
 
 
-def _collect_directory(row: sqlite3.Row, path: str, user_id: str) -> sqlite3.Row:
+def _collect_directory(user_id: str, row: sqlite3.Row, path: str, cache_user_id: str) -> sqlite3.Row:
     error = None
     total = used = free = None
     try:
@@ -368,8 +680,8 @@ def _collect_directory(row: sqlite3.Row, path: str, user_id: str) -> sqlite3.Row
         total, used, free = _parse_directory_output(output)
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
-    with get_connection() as connection:
-        existing = _directory_cache(row["id"], user_id, path)
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
+        existing = _directory_cache(user_id, row["id"], cache_user_id, path)
         cache_id = existing["id"] if existing else secrets.token_hex(12)
         connection.execute(
             """
@@ -384,12 +696,12 @@ def _collect_directory(row: sqlite3.Row, path: str, user_id: str) -> sqlite3.Row
                 refreshed_at = excluded.refreshed_at,
                 error = excluded.error
             """,
-            (cache_id, row["id"], user_id, path, total, used, free, now_iso(), error),
+            (cache_id, row["id"], cache_user_id, path, total, used, free, now_iso(), error),
         )
         connection.commit()
         return connection.execute(
             "SELECT * FROM monitor_directory_cache WHERE server_id = ? AND user_id = ? AND path = ?",
-            (row["id"], user_id, path),
+            (row["id"], cache_user_id, path),
         ).fetchone()
 
 
@@ -398,6 +710,22 @@ def _run_ssh(row: sqlite3.Row, command: str, timeout: int = 20) -> str:
     error = error.strip()
     if error and not output:
         raise ToolboxError("SSH_COMMAND_FAILED", error[:300], status_code=502, tool_id=TOOL_ID)
+    return output
+
+
+def _run_ssh_cached(row: sqlite3.Row, command: str) -> str:
+    """Run SSH with an in-memory cache to avoid redundant calls for shared servers.
+
+    Cache key is the server host (since the same default server may appear in
+    multiple users' databases). Cache TTL is SAMPLE_SECONDS.
+    """
+    cache_key = row["host"]
+    now_ts = time.time()
+    cached = _ssh_result_cache.get(cache_key)
+    if cached and (now_ts - cached[0]) < SAMPLE_SECONDS:
+        return cached[1]
+    output = _run_ssh(row, command)
+    _ssh_result_cache[cache_key] = (now_ts, output)
     return output
 
 
@@ -442,6 +770,10 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 """
 
+
+# ============================================================
+# Parsing helpers
+# ============================================================
 
 def _parse_cpu_percent(lines: list[str]) -> float | None:
     if len(lines) < 2:
@@ -599,25 +931,33 @@ def _parse_directory_output(output: str) -> tuple[int | None, int | None, int | 
     return total, used, free
 
 
-def _directory_cache(server_id: str, user_id: str, path: str) -> sqlite3.Row | None:
-    with get_connection() as connection:
+# ============================================================
+# Internal helpers — directory cache
+# ============================================================
+
+def _directory_cache(user_id: str, server_id: str, cache_user_id: str, path: str) -> sqlite3.Row | None:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         return connection.execute(
             "SELECT * FROM monitor_directory_cache WHERE server_id = ? AND user_id = ? AND path = ?",
-            (server_id, user_id, path),
+            (server_id, cache_user_id, path),
         ).fetchone()
 
 
-def _refresh_due_directories(row: sqlite3.Row) -> None:
+def _refresh_due_directories(user_id: str, row: sqlite3.Row) -> None:
     refresh_seconds = max(10, int(row["directory_refresh_seconds"]))
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         directories = connection.execute(
             "SELECT * FROM monitor_directory_cache WHERE server_id = ?",
             (row["id"],),
         ).fetchall()
     for directory in directories:
         if directory["refreshed_at"] is None or _age_seconds(directory["refreshed_at"]) >= refresh_seconds:
-            _collect_directory(row, directory["path"], directory["user_id"])
+            _collect_directory(user_id, row, directory["path"], directory["user_id"])
 
+
+# ============================================================
+# Serialization helpers
+# ============================================================
 
 def _public_server(row: sqlite3.Row) -> dict[str, Any]:
     return {
@@ -664,11 +1004,9 @@ def _directory_payload(server: sqlite3.Row, cache: sqlite3.Row) -> dict[str, Any
     }
 
 
-def _can_view(row: sqlite3.Row, user: User | None) -> bool:
-    if row["is_default"]:
-        return True
-    return user is not None and row["owner_user_id"] == user.id
-
+# ============================================================
+# Access control helpers
+# ============================================================
 
 def _require_edit(row: sqlite3.Row, user: User) -> None:
     if row["is_default"] and user.role == "admin":
@@ -731,9 +1069,9 @@ def _fernet() -> Fernet:
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
-def prune_history() -> None:
+def _prune_history(user_id: str) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute("DELETE FROM monitor_samples WHERE collected_at < ?", (cutoff.isoformat(),))
         connection.commit()
 

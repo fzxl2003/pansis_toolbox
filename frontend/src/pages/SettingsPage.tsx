@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  Clock,
   Database,
   Eye,
   Globe,
@@ -41,6 +42,13 @@ import {
   type MyStorage,
   type StorageUsage,
   type ToolAccessItem,
+} from '../api/tools';
+import {
+  fetchDataCategories,
+  fetchDataUsage,
+  deleteData,
+  type DataCategoryUsage,
+  type ToolDataCategories,
 } from '../api/tools';
 import { LoginPanel } from '../components/LoginPanel';
 
@@ -306,6 +314,8 @@ function PersonalTab({
           )}
         </div>
       </section>
+
+      <CategoryDataCleanup onError={onError} onSuccess={onSuccess} isAdminMode={false} />
     </>
   );
 }
@@ -578,6 +588,8 @@ function ToolDataTab({
 
   return (
     <>
+      <CategoryDataCleanup onError={onError} onSuccess={onSuccess} isAdminMode={true} />
+
       <section className="panel">
         <div className="result-header">
           <span><Database size={17} />存储总览</span>
@@ -1011,6 +1023,239 @@ function EmailTab({
             </button>
           </div>
         </form>
+      )}
+    </section>
+  );
+}
+
+// ── Category & Time-based Data Cleanup ─────────────────────────────────────
+
+const TIME_RANGE_OPTIONS = [
+  { label: '全部时间', value: null as number | null },
+  { label: '7 天前', value: 7 },
+  { label: '30 天前', value: 30 },
+  { label: '90 天前', value: 90 },
+  { label: '180 天前', value: 180 },
+  { label: '365 天前', value: 365 },
+];
+
+function CategoryDataCleanup({
+  onError,
+  onSuccess,
+  isAdminMode,
+}: {
+  onError: (err: unknown, fallback: string) => void;
+  onSuccess: (msg: string) => void;
+  isAdminMode: boolean;
+}) {
+  const [tools, setTools] = useState<ToolDataCategories[]>([]);
+  const [selectedTool, setSelectedTool] = useState<string>('');
+  const [usage, setUsage] = useState<DataCategoryUsage[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(new Set());
+  const [beforeDays, setBeforeDays] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    void loadCategories();
+  }, []);
+
+  async function loadCategories() {
+    setLoading(true);
+    try {
+      const data = await fetchDataCategories();
+      setTools(data.tools);
+      if (data.tools.length > 0 && !selectedTool) {
+        setSelectedTool(data.tools[0].toolId);
+      }
+    } catch (err) {
+      onError(err, '加载数据分类失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    setSelectedCategories(new Set());
+    if (selectedTool) {
+      void loadUsage(selectedTool);
+    } else {
+      setUsage([]);
+    }
+  }, [selectedTool]);
+
+  async function loadUsage(toolId: string) {
+    try {
+      const data = await fetchDataUsage(toolId);
+      setUsage(data.categories);
+    } catch (err) {
+      onError(err, '加载数据用量失败');
+    }
+  }
+
+  function toggleCategory(name: string) {
+    setSelectedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  async function handleDelete() {
+    const tool = tools.find((t) => t.toolId === selectedTool);
+    if (!tool) return;
+
+    const catLabel = selectedCategories.size === 0 ? '全部分类' : Array.from(selectedCategories).join('、');
+    const timeLabel = beforeDays === null ? '全部时间' : `${beforeDays} 天前`;
+    const scopeLabel = isAdminMode ? '所有用户' : '您';
+
+    if (!window.confirm(`确认删除${scopeLabel}在「${tool.toolName}」中「${catLabel}」在「${timeLabel}」的数据？该操作不可恢复。`)) return;
+
+    setDeleting(true);
+    try {
+      const catsToDelete = selectedCategories.size === 0 ? [null] : Array.from(selectedCategories);
+      let totalDeleted = 0;
+      let message: string | null = null;
+      for (const cat of catsToDelete) {
+        const result = await deleteData({
+          toolId: selectedTool,
+          category: cat,
+          beforeDays,
+          userId: null,
+        });
+        if (result.message) {
+          message = result.message;
+        }
+        for (const catName in result.deleted) {
+          for (const table in result.deleted[catName]) {
+            totalDeleted += result.deleted[catName][table];
+          }
+        }
+      }
+      if (message) {
+        onSuccess(message);
+      } else {
+        onSuccess(`已删除 ${totalDeleted} 条记录`);
+      }
+      await loadUsage(selectedTool);
+    } catch (err) {
+      onError(err, '删除数据失败');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const selectedToolData = tools.find((t) => t.toolId === selectedTool);
+  const hasTimeBasedCategory = selectedToolData?.categories.some((c) => c.timeColumn !== null) ?? false;
+
+  return (
+    <section className="panel">
+      <div className="result-header">
+        <span><Clock size={17} />按分类与时间清理</span>
+      </div>
+      <div className="admin-notice" style={{ marginBottom: '12px' }}>
+        <Shield size={14} />
+        <span>
+          选择工具和数据分类，可按时间范围精确删除。
+          {isAdminMode ? '管理员模式：将影响所有用户的数据。' : '仅删除您自己的数据。'}
+        </span>
+      </div>
+
+      {tools.length === 0 && !loading && (
+        <div className="muted" style={{ padding: '12px 4px' }}>暂无已注册数据分类的工具</div>
+      )}
+
+      {tools.length > 0 && (
+        <>
+          {/* Tool selector */}
+          <div className="form-group" style={{ marginBottom: '12px' }}>
+            <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
+              选择工具
+            </label>
+            <select
+              className="text-input"
+              value={selectedTool}
+              onChange={(e) => setSelectedTool(e.target.value)}
+              disabled={loading}
+            >
+              {tools.map((t) => (
+                <option key={t.toolId} value={t.toolId}>{t.toolName}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Categories */}
+          {selectedToolData && (
+            <div className="compact-list" style={{ marginBottom: '12px' }}>
+              {selectedToolData.categories.map((cat) => {
+                const usageItem = usage.find((u) => u.category === cat.name);
+                const rowCount = usageItem?.totalRows ?? 0;
+                const isTimeBased = cat.timeColumn !== null;
+                const checked = selectedCategories.has(cat.name);
+                const disabledByTime = !isTimeBased && beforeDays !== null;
+                return (
+                  <label
+                    className="user-row"
+                    key={cat.name}
+                    style={{
+                      cursor: disabledByTime ? 'not-allowed' : 'pointer',
+                      alignItems: 'center',
+                      opacity: disabledByTime ? 0.5 : 1,
+                    }}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabledByTime}
+                        onChange={() => toggleCategory(cat.name)}
+                      />
+                      <div>
+                        <strong>{cat.description}</strong>
+                        <small>
+                          {cat.name} · {rowCount} 条记录
+                          {cat.storage === 'platform_db' ? ' · 共享数据库' : ' · 用户数据库'}
+                          {!isTimeBased && ' · 配置数据（不支持按时间删除）'}
+                        </small>
+                      </div>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Time range selector */}
+          <div className="form-group" style={{ marginBottom: '12px' }}>
+            <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
+              时间范围{!hasTimeBasedCategory && '（当前工具无时间维度数据）'}
+            </label>
+            <select
+              className="text-input"
+              value={beforeDays ?? ''}
+              onChange={(e) => setBeforeDays(e.target.value === '' ? null : Number(e.target.value))}
+              disabled={!hasTimeBasedCategory}
+            >
+              {TIME_RANGE_OPTIONS.map((opt) => (
+                <option key={opt.label} value={opt.value ?? ''}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Delete button */}
+          <div className="responsive-actions">
+            <button
+              className="chip"
+              type="button"
+              disabled={deleting || !selectedTool}
+              onClick={() => void handleDelete()}
+              style={{ color: 'var(--danger)' }}
+            >
+              <Trash2 size={14} />{deleting ? '删除中...' : '删除选中数据'}
+            </button>
+          </div>
+        </>
       )}
     </section>
   );

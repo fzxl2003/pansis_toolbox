@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
-from uuid import uuid4
 
 from fastapi import APIRouter, File, Request, UploadFile
 from pydantic import BaseModel
 
 from backend.app.core.errors import ToolboxError
-from backend.app.core.security import require_user_tool_data_dir
+from backend.app.core.security import require_user
+from tools.memo_demo.backend.service import (
+    create_memo,
+    delete_memo,
+    get_memo,
+    list_memos,
+)
 
 router = APIRouter()
 
 MAX_TXT_SIZE = 512 * 1024
-INDEX_FILE = "memos.json"
 
 
 class MemoSummary(BaseModel):
@@ -32,8 +34,8 @@ class MemoDetail(MemoSummary):
 
 @router.post("/upload", response_model=MemoSummary)
 async def upload_memo(request: Request, file: UploadFile = File(...)) -> MemoSummary:
-    data_dir = require_user_tool_data_dir(request, "memo_demo")
-    original_name = Path(file.filename or "memo.txt").name
+    user = require_user(request)
+    original_name = file.filename or "memo.txt"
     if not original_name.lower().endswith(".txt"):
         raise ToolboxError("INVALID_FILE_TYPE", "只支持上传 .txt 文件", status_code=400, tool_id="memo_demo")
 
@@ -48,72 +50,32 @@ async def upload_memo(request: Request, file: UploadFile = File(...)) -> MemoSum
     except UnicodeDecodeError as exc:
         raise ToolboxError("INVALID_TEXT_ENCODING", "请上传 UTF-8 编码的 TXT 文件", status_code=400, tool_id="memo_demo") from exc
 
-    memo_id = uuid4().hex
-    stored_filename = f"{memo_id}.txt"
-    now = datetime.now(timezone.utc).isoformat()
     title = _title_from_content(content, original_name)
-    summary = MemoSummary(
-        id=memo_id,
-        title=title,
-        filename=stored_filename,
-        createdAt=now,
-        updatedAt=now,
-        sizeBytes=len(content_bytes),
-    )
-
-    (data_dir / stored_filename).write_text(content, encoding="utf-8")
-    memos = _load_index(data_dir)
-    memos.insert(0, summary.model_dump())
-    _save_index(data_dir, memos)
-    return summary
+    memo = create_memo(user.id, title, content)
+    return MemoSummary(**memo)
 
 
 @router.get("/memos", response_model=list[MemoSummary])
-def list_memos(request: Request) -> list[MemoSummary]:
-    data_dir = require_user_tool_data_dir(request, "memo_demo")
-    return [MemoSummary.model_validate(item) for item in _load_index(data_dir)]
+def list_memos_route(request: Request) -> list[MemoSummary]:
+    user = require_user(request)
+    return [MemoSummary(**item) for item in list_memos(user.id)]
 
 
 @router.get("/memos/{memo_id}", response_model=MemoDetail)
-def get_memo(request: Request, memo_id: str) -> MemoDetail:
-    data_dir = require_user_tool_data_dir(request, "memo_demo")
-    item = _find_memo(data_dir, memo_id)
-    content_path = data_dir / item["filename"]
-    if not content_path.exists():
-        raise ToolboxError("MEMO_CONTENT_MISSING", "备忘录内容文件不存在", status_code=404, tool_id="memo_demo")
-    return MemoDetail(**item, content=content_path.read_text(encoding="utf-8"))
+def get_memo_route(request: Request, memo_id: str) -> MemoDetail:
+    user = require_user(request)
+    memo = get_memo(user.id, memo_id)
+    if memo is None:
+        raise ToolboxError("MEMO_NOT_FOUND", "备忘录不存在", status_code=404, tool_id="memo_demo")
+    return MemoDetail(**memo)
 
 
 @router.delete("/memos/{memo_id}")
-def delete_memo(request: Request, memo_id: str) -> dict[str, bool]:
-    data_dir = require_user_tool_data_dir(request, "memo_demo")
-    memos = _load_index(data_dir)
-    target = next((item for item in memos if item["id"] == memo_id), None)
-    if target is None:
+def delete_memo_route(request: Request, memo_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    if not delete_memo(user.id, memo_id):
         raise ToolboxError("MEMO_NOT_FOUND", "备忘录不存在", status_code=404, tool_id="memo_demo")
-    content_path = data_dir / target["filename"]
-    if content_path.exists():
-        content_path.unlink()
-    _save_index(data_dir, [item for item in memos if item["id"] != memo_id])
     return {"deleted": True}
-
-
-def _load_index(data_dir: Path) -> list[dict]:
-    index_path = data_dir / INDEX_FILE
-    if not index_path.exists():
-        return []
-    return json.loads(index_path.read_text(encoding="utf-8"))
-
-
-def _save_index(data_dir: Path, memos: list[dict]) -> None:
-    (data_dir / INDEX_FILE).write_text(json.dumps(memos, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _find_memo(data_dir: Path, memo_id: str) -> dict:
-    for item in _load_index(data_dir):
-        if item["id"] == memo_id:
-            return item
-    raise ToolboxError("MEMO_NOT_FOUND", "备忘录不存在", status_code=404, tool_id="memo_demo")
 
 
 def _title_from_content(content: str, fallback: str) -> str:

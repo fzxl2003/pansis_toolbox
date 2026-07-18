@@ -88,6 +88,10 @@ def init_database(user_id: str) -> None:
                 confirm_count INTEGER NOT NULL DEFAULT 3,
                 -- 检查间隔秒数
                 check_interval_seconds INTEGER NOT NULL DEFAULT 30,
+                -- 重复报警冷却时间（秒）：触发后在此时间内不重复报警。0 = 无冷却
+                repeat_interval_seconds INTEGER NOT NULL DEFAULT 0,
+                -- 最多重复报警次数：达到上限后停止重复报警，需手动重置。0 = 无限重复
+                max_repeat_count INTEGER NOT NULL DEFAULT 0,
                 -- 上次检查时间（用于按任务间隔调度）
                 last_checked_at TEXT,
                 -- 是否启用
@@ -155,6 +159,10 @@ def init_database(user_id: str) -> None:
                 is_alerting INTEGER NOT NULL DEFAULT 0,
                 last_alerted_at TEXT,
                 resolved_at TEXT,
+                -- 已重复报警次数（用于 max_repeat_count 上限控制）
+                repeat_count INTEGER NOT NULL DEFAULT 0,
+                -- 是否已达到最大重复次数（达到后停止重复，需手动重置）
+                repeat_exhausted INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(task_id) REFERENCES em_monitor_tasks(id)
             );
@@ -222,6 +230,10 @@ def init_database(user_id: str) -> None:
             "ALTER TABLE em_alert_states ADD COLUMN last_matched_processes TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE em_alert_states ADD COLUMN baseline_processes TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE em_monitor_tasks ADD COLUMN last_checked_at TEXT",
+            "ALTER TABLE em_monitor_tasks ADD COLUMN repeat_interval_seconds INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE em_monitor_tasks ADD COLUMN max_repeat_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE em_alert_states ADD COLUMN repeat_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE em_alert_states ADD COLUMN repeat_exhausted INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 connection.execute(col_sql)
@@ -429,8 +441,10 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
             INSERT INTO em_monitor_tasks (
                 id, server_id, owner_user_id, name, description, match_mode, match_pattern,
                 filter_user, alert_condition, alert_threshold, alert_change_amount,
-                confirm_count, check_interval_seconds, enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                confirm_count, check_interval_seconds,
+                repeat_interval_seconds, max_repeat_count,
+                enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 task_id,
@@ -446,6 +460,8 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
                 int(payload.get("alertChangeAmount", 1)),
                 int(payload.get("confirmCount", DEFAULT_CONFIRM_COUNT)),
                 int(payload.get("checkIntervalSeconds", CHECK_INTERVAL_SECONDS)),
+                int(payload.get("repeatIntervalSeconds", 0)),
+                int(payload.get("maxRepeatCount", 0)),
                 now,
                 now,
             ),
@@ -484,7 +500,9 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
                 name = ?, description = ?, match_mode = ?, match_pattern = ?,
                 filter_user = ?, alert_condition = ?, alert_threshold = ?,
                 alert_change_amount = ?, confirm_count = ?,
-                check_interval_seconds = ?, enabled = ?, updated_at = ?
+                check_interval_seconds = ?,
+                repeat_interval_seconds = ?, max_repeat_count = ?,
+                enabled = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -498,6 +516,8 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
                 int(payload.get("alertChangeAmount", row["alert_change_amount"])),
                 int(payload.get("confirmCount", row["confirm_count"])),
                 int(payload.get("checkIntervalSeconds", row["check_interval_seconds"])),
+                int(payload.get("repeatIntervalSeconds", row["repeat_interval_seconds"] if "repeat_interval_seconds" in row.keys() else 0)),
+                int(payload.get("maxRepeatCount", row["max_repeat_count"] if "max_repeat_count" in row.keys() else 0)),
                 int(payload.get("enabled", row["enabled"])),
                 now_iso(),
                 task_id,
@@ -1181,13 +1201,19 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
     规则：
     1. 每次采样判断当前是否满足报警条件（condition_met）。
     2. 若满足，consecutive_meets +1；若不满足，立刻清零（说明是瞬时抖动，进程已恢复）。
-    3. 只有 consecutive_meets 达到 confirm_count 时才真正触发报警。
-    4. 触发报警后：
+    3. 只有 consecutive_meets 达到 confirm_count 时才进入候选触发状态。
+    4. 候选触发后，还需满足重复报警控制：
+       - repeat_interval_seconds（冷却时间）：距上次报警超过该秒数才允许再次报警，0=不限。
+       - max_repeat_count（最大重复次数）：达到上限后停止重复报警（repeat_exhausted=1），
+         需手动调用 reset_alert_state 重置后才能继续，0=不限。
+    5. 真正触发报警后：
        - 将当前稳定进程列表记录为 baseline_processes（供邮件展示"报警前的进程列表"）
-       - 重置 consecutive_meets = 0，is_alerting = 0（允许下次独立触发，不做持续报警去重）
-       - 对于 changed 模式：将当前 process_count 作为新的 last_check_count 基准，
-         避免每次都与触发前的旧基准比较而持续触发。
-    5. 正常情况下（未在报警中）每次更新 last_check_count 为当前值，
+       - 重置 consecutive_meets = 0，is_alerting = 0
+       - repeat_count +1，last_alerted_at = 当前时间
+       - 若 repeat_count 达到 max_repeat_count，置 repeat_exhausted = 1
+       - 对于 changed 模式：将当前 process_count 作为新的 last_check_count 基准
+    6. 候选触发但被冷却/上限抑制时：保留 consecutive_meets 不重置，以便冷却结束后立即再触发。
+    7. 正常情况下（未在报警中）每次更新 last_check_count 为当前值，
        并将 last_matched_processes 更新为当前进程列表（供邮件展示"报警时的进程变化"）。
     """
     init_database(user_id)
@@ -1235,7 +1261,31 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
         new_consecutive = 0  # 只要有一次恢复正常，清零——说明之前是短暂抖动
 
     confirm_needed = task["confirm_count"]
-    should_trigger = (condition_met and new_consecutive >= confirm_needed)
+    # 读取重复报警配置（迁移后的列一定存在）
+    repeat_interval = int(task["repeat_interval_seconds"]) if "repeat_interval_seconds" in task.keys() else 0
+    max_repeat = int(task["max_repeat_count"]) if "max_repeat_count" in task.keys() else 0
+    # 读取当前重复报警状态
+    prev_repeat_count = int(state["repeat_count"]) if state and "repeat_count" in state.keys() else 0
+    prev_exhausted = bool(state["repeat_exhausted"]) if state and "repeat_exhausted" in state.keys() else False
+    last_alerted_at = state["last_alerted_at"] if state else None
+
+    now_dt = datetime.now(timezone.utc)
+    # 冷却判定：从未报警过或超过冷却期，则冷却已过
+    cooldown_passed = True
+    if repeat_interval > 0 and last_alerted_at:
+        try:
+            last_alerted_dt = datetime.fromisoformat(last_alerted_at)
+            if last_alerted_dt.tzinfo is None:
+                last_alerted_dt = last_alerted_dt.replace(tzinfo=timezone.utc)
+            cooldown_passed = (now_dt - last_alerted_dt) >= timedelta(seconds=repeat_interval)
+        except ValueError:
+            cooldown_passed = True
+    # 重复次数上限判定：max_repeat=0 表示不限制
+    repeat_limit_ok = (max_repeat <= 0) or (prev_repeat_count < max_repeat)
+
+    candidate_trigger = (condition_met and new_consecutive >= confirm_needed)
+    # 真正触发需要同时满足：确认次数达标 + 冷却已过 + 未达重复上限
+    should_trigger = candidate_trigger and cooldown_passed and repeat_limit_ok and not prev_exhausted
 
     # 触发时：保存报警前的进程列表作为 baseline，并重置计数
     if should_trigger:
@@ -1244,14 +1294,28 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
         new_consecutive = 0  # 触发后重置，允许下次独立再触发
         # changed 模式：以当前值更新基准，避免持续触发
         new_last_check_count = process_count
+        new_repeat_count = prev_repeat_count + 1
+        new_last_alerted_at = now_dt.isoformat()
+        # 达到上限：标记耗尽，后续不再重复报警，需手动重置
+        new_exhausted = (max_repeat > 0 and new_repeat_count >= max_repeat)
+    elif candidate_trigger and not (cooldown_passed and repeat_limit_ok and not prev_exhausted):
+        # 条件达标但被冷却/上限抑制：保留 consecutive_meets 以便冷却结束后立即再触发
+        new_baseline_processes = baseline_processes
+        new_last_check_count = state["last_check_count"] if state and state["last_check_count"] is not None else process_count
+        new_repeat_count = prev_repeat_count
+        new_last_alerted_at = last_alerted_at
+        new_exhausted = prev_exhausted
     else:
         new_baseline_processes = baseline_processes
-        # changed 模式：未触发时只在"无异常"状态下更新基准（防止连续异常中基准漂移）
+        # changed 模式：未触发时只在“无异常”状态下更新基准（防止连续异常中基准漂移）
         if not condition_met:
             new_last_check_count = process_count  # 正常状态下持续更新基准
         else:
             # 处于连续确认积累中，保持原有基准不变，等触发后再重置
             new_last_check_count = state["last_check_count"] if state and state["last_check_count"] is not None else process_count
+        new_repeat_count = prev_repeat_count
+        new_last_alerted_at = last_alerted_at
+        new_exhausted = prev_exhausted
 
     # Record sample
     sample_id = secrets.token_hex(12)
@@ -1271,14 +1335,19 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
             INSERT INTO em_alert_states (
                 task_id, consecutive_meets, last_check_count,
                 last_matched_processes, baseline_processes,
-                is_alerting, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                is_alerting, last_alerted_at,
+                repeat_count, repeat_exhausted,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 consecutive_meets = excluded.consecutive_meets,
                 last_check_count = excluded.last_check_count,
                 last_matched_processes = excluded.last_matched_processes,
                 baseline_processes = excluded.baseline_processes,
                 is_alerting = 0,
+                last_alerted_at = excluded.last_alerted_at,
+                repeat_count = excluded.repeat_count,
+                repeat_exhausted = excluded.repeat_exhausted,
                 updated_at = excluded.updated_at
             """,
             (
@@ -1287,6 +1356,9 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
                 new_last_check_count,
                 json.dumps(matched_processes[:50], ensure_ascii=False),
                 json.dumps(new_baseline_processes[:50], ensure_ascii=False),
+                new_last_alerted_at,
+                new_repeat_count,
+                1 if new_exhausted else 0,
                 now,
             ),
         )
@@ -1307,6 +1379,8 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
         "conditionReason": condition_reason,
         "consecutiveMeets": new_consecutive,
         "shouldTrigger": should_trigger,
+        "repeatCount": new_repeat_count,
+        "repeatExhausted": new_exhausted,
         "error": error,
     }
 
@@ -1560,24 +1634,29 @@ def get_alert_state(task_id: str, user: User) -> dict[str, Any] | None:
 
 
 def reset_alert_state(task_id: str, user: User) -> dict[str, Any]:
-    """Manually reset alert state (resolve an active alert)."""
+    """Manually reset alert state (resolve an active alert / reset repeat counter)."""
     get_monitor_task(task_id, user)
     now = now_iso()
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
-            INSERT INTO em_alert_states (task_id, consecutive_meets, is_alerting, resolved_at, updated_at)
-            VALUES (?, 0, 0, ?, ?)
+            INSERT INTO em_alert_states (
+                task_id, consecutive_meets, is_alerting, resolved_at,
+                last_alerted_at, repeat_count, repeat_exhausted, updated_at
+            ) VALUES (?, 0, 0, ?, NULL, 0, 0, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 consecutive_meets = 0,
                 is_alerting = 0,
                 resolved_at = excluded.resolved_at,
+                last_alerted_at = NULL,
+                repeat_count = 0,
+                repeat_exhausted = 0,
                 updated_at = excluded.updated_at
             """,
             (task_id, now, now),
         )
         connection.commit()
-        _record_event(user.id, task_id, None, "resolved", "报警状态已被手动重置", {})
+        _record_event(user.id, task_id, None, "resolved", "报警状态已被手动重置（重复计数已清零）", {})
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
     return _public_alert_state(state)
 
@@ -1725,6 +1804,7 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _public_task(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys() if hasattr(row, "keys") else []
     return {
         "id": row["id"],
         "serverId": row["server_id"],
@@ -1738,6 +1818,8 @@ def _public_task(row: sqlite3.Row) -> dict[str, Any]:
         "alertChangeAmount": row["alert_change_amount"],
         "confirmCount": row["confirm_count"],
         "checkIntervalSeconds": row["check_interval_seconds"],
+        "repeatIntervalSeconds": row["repeat_interval_seconds"] if "repeat_interval_seconds" in keys else 0,
+        "maxRepeatCount": row["max_repeat_count"] if "max_repeat_count" in keys else 0,
         "enabled": bool(row["enabled"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -1796,6 +1878,7 @@ def _public_event(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _public_alert_state(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys() if hasattr(row, "keys") else []
     return {
         "taskId": row["task_id"],
         "consecutiveMeets": row["consecutive_meets"],
@@ -1803,6 +1886,8 @@ def _public_alert_state(row: sqlite3.Row) -> dict[str, Any]:
         "isAlerting": bool(row["is_alerting"]),
         "lastAlertedAt": row["last_alerted_at"],
         "resolvedAt": row["resolved_at"],
+        "repeatCount": row["repeat_count"] if "repeat_count" in keys else 0,
+        "repeatExhausted": bool(row["repeat_exhausted"]) if "repeat_exhausted" in keys else False,
         "updatedAt": row["updated_at"],
     }
 

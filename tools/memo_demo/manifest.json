@@ -3,7 +3,7 @@
   "name": "备忘录 Demo",
   "description": "需要登录的个人 TXT 备忘录示例工具，支持上传、保存、查看和删除。",
   "version": "1.0.0",
-  "enabled": true,
+  "enabled": false,
   "category": "text",
   "icon": "notebook",
   "entry": {

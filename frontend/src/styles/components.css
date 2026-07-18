@@ -1168,3 +1168,126 @@
   color: var(--muted);
   font-size: 13px;
 }
+
+/* ── Date Range Popover ── */
+
+.date-range-popover {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.16);
+  z-index: 21;
+}
+
+.date-range-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.date-range-field .text-input {
+  min-height: 36px;
+}
+
+/* ── Donut Chart ── */
+
+.storage-donuts {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.donut-card {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.donut-chart-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.donut-svg {
+  display: block;
+  overflow: visible;
+}
+
+.donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.donut-center strong {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text, #1e293b);
+  line-height: 1.2;
+}
+
+.donut-center small {
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+}
+
+.donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.donut-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  transition: background 120ms ease;
+}
+
+.donut-legend li:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.donut-legend li.active {
+  background: rgba(26, 115, 232, 0.08);
+}
+
+.donut-legend-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.donut-legend-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text, #334155);
+  font-weight: 500;
+}
+
+.donut-legend-value {
+  flex-shrink: 0;
+  color: var(--muted, #94a3b8);
+  font-size: 11px;
+}

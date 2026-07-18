@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -8,11 +11,18 @@ from backend.app.core.security import get_optional_user, require_admin, require_
 from backend.app.registry.tool_registry import tool_registry
 from backend.app.services.data_management import (
     compute_before_date,
+    compute_date_bounds,
+    count_data,
     delete_data,
     get_data_usage_by_category,
     get_tool_categories,
 )
 from backend.app.services.email_service import get_email_config, save_email_config, send_email
+
+# Project-root relative file that holds the "About" information shown in the
+# settings page.  Edit this file to update version / developer / contact info
+# without touching code.
+ABOUT_FILE = Path("about.json")
 
 router = APIRouter()
 
@@ -68,7 +78,9 @@ def test_email_config_route(request: Request, payload: EmailConfigPayload) -> di
 class DataDeletionPayload(BaseModel):
     toolId: str
     category: str | None = None  # None = all categories
-    beforeDays: int | None = None  # Delete data older than N days; None = no time filter
+    beforeDays: int | None = None  # Legacy: delete data older than N days
+    startDate: str | None = None  # YYYY-MM-DD inclusive (day-granularity range)
+    endDate: str | None = None  # YYYY-MM-DD inclusive
     userId: str | None = None  # Admin-only: target a specific user; None = self (or all users for platform_db)
 
 
@@ -103,13 +115,76 @@ def data_categories_route(request: Request) -> dict:
 
 
 @router.get("/settings/data-usage/{tool_id}")
-def data_usage_route(request: Request, tool_id: str) -> dict:
-    """Get per-category data usage for the current user in a specific tool."""
+def data_usage_route(request: Request, tool_id: str, userId: str | None = None) -> dict:
+    """Get per-category data usage for a specific tool.
+
+    Regular users can only query their own data (``userId`` is ignored).
+    Admins can pass ``userId`` to target a specific user, or leave it unset
+    to aggregate across all users.
+    """
     user = require_user(request)
     if tool_registry.get(tool_id) is None:
         raise ToolboxError("TOOL_NOT_FOUND", "工具不存在", status_code=404, tool_id=tool_id)
-    usage = get_data_usage_by_category(tool_id, user.id)
-    return {"toolId": tool_id, "userId": user.id, "categories": usage}
+
+    target_user_id: str | None
+    if userId is not None:
+        if user.role != "admin":
+            raise ToolboxError("FORBIDDEN", "只能查看自己的数据", status_code=403)
+        target_user_id = userId
+    elif user.role == "admin":
+        target_user_id = None
+    else:
+        target_user_id = user.id
+
+    usage = get_data_usage_by_category(tool_id, target_user_id)
+    return {"toolId": tool_id, "userId": target_user_id or "", "categories": usage}
+
+
+class DataCountItem(BaseModel):
+    category: str | None = None  # None = all time-based categories
+    startDate: str | None = None  # YYYY-MM-DD inclusive
+    endDate: str | None = None  # YYYY-MM-DD inclusive
+
+
+class DataCountPayload(BaseModel):
+    toolId: str
+    items: list[DataCountItem]
+    userId: str | None = None  # Admin-only: target a specific user
+
+
+@router.post("/settings/data-count")
+def data_count_route(request: Request, payload: DataCountPayload) -> dict:
+    """Preview the number of rows that would be deleted for each category+range.
+
+    Returns ``{"toolId": ..., "counts": {category: rowCount}}`` so the UI can
+    show "selected count" alongside the total count when a date range is chosen.
+    """
+    user = require_user(request)
+    if tool_registry.get(payload.toolId) is None:
+        raise ToolboxError("TOOL_NOT_FOUND", "工具不存在", status_code=404, tool_id=payload.toolId)
+
+    target_user_id: str | None
+    if payload.userId is not None:
+        if user.role != "admin":
+            raise ToolboxError("FORBIDDEN", "只能查看自己的数据", status_code=403)
+        target_user_id = payload.userId
+    elif user.role == "admin":
+        target_user_id = None
+    else:
+        target_user_id = user.id
+
+    counts: dict[str, int] = {}
+    for item in payload.items:
+        after_date, before_date = compute_date_bounds(item.startDate, item.endDate)
+        key = item.category if item.category is not None else "__all__"
+        counts[key] = count_data(
+            tool_id=payload.toolId,
+            user_id=target_user_id,
+            category=item.category,
+            before_date=before_date,
+            after_date=after_date,
+        )
+    return {"toolId": payload.toolId, "counts": counts}
 
 
 @router.delete("/settings/data")
@@ -138,10 +213,38 @@ def delete_data_route(request: Request, payload: DataDeletionPayload) -> dict:
         # Self-service: non-admin can only delete their own data
         target_user_id = user.id
 
-    before_date = compute_before_date(payload.beforeDays)
+    before_date: str | None
+    after_date: str | None
+    if payload.startDate or payload.endDate:
+        # Day-granularity date range takes precedence over legacy beforeDays.
+        after_date, before_date = compute_date_bounds(payload.startDate, payload.endDate)
+    else:
+        after_date = None
+        before_date = compute_before_date(payload.beforeDays)
     return delete_data(
         tool_id=payload.toolId,
         user_id=target_user_id,
         category=payload.category,
         before_date=before_date,
+        after_date=after_date,
     )
+
+
+# ============================================================
+# About info
+# ============================================================
+
+@router.get("/settings/about")
+def about_route(request: Request) -> dict:
+    """Return platform about info (version, developer, contact, ...).
+
+    The content is read from ``about.json`` at the project root so it can be
+    updated without restarting the service.  Available to any visitor.
+    """
+    get_optional_user(request)
+    if ABOUT_FILE.exists():
+        try:
+            return json.loads(ABOUT_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"items": []}

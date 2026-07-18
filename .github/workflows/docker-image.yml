@@ -21,6 +21,17 @@ jobs:
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      - name: Extract version from about.json
+        id: version
+        run: |
+          version=""
+          if [ -f about.json ]; then
+            # 从 about.json 的 items 中查找 label 为 "版本" 的 value
+            version=$(jq -r '.items[] | select(.label=="版本") | .value' about.json 2>/dev/null | head -n1 || true)
+          fi
+          # 仅在解析到非空值时输出，否则保持默认（latest + sha）
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -39,6 +50,7 @@ jobs:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
             type=sha,prefix=
 
       - name: Build and push Docker image

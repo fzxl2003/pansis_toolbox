@@ -1,7 +1,7 @@
 {
   "id": "url_navigator",
   "name": "网址导航",
-  "description": "面向个人的多入口网址导航，按延迟或优先级自动选择可访问地址。",
+  "description": "（暂不可用）面向个人的多入口网址导航，按延迟或优先级自动选择可访问地址。",
   "version": "1.0.0",
   "enabled": true,
   "category": "network",

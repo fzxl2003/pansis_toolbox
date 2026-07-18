@@ -175,9 +175,10 @@ export function fetchDataCategories() {
   return apiGet<{ tools: ToolDataCategories[] }>('/api/settings/data-categories');
 }
 
-export function fetchDataUsage(toolId: string) {
+export function fetchDataUsage(toolId: string, userId?: string | null) {
+  const qs = userId ? `?userId=${encodeURIComponent(userId)}` : '';
   return apiGet<{ toolId: string; userId: string; categories: DataCategoryUsage[] }>(
-    `/api/settings/data-usage/${toolId}`,
+    `/api/settings/data-usage/${toolId}${qs}`,
   );
 }
 
@@ -185,7 +186,22 @@ export function deleteData(payload: {
   toolId: string;
   category?: string | null;
   beforeDays?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
   userId?: string | null;
 }) {
   return apiDelete<DataDeletionResult>('/api/settings/data', payload);
+}
+
+export type DataCountResult = {
+  toolId: string;
+  counts: Record<string, number>;
+};
+
+export function fetchDataCount(payload: {
+  toolId: string;
+  items: Array<{ category?: string | null; startDate?: string | null; endDate?: string | null }>;
+  userId?: string | null;
+}) {
+  return apiPost<DataCountResult>('/api/settings/data-count', payload);
 }

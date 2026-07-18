@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 
 from backend.app.services.scheduler_service import Scheduler
-from tools.server_monitor.backend.service import SAMPLE_SECONDS, collect_due_servers, init_monitor_database
+from tools.server_monitor.backend.service import SAMPLE_SECONDS, collect_due_servers
 
 
 def register_tasks(scheduler: Scheduler) -> None:
-    init_monitor_database()
+    # Per-user databases are initialized lazily on first API access and on
+    # each scheduler tick (collect_due_servers iterates list_user_tool_dbs).
     scheduler.add_interval_task(
         tool_id="server_monitor",
         name="collect_due_servers",

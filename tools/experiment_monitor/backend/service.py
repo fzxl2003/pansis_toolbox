@@ -16,8 +16,13 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.db.database import get_connection
+from backend.app.db.database import (
+    get_user_tool_connection,
+    list_user_tool_dbs,
+    user_tool_connection_context,
+)
 from backend.app.services.auth_service import User
+from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services.email_service import send_email as platform_send_email
 from backend.app.services import ssh_connection_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
@@ -29,21 +34,21 @@ CHECK_INTERVAL_SECONDS = 30
 RETENTION_DAYS = 7
 DEFAULT_CONFIRM_COUNT = 3
 
-# 模块级初始化标志：避免每次 API 请求都重复执行建表/建索引/迁移语句
+# 模块级初始化标志：记录已初始化的用户数据库，避免每次请求重复建表
 # CREATE TABLE IF NOT EXISTS 虽然幂等，但每次都要查 sqlite_master 并解析 DDL，
 # 再加上 3 条 ALTER TABLE 的 try/except 开销，在高频请求下显著拖慢响应。
-_db_initialized = False
+_initialized_dbs: set[str] = set()
 
 
 # ============================================================
 # Database Initialization
 # ============================================================
 
-def init_database() -> None:
-    global _db_initialized
-    if _db_initialized:
+def init_database(user_id: str) -> None:
+    """Create tables in the user's per-tool database if not already done."""
+    if user_id in _initialized_dbs:
         return
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.executescript(
             """
             -- 服务器连接配置（复用 server_monitor 的模式）
@@ -83,6 +88,10 @@ def init_database() -> None:
                 confirm_count INTEGER NOT NULL DEFAULT 3,
                 -- 检查间隔秒数
                 check_interval_seconds INTEGER NOT NULL DEFAULT 30,
+                -- 重复报警冷却时间（秒）：触发后在此时间内不重复报警。0 = 无冷却
+                repeat_interval_seconds INTEGER NOT NULL DEFAULT 0,
+                -- 最多重复报警次数：达到上限后停止重复报警，需手动重置。0 = 无限重复
+                max_repeat_count INTEGER NOT NULL DEFAULT 0,
                 -- 上次检查时间（用于按任务间隔调度）
                 last_checked_at TEXT,
                 -- 是否启用
@@ -150,6 +159,10 @@ def init_database() -> None:
                 is_alerting INTEGER NOT NULL DEFAULT 0,
                 last_alerted_at TEXT,
                 resolved_at TEXT,
+                -- 已重复报警次数（用于 max_repeat_count 上限控制）
+                repeat_count INTEGER NOT NULL DEFAULT 0,
+                -- 是否已达到最大重复次数（达到后停止重复，需手动重置）
+                repeat_exhausted INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(task_id) REFERENCES em_monitor_tasks(id)
             );
@@ -217,13 +230,54 @@ def init_database() -> None:
             "ALTER TABLE em_alert_states ADD COLUMN last_matched_processes TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE em_alert_states ADD COLUMN baseline_processes TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE em_monitor_tasks ADD COLUMN last_checked_at TEXT",
+            "ALTER TABLE em_monitor_tasks ADD COLUMN repeat_interval_seconds INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE em_monitor_tasks ADD COLUMN max_repeat_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE em_alert_states ADD COLUMN repeat_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE em_alert_states ADD COLUMN repeat_exhausted INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 connection.execute(col_sql)
                 connection.commit()
             except Exception:
                 pass  # 字段已存在，忽略
-    _db_initialized = True
+    _initialized_dbs.add(user_id)
+
+
+# ============================================================
+# Data category registration
+# ============================================================
+
+register_tool_categories(TOOL_ID, [
+    DataCategory(
+        name="config",
+        tables=["em_servers", "em_monitor_tasks", "em_alert_actions",
+                "em_alert_states", "em_script_groups", "em_script_queue"],
+        time_column=None,
+        description="配置数据（服务器、监控任务、报警动作、脚本队列）",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="samples",
+        tables=["em_samples"],
+        time_column="checked_at",
+        description="监控采样记录",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="events",
+        tables=["em_alert_events"],
+        time_column="created_at",
+        description="报警事件记录",
+        storage="user_tool_db",
+    ),
+    DataCategory(
+        name="script_history",
+        tables=["em_script_history", "em_screen_sessions"],
+        time_column="triggered_at",
+        description="脚本执行历史和 Screen 会话",
+        storage="user_tool_db",
+    ),
+])
 
 
 # ============================================================
@@ -231,8 +285,8 @@ def init_database() -> None:
 # ============================================================
 
 def list_servers(user: User) -> list[dict[str, Any]]:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM em_servers WHERE owner_user_id = ? AND enabled = 1 ORDER BY name",
             (user.id,),
@@ -241,8 +295,8 @@ def list_servers(user: User) -> list[dict[str, Any]]:
 
 
 def get_server(server_id: str, user: User) -> sqlite3.Row:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
             "SELECT * FROM em_servers WHERE id = ? AND owner_user_id = ? AND enabled = 1",
             (server_id, user.id),
@@ -253,10 +307,10 @@ def get_server(server_id: str, user: User) -> sqlite3.Row:
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_database()
+    init_database(user.id)
     server_id = secrets.token_hex(12)
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO em_servers (id, name, host, port, ssh_username, ssh_password_encrypted, owner_user_id, enabled, created_at, updated_at)
@@ -283,7 +337,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
     row = get_server(server_id, user)
     password = payload.get("sshPassword")
     encrypted_password = encrypt_secret(password) if password else row["ssh_password_encrypted"]
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             UPDATE em_servers SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?, updated_at = ?
@@ -307,7 +361,7 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
 
 def delete_server(server_id: str, user: User) -> None:
     get_server(server_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("UPDATE em_servers SET enabled = 0, updated_at = ? WHERE id = ?", (now_iso(), server_id))
         # Also disable related tasks
         connection.execute(
@@ -339,8 +393,8 @@ def test_ssh_connection(server_id: str, user: User) -> dict[str, Any]:
 # ============================================================
 
 def list_monitor_tasks(user: User, server_id: str | None = None) -> list[dict[str, Any]]:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         if server_id:
             rows = connection.execute(
                 "SELECT * FROM em_monitor_tasks WHERE owner_user_id = ? AND server_id = ? AND enabled = 1 ORDER BY created_at DESC",
@@ -355,8 +409,8 @@ def list_monitor_tasks(user: User, server_id: str | None = None) -> list[dict[st
 
 
 def get_monitor_task(task_id: str, user: User) -> sqlite3.Row:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
             "SELECT * FROM em_monitor_tasks WHERE id = ? AND owner_user_id = ?",
             (task_id, user.id),
@@ -367,7 +421,7 @@ def get_monitor_task(task_id: str, user: User) -> sqlite3.Row:
 
 
 def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_database()
+    init_database(user.id)
     # Validate server belongs to user
     get_server(payload["serverId"], user)
     initial_matched_processes = _initial_matched_processes(payload)
@@ -381,14 +435,16 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
     if alert_condition not in ("below", "above", "changed"):
         raise ToolboxError("INVALID_ALERT_CONDITION", "报警条件类型无效", status_code=400, tool_id=TOOL_ID)
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO em_monitor_tasks (
                 id, server_id, owner_user_id, name, description, match_mode, match_pattern,
                 filter_user, alert_condition, alert_threshold, alert_change_amount,
-                confirm_count, check_interval_seconds, enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                confirm_count, check_interval_seconds,
+                repeat_interval_seconds, max_repeat_count,
+                enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 task_id,
@@ -404,6 +460,8 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
                 int(payload.get("alertChangeAmount", 1)),
                 int(payload.get("confirmCount", DEFAULT_CONFIRM_COUNT)),
                 int(payload.get("checkIntervalSeconds", CHECK_INTERVAL_SECONDS)),
+                int(payload.get("repeatIntervalSeconds", 0)),
+                int(payload.get("maxRepeatCount", 0)),
                 now,
                 now,
             ),
@@ -419,8 +477,8 @@ def create_monitor_task(payload: dict[str, Any], user: User) -> dict[str, Any]:
         connection.commit()
         row = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
     if initial_matched_processes is not None:
-        _record_initial_sample(task_id, initial_matched_processes)
-        with get_connection() as connection:
+        _record_initial_sample(user.id, task_id, initial_matched_processes)
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
             row = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
     return _public_task(row)
 
@@ -435,14 +493,16 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
     if alert_condition not in ("below", "above", "changed"):
         raise ToolboxError("INVALID_ALERT_CONDITION", "报警条件类型无效", status_code=400, tool_id=TOOL_ID)
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             UPDATE em_monitor_tasks SET
                 name = ?, description = ?, match_mode = ?, match_pattern = ?,
                 filter_user = ?, alert_condition = ?, alert_threshold = ?,
                 alert_change_amount = ?, confirm_count = ?,
-                check_interval_seconds = ?, enabled = ?, updated_at = ?
+                check_interval_seconds = ?,
+                repeat_interval_seconds = ?, max_repeat_count = ?,
+                enabled = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -456,6 +516,8 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
                 int(payload.get("alertChangeAmount", row["alert_change_amount"])),
                 int(payload.get("confirmCount", row["confirm_count"])),
                 int(payload.get("checkIntervalSeconds", row["check_interval_seconds"])),
+                int(payload.get("repeatIntervalSeconds", row["repeat_interval_seconds"] if "repeat_interval_seconds" in row.keys() else 0)),
+                int(payload.get("maxRepeatCount", row["max_repeat_count"] if "max_repeat_count" in row.keys() else 0)),
                 int(payload.get("enabled", row["enabled"])),
                 now_iso(),
                 task_id,
@@ -464,15 +526,15 @@ def update_monitor_task(task_id: str, payload: dict[str, Any], user: User) -> di
         connection.commit()
         updated = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
     if initial_matched_processes is not None:
-        _record_initial_sample(task_id, initial_matched_processes)
-        with get_connection() as connection:
+        _record_initial_sample(user.id, task_id, initial_matched_processes)
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
             updated = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
     return _public_task(updated)
 
 
 def delete_monitor_task(task_id: str, user: User) -> None:
     get_monitor_task(task_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         # Cascade delete: find all actions belonging to this task
         action_rows = connection.execute(
             "SELECT id FROM em_alert_actions WHERE task_id = ?", (task_id,)
@@ -506,10 +568,10 @@ def _initial_matched_processes(payload: dict[str, Any]) -> list[str] | None:
     return [str(item) for item in value]
 
 
-def _record_initial_sample(task_id: str, matched_processes: list[str]) -> None:
+def _record_initial_sample(user_id: str, task_id: str, matched_processes: list[str]) -> None:
     """Persist preview results as the task's current sample without firing actions."""
-    init_database()
-    with get_connection() as connection:
+    init_database(user_id)
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         task = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ?", (task_id,)).fetchone()
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
     if task is None:
@@ -520,7 +582,7 @@ def _record_initial_sample(task_id: str, matched_processes: list[str]) -> None:
     condition_met, _ = evaluate_condition(process_count, task, state)
     clipped_processes = matched_processes[:50]
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO em_samples (id, task_id, checked_at, process_count, matched_processes, condition_met, error)
@@ -662,7 +724,7 @@ def preview_process_filter(server_id: str, match_mode: str, match_pattern: str, 
 
 def list_alert_actions(task_id: str, user: User) -> list[dict[str, Any]]:
     get_monitor_task(task_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM em_alert_actions WHERE task_id = ? AND enabled = 1 ORDER BY sort_order, created_at",
             (task_id,),
@@ -678,7 +740,7 @@ def create_alert_action(task_id: str, payload: dict[str, Any], user: User) -> di
         raise ToolboxError("INVALID_ACTION_TYPE", "动作类型必须是 email 或 script", status_code=400, tool_id=TOOL_ID)
 
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         # Get max sort_order
         max_order = connection.execute(
             "SELECT COALESCE(MAX(sort_order), -1) FROM em_alert_actions WHERE task_id = ?",
@@ -711,14 +773,14 @@ def create_alert_action(task_id: str, payload: dict[str, Any], user: User) -> di
 
 
 def update_alert_action(action_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_alert_actions WHERE id = ?", (action_id,)).fetchone()
     if row is None:
         raise ToolboxError("ACTION_NOT_FOUND", "报警动作不存在", status_code=404, tool_id=TOOL_ID)
     get_monitor_task(row["task_id"], user)
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
             UPDATE em_alert_actions SET
@@ -749,13 +811,13 @@ def update_alert_action(action_id: str, payload: dict[str, Any], user: User) -> 
 
 
 def delete_alert_action(action_id: str, user: User) -> None:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_alert_actions WHERE id = ?", (action_id,)).fetchone()
     if row is None:
         raise ToolboxError("ACTION_NOT_FOUND", "报警动作不存在", status_code=404, tool_id=TOOL_ID)
     get_monitor_task(row["task_id"], user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("UPDATE em_alert_actions SET enabled = 0 WHERE id = ?", (action_id,))
         connection.commit()
 
@@ -766,8 +828,8 @@ def delete_alert_action(action_id: str, user: User) -> None:
 
 def _get_action_for_user(action_id: str, user: User) -> sqlite3.Row:
     """Fetch action and verify ownership via task ownership."""
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_alert_actions WHERE id = ?", (action_id,)).fetchone()
     if row is None:
         raise ToolboxError("ACTION_NOT_FOUND", "报警动作不存在", status_code=404, tool_id=TOOL_ID)
@@ -776,8 +838,8 @@ def _get_action_for_user(action_id: str, user: User) -> sqlite3.Row:
 
 
 def _get_group(group_id: str, user: User) -> sqlite3.Row:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_script_groups WHERE id = ?", (group_id,)).fetchone()
     if row is None:
         raise ToolboxError("GROUP_NOT_FOUND", "脚本分组不存在", status_code=404, tool_id=TOOL_ID)
@@ -787,20 +849,20 @@ def _get_group(group_id: str, user: User) -> sqlite3.Row:
 
 def list_script_groups(action_id: str, user: User) -> list[dict[str, Any]]:
     _get_action_for_user(action_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         groups = connection.execute(
             "SELECT * FROM em_script_groups WHERE action_id = ? ORDER BY sort_order, created_at",
             (action_id,),
         ).fetchall()
     result = []
     for g in groups:
-        result.append(_public_group_full(g))
+        result.append(_public_group_full(g, user.id))
     return result
 
 
-def _public_group_full(g: sqlite3.Row) -> dict[str, Any]:
+def _public_group_full(g: sqlite3.Row, user_id: str) -> dict[str, Any]:
     group_id = g["id"]
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         queue_rows = connection.execute(
             "SELECT * FROM em_script_queue WHERE group_id = ? ORDER BY position, created_at",
             (group_id,),
@@ -849,7 +911,7 @@ def create_script_group(action_id: str, payload: dict[str, Any], user: User) -> 
     _get_action_for_user(action_id, user)
     group_id = secrets.token_hex(12)
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         max_order = connection.execute(
             "SELECT COALESCE(MAX(sort_order), -1) FROM em_script_groups WHERE action_id = ?",
             (action_id,),
@@ -868,12 +930,12 @@ def create_script_group(action_id: str, payload: dict[str, Any], user: User) -> 
                 )
         connection.commit()
         row = connection.execute("SELECT * FROM em_script_groups WHERE id = ?", (group_id,)).fetchone()
-    return _public_group_full(row)
+    return _public_group_full(row, user.id)
 
 
 def update_script_group(group_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
     row = _get_group(group_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             "UPDATE em_script_groups SET name = ?, screen_name_prefix = ?, sort_order = ? WHERE id = ?",
             (
@@ -885,12 +947,12 @@ def update_script_group(group_id: str, payload: dict[str, Any], user: User) -> d
         )
         connection.commit()
         updated = connection.execute("SELECT * FROM em_script_groups WHERE id = ?", (group_id,)).fetchone()
-    return _public_group_full(updated)
+    return _public_group_full(updated, user.id)
 
 
 def delete_script_group(group_id: str, user: User) -> None:
     _get_group(group_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("DELETE FROM em_screen_sessions WHERE group_id = ?", (group_id,))
         connection.execute("DELETE FROM em_script_history WHERE group_id = ?", (group_id,))
         connection.execute("DELETE FROM em_script_queue WHERE group_id = ?", (group_id,))
@@ -903,7 +965,7 @@ def delete_script_group(group_id: str, user: User) -> None:
 def add_queue_item(group_id: str, command: str, user: User) -> dict[str, Any]:
     _get_group(group_id, user)
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         max_pos = connection.execute(
             "SELECT COALESCE(MAX(position), -1) FROM em_script_queue WHERE group_id = ?",
             (group_id,),
@@ -918,34 +980,34 @@ def add_queue_item(group_id: str, command: str, user: User) -> dict[str, Any]:
 
 
 def delete_queue_item(item_id: str, user: User) -> None:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_script_queue WHERE id = ?", (item_id,)).fetchone()
     if row is None:
         raise ToolboxError("ITEM_NOT_FOUND", "队列条目不存在", status_code=404, tool_id=TOOL_ID)
     _get_group(row["group_id"], user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("DELETE FROM em_script_queue WHERE id = ?", (item_id,))
         connection.commit()
-    _reorder_queue(row["group_id"])
+    _reorder_queue(user.id, row["group_id"])
 
 
 def reorder_queue(group_id: str, ordered_ids: list[str], user: User) -> dict[str, Any]:
     """Reorder queue items by providing an ordered list of their IDs."""
     group = _get_group(group_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         for pos, item_id in enumerate(ordered_ids):
             connection.execute(
                 "UPDATE em_script_queue SET position = ? WHERE id = ? AND group_id = ?",
                 (pos, item_id, group_id),
             )
         connection.commit()
-    return _public_group_full(group)
+    return _public_group_full(group, user.id)
 
 
-def _reorder_queue(group_id: str) -> None:
+def _reorder_queue(user_id: str, group_id: str) -> None:
     """Compact positions after deletion."""
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT id FROM em_script_queue WHERE group_id = ? ORDER BY position, created_at",
             (group_id,),
@@ -959,14 +1021,14 @@ def _reorder_queue(group_id: str) -> None:
 
 def restore_history_to_queue(history_id: str, user: User) -> dict[str, Any]:
     """Move a history entry back to the queue (append to end)."""
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_script_history WHERE id = ?", (history_id,)).fetchone()
     if row is None:
         raise ToolboxError("HISTORY_NOT_FOUND", "历史记录不存在", status_code=404, tool_id=TOOL_ID)
     group = _get_group(row["group_id"], user)
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         max_pos = connection.execute(
             "SELECT COALESCE(MAX(position), -1) FROM em_script_queue WHERE group_id = ?",
             (row["group_id"],),
@@ -976,17 +1038,17 @@ def restore_history_to_queue(history_id: str, user: User) -> dict[str, Any]:
             (secrets.token_hex(10), row["group_id"], row["command"], max_pos + 1, now),
         )
         connection.commit()
-    return _public_group_full(group)
+    return _public_group_full(group, user.id)
 
 
 def delete_history_item(history_id: str, user: User) -> None:
-    init_database()
-    with get_connection() as connection:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute("SELECT * FROM em_script_history WHERE id = ?", (history_id,)).fetchone()
     if row is None:
         raise ToolboxError("HISTORY_NOT_FOUND", "历史记录不存在", status_code=404, tool_id=TOOL_ID)
     _get_group(row["group_id"], user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute("DELETE FROM em_script_history WHERE id = ?", (history_id,))
         connection.commit()
 
@@ -997,7 +1059,7 @@ def refresh_screen_sessions(group_id: str, user: User) -> list[dict[str, Any]]:
     """SSH into the server and check which screen sessions are still alive."""
     group = _get_group(group_id, user)
     # Find the server via action → task → server
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         action = connection.execute(
             "SELECT * FROM em_alert_actions WHERE id = ?", (group["action_id"],)
         ).fetchone()
@@ -1031,17 +1093,17 @@ def refresh_screen_sessions(group_id: str, user: User) -> list[dict[str, Any]]:
     except Exception:
         # If SSH fails, mark all as unknown
         now = now_iso()
-        with get_connection() as connection:
+        with user_tool_connection_context(user.id, TOOL_ID) as connection:
             for s in sessions:
                 connection.execute(
                     "UPDATE em_screen_sessions SET status = 'unknown', checked_at = ? WHERE id = ?",
                     (now, s["id"]),
                 )
             connection.commit()
-        return _get_sessions_for_group(group_id)
+        return _get_sessions_for_group(user.id, group_id)
 
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         for s in sessions:
             # Match by session name (without PID prefix)
             session_name = s["session_name"]
@@ -1053,11 +1115,11 @@ def refresh_screen_sessions(group_id: str, user: User) -> list[dict[str, Any]]:
             )
         connection.commit()
 
-    return _get_sessions_for_group(group_id)
+    return _get_sessions_for_group(user.id, group_id)
 
 
-def _get_sessions_for_group(group_id: str) -> list[dict[str, Any]]:
-    with get_connection() as connection:
+def _get_sessions_for_group(user_id: str, group_id: str) -> list[dict[str, Any]]:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         rows = connection.execute(
             "SELECT * FROM em_screen_sessions WHERE group_id = ? ORDER BY started_at DESC LIMIT 50",
             (group_id,),
@@ -1128,7 +1190,7 @@ def evaluate_condition(current_count: int, task_row: sqlite3.Row, alert_state: s
     return met, reason
 
 
-def run_monitor_check(task_id: str) -> dict[str, Any]:
+def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
     """Run a single monitoring check for a task. Called by scheduler.
 
     多次确认逻辑说明
@@ -1139,25 +1201,31 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
     规则：
     1. 每次采样判断当前是否满足报警条件（condition_met）。
     2. 若满足，consecutive_meets +1；若不满足，立刻清零（说明是瞬时抖动，进程已恢复）。
-    3. 只有 consecutive_meets 达到 confirm_count 时才真正触发报警。
-    4. 触发报警后：
+    3. 只有 consecutive_meets 达到 confirm_count 时才进入候选触发状态。
+    4. 候选触发后，还需满足重复报警控制：
+       - repeat_interval_seconds（冷却时间）：距上次报警超过该秒数才允许再次报警，0=不限。
+       - max_repeat_count（最大重复次数）：达到上限后停止重复报警（repeat_exhausted=1），
+         需手动调用 reset_alert_state 重置后才能继续，0=不限。
+    5. 真正触发报警后：
        - 将当前稳定进程列表记录为 baseline_processes（供邮件展示"报警前的进程列表"）
-       - 重置 consecutive_meets = 0，is_alerting = 0（允许下次独立触发，不做持续报警去重）
-       - 对于 changed 模式：将当前 process_count 作为新的 last_check_count 基准，
-         避免每次都与触发前的旧基准比较而持续触发。
-    5. 正常情况下（未在报警中）每次更新 last_check_count 为当前值，
+       - 重置 consecutive_meets = 0，is_alerting = 0
+       - repeat_count +1，last_alerted_at = 当前时间
+       - 若 repeat_count 达到 max_repeat_count，置 repeat_exhausted = 1
+       - 对于 changed 模式：将当前 process_count 作为新的 last_check_count 基准
+    6. 候选触发但被冷却/上限抑制时：保留 consecutive_meets 不重置，以便冷却结束后立即再触发。
+    7. 正常情况下（未在报警中）每次更新 last_check_count 为当前值，
        并将 last_matched_processes 更新为当前进程列表（供邮件展示"报警时的进程变化"）。
     """
-    init_database()
+    init_database(user_id)
 
     # Fetch task and server separately to avoid JOIN column ambiguity
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         task = connection.execute("SELECT * FROM em_monitor_tasks WHERE id = ? AND enabled = 1", (task_id,)).fetchone()
 
     if task is None:
         return {"status": "skipped", "reason": "任务不存在或已禁用"}
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         server = connection.execute("SELECT * FROM em_servers WHERE id = ?", (task["server_id"],)).fetchone()
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
 
@@ -1193,7 +1261,31 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
         new_consecutive = 0  # 只要有一次恢复正常，清零——说明之前是短暂抖动
 
     confirm_needed = task["confirm_count"]
-    should_trigger = (condition_met and new_consecutive >= confirm_needed)
+    # 读取重复报警配置（迁移后的列一定存在）
+    repeat_interval = int(task["repeat_interval_seconds"]) if "repeat_interval_seconds" in task.keys() else 0
+    max_repeat = int(task["max_repeat_count"]) if "max_repeat_count" in task.keys() else 0
+    # 读取当前重复报警状态
+    prev_repeat_count = int(state["repeat_count"]) if state and "repeat_count" in state.keys() else 0
+    prev_exhausted = bool(state["repeat_exhausted"]) if state and "repeat_exhausted" in state.keys() else False
+    last_alerted_at = state["last_alerted_at"] if state else None
+
+    now_dt = datetime.now(timezone.utc)
+    # 冷却判定：从未报警过或超过冷却期，则冷却已过
+    cooldown_passed = True
+    if repeat_interval > 0 and last_alerted_at:
+        try:
+            last_alerted_dt = datetime.fromisoformat(last_alerted_at)
+            if last_alerted_dt.tzinfo is None:
+                last_alerted_dt = last_alerted_dt.replace(tzinfo=timezone.utc)
+            cooldown_passed = (now_dt - last_alerted_dt) >= timedelta(seconds=repeat_interval)
+        except ValueError:
+            cooldown_passed = True
+    # 重复次数上限判定：max_repeat=0 表示不限制
+    repeat_limit_ok = (max_repeat <= 0) or (prev_repeat_count < max_repeat)
+
+    candidate_trigger = (condition_met and new_consecutive >= confirm_needed)
+    # 真正触发需要同时满足：确认次数达标 + 冷却已过 + 未达重复上限
+    should_trigger = candidate_trigger and cooldown_passed and repeat_limit_ok and not prev_exhausted
 
     # 触发时：保存报警前的进程列表作为 baseline，并重置计数
     if should_trigger:
@@ -1202,19 +1294,33 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
         new_consecutive = 0  # 触发后重置，允许下次独立再触发
         # changed 模式：以当前值更新基准，避免持续触发
         new_last_check_count = process_count
+        new_repeat_count = prev_repeat_count + 1
+        new_last_alerted_at = now_dt.isoformat()
+        # 达到上限：标记耗尽，后续不再重复报警，需手动重置
+        new_exhausted = (max_repeat > 0 and new_repeat_count >= max_repeat)
+    elif candidate_trigger and not (cooldown_passed and repeat_limit_ok and not prev_exhausted):
+        # 条件达标但被冷却/上限抑制：保留 consecutive_meets 以便冷却结束后立即再触发
+        new_baseline_processes = baseline_processes
+        new_last_check_count = state["last_check_count"] if state and state["last_check_count"] is not None else process_count
+        new_repeat_count = prev_repeat_count
+        new_last_alerted_at = last_alerted_at
+        new_exhausted = prev_exhausted
     else:
         new_baseline_processes = baseline_processes
-        # changed 模式：未触发时只在"无异常"状态下更新基准（防止连续异常中基准漂移）
+        # changed 模式：未触发时只在“无异常”状态下更新基准（防止连续异常中基准漂移）
         if not condition_met:
             new_last_check_count = process_count  # 正常状态下持续更新基准
         else:
             # 处于连续确认积累中，保持原有基准不变，等触发后再重置
             new_last_check_count = state["last_check_count"] if state and state["last_check_count"] is not None else process_count
+        new_repeat_count = prev_repeat_count
+        new_last_alerted_at = last_alerted_at
+        new_exhausted = prev_exhausted
 
     # Record sample
     sample_id = secrets.token_hex(12)
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO em_samples (id, task_id, checked_at, process_count, matched_processes, condition_met, error)
@@ -1229,14 +1335,19 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
             INSERT INTO em_alert_states (
                 task_id, consecutive_meets, last_check_count,
                 last_matched_processes, baseline_processes,
-                is_alerting, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                is_alerting, last_alerted_at,
+                repeat_count, repeat_exhausted,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 consecutive_meets = excluded.consecutive_meets,
                 last_check_count = excluded.last_check_count,
                 last_matched_processes = excluded.last_matched_processes,
                 baseline_processes = excluded.baseline_processes,
                 is_alerting = 0,
+                last_alerted_at = excluded.last_alerted_at,
+                repeat_count = excluded.repeat_count,
+                repeat_exhausted = excluded.repeat_exhausted,
                 updated_at = excluded.updated_at
             """,
             (
@@ -1245,6 +1356,9 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
                 new_last_check_count,
                 json.dumps(matched_processes[:50], ensure_ascii=False),
                 json.dumps(new_baseline_processes[:50], ensure_ascii=False),
+                new_last_alerted_at,
+                new_repeat_count,
+                1 if new_exhausted else 0,
                 now,
             ),
         )
@@ -1252,10 +1366,10 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
 
     # Trigger actions if needed
     if should_trigger:
-        _trigger_alert_actions(task, server, process_count, condition_reason, matched_processes, new_baseline_processes, has_screen)
+        _trigger_alert_actions(user_id, task, server, process_count, condition_reason, matched_processes, new_baseline_processes, has_screen)
 
     # Cleanup old samples
-    _prune_samples(task_id)
+    _prune_samples(user_id, task_id)
 
     return {
         "status": "ok",
@@ -1265,11 +1379,14 @@ def run_monitor_check(task_id: str) -> dict[str, Any]:
         "conditionReason": condition_reason,
         "consecutiveMeets": new_consecutive,
         "shouldTrigger": should_trigger,
+        "repeatCount": new_repeat_count,
+        "repeatExhausted": new_exhausted,
         "error": error,
     }
 
 
 def _trigger_alert_actions(
+    user_id: str,
     task: sqlite3.Row,
     server: sqlite3.Row,
     process_count: int,
@@ -1291,7 +1408,7 @@ def _trigger_alert_actions(
     else:
         threshold_str = f"变动 >= {task['alert_change_amount']}"
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         actions = connection.execute(
             "SELECT * FROM em_alert_actions WHERE task_id = ? AND enabled = 1 ORDER BY sort_order, created_at",
             (task_id,),
@@ -1301,27 +1418,28 @@ def _trigger_alert_actions(
         action_type = action["action_type"]
         try:
             if action_type == "email":
-                _execute_email_action(action, task_name, server_name, process_count, threshold_str, reason, matched_processes, baseline_processes)
+                _execute_email_action(user_id, action, task_name, server_name, process_count, threshold_str, reason, matched_processes, baseline_processes)
             elif action_type == "script":
-                _execute_script_action(action, server, has_screen)
+                _execute_script_action(user_id, action, server, has_screen)
 
             # Record event
-            _record_event(task_id, action["id"], f"{action_type}_executed",
+            _record_event(user_id, task_id, action["id"], f"{action_type}_executed",
                          f"成功执行{('邮件通知' if action_type == 'email' else '脚本触发')}动作",
                          {"actionType": action_type})
         except Exception as exc:
             logger.exception("Failed to execute alert action %s: %s", action["id"], exc)
-            _record_event(task_id, action["id"], f"{action_type}_failed",
+            _record_event(user_id, task_id, action["id"], f"{action_type}_failed",
                          f"执行{'邮件通知' if action_type == 'email' else '脚本触发'}失败: {exc}",
                          {"actionType": action_type, "error": str(exc)})
 
     # Record trigger event
-    _record_event(task_id, None, "triggered",
+    _record_event(user_id, task_id, None, "triggered",
                  f"报警已触发: {reason}",
                  {"processCount": process_count, "matchedProcesses": len(matched_processes)})
 
 
 def _execute_email_action(
+    user_id: str,
     action: sqlite3.Row,
     task_name: str,
     server_name: str,
@@ -1367,14 +1485,14 @@ def _execute_email_action(
 
     try:
         platform_send_email(recipients, subject, body)
-        _record_event(action["task_id"], action["id"], "email_sent",
+        _record_event(user_id, action["task_id"], action["id"], "email_sent",
                      f"邮件已发送给 {len(recipients)} 个收件人",
                      {"recipients": recipients})
     except Exception as exc:
         raise ToolboxError("EMAIL_SEND_FAILED", f"邮件发送失败: {exc}", status_code=500, tool_id=TOOL_ID) from exc
 
 
-def _execute_script_action(action: sqlite3.Row, server: sqlite3.Row, has_screen: bool) -> None:
+def _execute_script_action(user_id: str, action: sqlite3.Row, server: sqlite3.Row, has_screen: bool) -> None:
     """Execute script groups for this action.
 
     新逻辑：
@@ -1386,7 +1504,7 @@ def _execute_script_action(action: sqlite3.Row, server: sqlite3.Row, has_screen:
     action_id = action["id"]
     task_id = action["task_id"]
 
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         groups = connection.execute(
             "SELECT * FROM em_script_groups WHERE action_id = ? ORDER BY sort_order, created_at",
             (action_id,),
@@ -1400,14 +1518,14 @@ def _execute_script_action(action: sqlite3.Row, server: sqlite3.Row, has_screen:
         scripts_per_trigger = action["scripts_per_trigger"] or 1
         screen_name_prefix = action["script_screen_name"] or f"em_{action_id[:8]}"
         for i, cmd in enumerate(commands[:scripts_per_trigger]):
-            _run_single_script(cmd, i, screen_name_prefix, server, has_screen, task_id, action_id, group_id=None)
+            _run_single_script(user_id, cmd, i, screen_name_prefix, server, has_screen, task_id, action_id, group_id=None)
         return
 
     for group in groups:
         group_id = group["id"]
         screen_prefix = group["screen_name_prefix"] or f"em_{group_id[:8]}"
 
-        with get_connection() as connection:
+        with user_tool_connection_context(user_id, TOOL_ID) as connection:
             queue_item = connection.execute(
                 "SELECT * FROM em_script_queue WHERE group_id = ? ORDER BY position, created_at LIMIT 1",
                 (group_id,),
@@ -1421,11 +1539,11 @@ def _execute_script_action(action: sqlite3.Row, server: sqlite3.Row, has_screen:
         now = now_iso()
 
         # Execute the command (each command gets its own screen window)
-        screen_session = _run_single_script(cmd, 0, screen_prefix, server, has_screen, task_id, action_id, group_id=group_id)
+        screen_session = _run_single_script(user_id, cmd, 0, screen_prefix, server, has_screen, task_id, action_id, group_id=group_id)
 
         # Move from queue to history archive
         history_id = secrets.token_hex(10)
-        with get_connection() as connection:
+        with user_tool_connection_context(user_id, TOOL_ID) as connection:
             connection.execute("DELETE FROM em_script_queue WHERE id = ?", (item_id,))
             connection.execute(
                 "INSERT INTO em_script_history (id, group_id, command, triggered_at, screen_session) VALUES (?, ?, ?, ?, ?)",
@@ -1441,10 +1559,11 @@ def _execute_script_action(action: sqlite3.Row, server: sqlite3.Row, has_screen:
                     (session_id, group_id, history_id, screen_session, cmd, now),
                 )
             connection.commit()
-        _reorder_queue(group_id)
+        _reorder_queue(user_id, group_id)
 
 
 def _run_single_script(
+    user_id: str,
     cmd: str,
     idx: int,
     screen_prefix: str,
@@ -1465,7 +1584,7 @@ def _run_single_script(
     try:
         output = _run_ssh(server, full_cmd, timeout=30)
         _record_event(
-            task_id, action_id, "script_executed",
+            user_id, task_id, action_id, "script_executed",
             f"脚本已在远程服务器执行{(f' (screen: {screen_session})' if has_screen else '')}",
             {
                 "command": cmd[:200],
@@ -1487,7 +1606,7 @@ def _run_single_script(
 def get_task_history(task_id: str, user: User, hours: int = 24) -> dict[str, Any]:
     get_monitor_task(task_id, user)
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * RETENTION_DAYS)))
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         # 轻量查询：不加载 matched_processes（每条最多 50 个进程字符串的大 JSON），
         # 前端图表/日志面板只用 processCount/checkedAt/conditionMet/error，
         # 24h × 30s 间隔 ≈ 2880 条采样，去掉该列后传输体积大幅下降。
@@ -1509,30 +1628,35 @@ def get_task_history(task_id: str, user: User, hours: int = 24) -> dict[str, Any
 
 def get_alert_state(task_id: str, user: User) -> dict[str, Any] | None:
     get_monitor_task(task_id, user)
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
     return _public_alert_state(state) if state else None
 
 
 def reset_alert_state(task_id: str, user: User) -> dict[str, Any]:
-    """Manually reset alert state (resolve an active alert)."""
+    """Manually reset alert state (resolve an active alert / reset repeat counter)."""
     get_monitor_task(task_id, user)
     now = now_iso()
-    with get_connection() as connection:
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
             """
-            INSERT INTO em_alert_states (task_id, consecutive_meets, is_alerting, resolved_at, updated_at)
-            VALUES (?, 0, 0, ?, ?)
+            INSERT INTO em_alert_states (
+                task_id, consecutive_meets, is_alerting, resolved_at,
+                last_alerted_at, repeat_count, repeat_exhausted, updated_at
+            ) VALUES (?, 0, 0, ?, NULL, 0, 0, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 consecutive_meets = 0,
                 is_alerting = 0,
                 resolved_at = excluded.resolved_at,
+                last_alerted_at = NULL,
+                repeat_count = 0,
+                repeat_exhausted = 0,
                 updated_at = excluded.updated_at
             """,
             (task_id, now, now),
         )
         connection.commit()
-        _record_event(task_id, None, "resolved", "报警状态已被手动重置", {})
+        _record_event(user.id, task_id, None, "resolved", "报警状态已被手动重置（重复计数已清零）", {})
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
     return _public_alert_state(state)
 
@@ -1542,21 +1666,30 @@ def reset_alert_state(task_id: str, user: User) -> dict[str, Any]:
 # ============================================================
 
 def collect_due_checks() -> None:
-    """Called by scheduler to run all due monitoring checks."""
-    init_database()
-    now = datetime.now(timezone.utc)
-    with get_connection() as connection:
-        tasks = connection.execute(
-            "SELECT id, last_checked_at, check_interval_seconds FROM em_monitor_tasks WHERE enabled = 1",
-        ).fetchall()
+    """Called by scheduler to run all due monitoring checks.
 
-    for task_row in tasks:
-        task_id = task_row["id"]
-        if task_id and _task_check_due(task_row, now):
-            try:
-                run_monitor_check(task_id)
-            except Exception:
-                logger.exception("Failed to run monitor check for task %s", task_id)
+    Iterates over every user's per-tool database so that monitoring tasks
+    belonging to different users all get checked.
+    """
+    now = datetime.now(timezone.utc)
+    for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
+        init_database(user_id)
+        try:
+            with user_tool_connection_context(user_id, TOOL_ID) as connection:
+                tasks = connection.execute(
+                    "SELECT id, last_checked_at, check_interval_seconds FROM em_monitor_tasks WHERE enabled = 1",
+                ).fetchall()
+        except Exception:
+            logger.exception("Failed to read monitor tasks for user %s", user_id)
+            continue
+
+        for task_row in tasks:
+            task_id = task_row["id"]
+            if task_id and _task_check_due(task_row, now):
+                try:
+                    run_monitor_check(user_id, task_id)
+                except Exception:
+                    logger.exception("Failed to run monitor check for task %s (user %s)", task_id, user_id)
 
 
 def _task_check_due(task_row: sqlite3.Row, now: datetime) -> bool:
@@ -1638,10 +1771,10 @@ def _fernet() -> Fernet:
 # Internal helpers
 # ============================================================
 
-def _record_event(task_id: str, action_id: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> None:
-    init_database()
+def _record_event(user_id: str, task_id: str, action_id: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> None:
+    init_database(user_id)
     event_id = secrets.token_hex(12)
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute(
             """
             INSERT INTO em_alert_events (id, task_id, action_id, event_type, message, details_json, created_at)
@@ -1652,9 +1785,9 @@ def _record_event(task_id: str, action_id: str | None, event_type: str, message:
         connection.commit()
 
 
-def _prune_samples(task_id: str) -> None:
+def _prune_samples(user_id: str, task_id: str) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
-    with get_connection() as connection:
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         connection.execute("DELETE FROM em_samples WHERE task_id = ? AND checked_at < ?", (task_id, cutoff.isoformat()))
         connection.commit()
 
@@ -1671,6 +1804,7 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _public_task(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys() if hasattr(row, "keys") else []
     return {
         "id": row["id"],
         "serverId": row["server_id"],
@@ -1684,6 +1818,8 @@ def _public_task(row: sqlite3.Row) -> dict[str, Any]:
         "alertChangeAmount": row["alert_change_amount"],
         "confirmCount": row["confirm_count"],
         "checkIntervalSeconds": row["check_interval_seconds"],
+        "repeatIntervalSeconds": row["repeat_interval_seconds"] if "repeat_interval_seconds" in keys else 0,
+        "maxRepeatCount": row["max_repeat_count"] if "max_repeat_count" in keys else 0,
         "enabled": bool(row["enabled"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -1742,6 +1878,7 @@ def _public_event(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _public_alert_state(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys() if hasattr(row, "keys") else []
     return {
         "taskId": row["task_id"],
         "consecutiveMeets": row["consecutive_meets"],
@@ -1749,6 +1886,8 @@ def _public_alert_state(row: sqlite3.Row) -> dict[str, Any]:
         "isAlerting": bool(row["is_alerting"]),
         "lastAlertedAt": row["last_alerted_at"],
         "resolvedAt": row["resolved_at"],
+        "repeatCount": row["repeat_count"] if "repeat_count" in keys else 0,
+        "repeatExhausted": bool(row["repeat_exhausted"]) if "repeat_exhausted" in keys else False,
         "updatedAt": row["updated_at"],
     }
 

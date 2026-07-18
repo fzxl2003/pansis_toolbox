@@ -32,8 +32,13 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
-export async function apiDelete<T = unknown>(path: string): Promise<T> {
-  return requestJson<T>(path, { method: 'DELETE' });
+export async function apiDelete<T = unknown>(path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = { method: 'DELETE' };
+  if (body !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  return requestJson<T>(path, init);
 }
 
 export async function apiPostForm<T>(path: string, body: FormData): Promise<T> {

@@ -12,7 +12,6 @@ from tools.server_monitor.backend.service import (
     delete_directory_usage,
     directory_usage,
     history,
-    init_monitor_database,
     kill_gpu_process,
     list_directory_usages,
     list_servers,

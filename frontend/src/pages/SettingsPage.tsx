@@ -1,11 +1,11 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
-  ChevronDown,
-  ChevronRight,
+  Calendar,
+  Clock,
   Database,
   Eye,
   Globe,
-  HardDrive,
+  Info,
   KeyRound,
   Lock,
   Mail,
@@ -14,7 +14,6 @@ import {
   Trash2,
   UserPlus,
   Users,
-  Wrench,
 } from 'lucide-react';
 
 import { apiGet, apiPost } from '../api/client';
@@ -27,26 +26,31 @@ import {
   updateUserRole,
   type AuthUser,
 } from '../api/auth';
-import { fetchEmailConfig, saveEmailConfig, testEmailConfig, type EmailConfig, type EmailConfigPayload } from '../api/settings';
+import { fetchEmailConfig, saveEmailConfig, testEmailConfig, type EmailConfig, type EmailConfigPayload, fetchAbout, type AboutInfo } from '../api/settings';
 import {
-  clearMyStorage,
-  clearMyToolStorage,
-  clearToolStorage,
-  clearUserStorage,
-  clearUserToolStorage,
   fetchMyStorage,
   fetchStorageUsage,
   fetchToolAccess,
   saveToolAccess,
   type MyStorage,
   type StorageUsage,
+  type StorageUsageUser,
   type ToolAccessItem,
+} from '../api/tools';
+import {
+  fetchDataCategories,
+  fetchDataCount,
+  fetchDataUsage,
+  deleteData,
+  type DataCategoryUsage,
+  type DataDeletionResult,
+  type ToolDataCategories,
 } from '../api/tools';
 import { LoginPanel } from '../components/LoginPanel';
 
 type ManagedUser = AuthUser & { disabled: boolean };
 
-type TabId = 'personal' | 'users' | 'data' | 'access' | 'email';
+type TabId = 'personal' | 'users' | 'data' | 'access' | 'email' | 'about';
 
 const emptyEmailConfigForm: EmailConfigPayload = {
   smtpHost: '',
@@ -114,6 +118,7 @@ export function SettingsPage() {
     { id: 'data', label: '工具数据清理', icon: Database, adminOnly: true },
     { id: 'access', label: '工具可见性', icon: Eye, adminOnly: true },
     { id: 'email', label: '邮件配置', icon: Mail, adminOnly: true },
+    { id: 'about', label: '关于', icon: Info, adminOnly: false },
   ];
 
   const visibleTabs = tabs.filter((tab) => !tab.adminOnly || isAdmin);
@@ -163,6 +168,9 @@ export function SettingsPage() {
         {activeTab === 'email' && isAdmin && (
           <EmailTab onError={handleError} onSuccess={showSuccess} />
         )}
+        {activeTab === 'about' && (
+          <AboutTab onError={handleError} />
+        )}
       </div>
     </div>
   );
@@ -181,8 +189,6 @@ function PersonalTab({
 }) {
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '' });
   const [myStorage, setMyStorage] = useState<MyStorage | null>(null);
-  const [clearingTool, setClearingTool] = useState<string | null>(null);
-  const [clearingAll, setClearingAll] = useState(false);
 
   useEffect(() => {
     void loadMyStorage();
@@ -208,33 +214,11 @@ function PersonalTab({
     }
   }
 
-  async function handleClearMyTool(toolId: string, toolName: string) {
-    if (!window.confirm(`确认清除您在「${toolName}」中的数据？该操作不可恢复。`)) return;
-    setClearingTool(toolId);
-    try {
-      const result = await clearMyToolStorage(toolId);
-      onSuccess(`已清理 ${toolName}：删除 ${result.removedPaths.length} 个目录/文件`);
-      await loadMyStorage();
-    } catch (err) {
-      onError(err, '清理数据失败');
-    } finally {
-      setClearingTool(null);
-    }
-  }
-
-  async function handleClearAllMy() {
-    if (!window.confirm('确认清除您在所有工具中的个人数据？该操作不可恢复。')) return;
-    setClearingAll(true);
-    try {
-      const result = await clearMyStorage();
-      onSuccess(`已清理所有个人数据：删除 ${result.removedPaths.length} 个目录/文件`);
-      await loadMyStorage();
-    } catch (err) {
-      onError(err, '清理数据失败');
-    } finally {
-      setClearingAll(false);
-    }
-  }
+  const storageMap = useMemo(() => {
+    const m: Record<string, number> = {};
+    myStorage?.tools.forEach((t) => { m[t.toolId] = t.bytes; });
+    return m;
+  }, [myStorage]);
 
   return (
     <>
@@ -261,51 +245,14 @@ function PersonalTab({
         </form>
       </section>
 
-      <section className="panel">
-        <div className="result-header">
-          <span><HardDrive size={17} />我的数据占用</span>
-          {myStorage && myStorage.totalBytes > 0 && (
-            <button
-              className="chip"
-              type="button"
-              disabled={clearingAll}
-              onClick={() => void handleClearAllMy()}
-              style={{ color: 'var(--danger)' }}
-            >
-              <Trash2 size={14} />清除全部
-            </button>
-          )}
-        </div>
-        <div className="admin-notice" style={{ marginBottom: '12px' }}>
-          <Shield size={14} />
-          <span>
-            此处仅显示您的个人数据（文件存储）。工具的共享数据库数据由管理员在「工具数据清理」中管理。
-            总占用：<strong>{myStorage ? formatBytes(myStorage.totalBytes) : '加载中...'}</strong>
-          </span>
-        </div>
-        <div className="compact-list">
-          {myStorage?.tools.map((tool) => (
-            <div className="user-row" key={tool.toolId}>
-              <span>
-                <strong>{tool.toolName}</strong>
-                <small>{tool.toolId} · {formatBytes(tool.bytes)}</small>
-              </span>
-              <button
-                className="chip"
-                type="button"
-                disabled={clearingTool === tool.toolId || tool.bytes === 0}
-                onClick={() => void handleClearMyTool(tool.toolId, tool.toolName)}
-                style={tool.bytes === 0 ? { opacity: 0.5 } : { color: 'var(--danger)' }}
-              >
-                <Trash2 size={14} />清除
-              </button>
-            </div>
-          ))}
-          {myStorage && myStorage.tools.length === 0 && (
-            <div className="muted" style={{ padding: '12px 4px' }}>暂无工具数据</div>
-          )}
-        </div>
-      </section>
+      <DataCleanupPanel
+        isAdminMode={false}
+        onError={onError}
+        onSuccess={onSuccess}
+        storageMap={storageMap}
+        totalBytes={myStorage?.totalBytes ?? 0}
+        onAfterDelete={() => void loadMyStorage()}
+      />
     </>
   );
 }
@@ -497,9 +444,6 @@ function ToolDataTab({
   onSuccess: (msg: string) => void;
 }) {
   const [usage, setUsage] = useState<StorageUsage | null>(null);
-  const [expandedTool, setExpandedTool] = useState<string | null>(null);
-  const [expandedUser, setExpandedUser] = useState<string | null>(null);
-  const [clearing, setClearing] = useState<string | null>(null);
 
   useEffect(() => {
     void loadUsage();
@@ -514,67 +458,13 @@ function ToolDataTab({
     }
   }
 
-  function matrixForTool(toolId: string) {
-    return usage?.users
-      .map((u) => ({
-        user: u,
-        bytes: usage.matrix.find((m) => m.userId === u.userId && m.toolId === toolId)?.bytes ?? 0,
-      }))
-      .filter((e) => e.bytes > 0)
-      .sort((a, b) => b.bytes - a.bytes) ?? [];
-  }
+  const storageMap = useMemo(() => {
+    const m: Record<string, number> = {};
+    usage?.tools.forEach((t) => { m[t.toolId] = t.totalBytes; });
+    return m;
+  }, [usage]);
 
-  function matrixForUser(userId: string) {
-    return usage?.tools
-      .map((t) => ({
-        tool: t,
-        bytes: usage.matrix.find((m) => m.userId === userId && m.toolId === t.toolId)?.bytes ?? 0,
-      }))
-      .filter((e) => e.bytes > 0)
-      .sort((a, b) => b.bytes - a.bytes) ?? [];
-  }
-
-  async function handleClearTool(toolId: string, toolName: string) {
-    if (!window.confirm(`确认清除「${toolName}」的所有数据（数据库表+所有用户文件+共享文件）？该操作不可恢复。`)) return;
-    setClearing(`tool-${toolId}`);
-    try {
-      const result = await clearToolStorage(toolId);
-      onSuccess(`已清理 ${toolName}：删除 ${result.droppedTables.length} 张表、${result.removedPaths.length} 个目录/文件`);
-      await loadUsage();
-    } catch (err) {
-      onError(err, '清理工具数据失败');
-    } finally {
-      setClearing(null);
-    }
-  }
-
-  async function handleClearUserTool(toolId: string, userId: string, toolName: string, userName: string) {
-    if (!window.confirm(`确认清除用户「${userName}」在工具「${toolName}」中的数据？`)) return;
-    setClearing(`ut-${toolId}-${userId}`);
-    try {
-      const result = await clearUserToolStorage(toolId, userId);
-      onSuccess(`已清理：删除 ${result.removedPaths.length} 个目录/文件`);
-      await loadUsage();
-    } catch (err) {
-      onError(err, '清理数据失败');
-    } finally {
-      setClearing(null);
-    }
-  }
-
-  async function handleClearUser(userId: string, userName: string) {
-    if (!window.confirm(`确认清除用户「${userName}」在所有工具中的个人数据？`)) return;
-    setClearing(`user-${userId}`);
-    try {
-      const result = await clearUserStorage(userId);
-      onSuccess(`已清理 ${userName} 的所有数据：删除 ${result.removedPaths.length} 个目录/文件`);
-      await loadUsage();
-    } catch (err) {
-      onError(err, '清理用户数据失败');
-    } finally {
-      setClearing(null);
-    }
-  }
+  const users = useMemo(() => (usage?.users ?? []).slice().sort((a, b) => b.totalBytes - a.totalBytes), [usage]);
 
   return (
     <>
@@ -590,142 +480,15 @@ function ToolDataTab({
         </div>
       </section>
 
-      {/* ── By Tool ── */}
-      <section className="panel">
-        <div className="result-header">
-          <span><Wrench size={17} />按工具清理</span>
-        </div>
-        <div className="compact-list">
-          {usage?.tools.map((tool) => {
-            const userEntries = matrixForTool(tool.toolId);
-            const isOpen = expandedTool === tool.toolId;
-            return (
-              <div key={tool.toolId} className="storage-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', width: '100%' }}>
-                  <span style={{ minWidth: 0 }}>
-                    <strong>{tool.toolName}</strong>
-                    <small>
-                      {tool.toolId} · 总计 {formatBytes(tool.totalBytes)}
-                      {tool.sharedBytes > 0 && ` · 共享 ${formatBytes(tool.sharedBytes)}`}
-                      {tool.userBytes > 0 && ` · 用户 ${formatBytes(tool.userBytes)}`}
-                    </small>
-                  </span>
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
-                    {userEntries.length > 0 && (
-                      <button
-                        className="chip"
-                        type="button"
-                        onClick={() => setExpandedTool(isOpen ? null : tool.toolId)}
-                      >
-                        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        {userEntries.length} 位用户
-                      </button>
-                    )}
-                    <button
-                      className="chip"
-                      type="button"
-                      disabled={clearing === `tool-${tool.toolId}`}
-                      onClick={() => void handleClearTool(tool.toolId, tool.toolName)}
-                      style={{ color: 'var(--danger)' }}
-                    >
-                      <Trash2 size={14} />清除全部
-                    </button>
-                  </div>
-                </div>
-                {isOpen && userEntries.length > 0 && (
-                  <div className="storage-sublist">
-                    {userEntries.map((entry) => (
-                      <div className="user-row" key={entry.user.userId} style={{ padding: '6px 10px' }}>
-                        <span>
-                          <strong>{entry.user.displayName}</strong>
-                          <small>{entry.user.username} · {formatBytes(entry.bytes)}</small>
-                        </span>
-                        <button
-                          className="chip"
-                          type="button"
-                          disabled={clearing === `ut-${tool.toolId}-${entry.user.userId}`}
-                          onClick={() => void handleClearUserTool(tool.toolId, entry.user.userId, tool.toolName, entry.user.displayName)}
-                          style={{ color: 'var(--danger)' }}
-                        >
-                          <Trash2 size={14} />清除
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* ── By User ── */}
-      <section className="panel">
-        <div className="result-header">
-          <span><Users size={17} />按用户清理</span>
-        </div>
-        <div className="compact-list">
-          {usage?.users.filter((u) => u.totalBytes > 0).map((user) => {
-            const toolEntries = matrixForUser(user.userId);
-            const isOpen = expandedUser === user.userId;
-            return (
-              <div key={user.userId} className="storage-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', width: '100%' }}>
-                  <span style={{ minWidth: 0 }}>
-                    <strong>{user.displayName}</strong>
-                    <small>{user.username} · {formatBytes(user.totalBytes)}</small>
-                  </span>
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
-                    {toolEntries.length > 0 && (
-                      <button
-                        className="chip"
-                        type="button"
-                        onClick={() => setExpandedUser(isOpen ? null : user.userId)}
-                      >
-                        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        {toolEntries.length} 个工具
-                      </button>
-                    )}
-                    <button
-                      className="chip"
-                      type="button"
-                      disabled={clearing === `user-${user.userId}`}
-                      onClick={() => void handleClearUser(user.userId, user.displayName)}
-                      style={{ color: 'var(--danger)' }}
-                    >
-                      <Trash2 size={14} />清除全部
-                    </button>
-                  </div>
-                </div>
-                {isOpen && toolEntries.length > 0 && (
-                  <div className="storage-sublist">
-                    {toolEntries.map((entry) => (
-                      <div className="user-row" key={entry.tool.toolId} style={{ padding: '6px 10px' }}>
-                        <span>
-                          <strong>{entry.tool.toolName}</strong>
-                          <small>{entry.tool.toolId} · {formatBytes(entry.bytes)}</small>
-                        </span>
-                        <button
-                          className="chip"
-                          type="button"
-                          disabled={clearing === `ut-${entry.tool.toolId}-${user.userId}`}
-                          onClick={() => void handleClearUserTool(entry.tool.toolId, user.userId, entry.tool.toolName, user.displayName)}
-                          style={{ color: 'var(--danger)' }}
-                        >
-                          <Trash2 size={14} />清除
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-          {usage && usage.users.filter((u) => u.totalBytes > 0).length === 0 && (
-            <div className="muted" style={{ padding: '12px 4px' }}>暂无用户数据</div>
-          )}
-        </div>
-      </section>
+      <DataCleanupPanel
+        isAdminMode={true}
+        onError={onError}
+        onSuccess={onSuccess}
+        storageMap={storageMap}
+        totalBytes={usage?.grandTotal ?? 0}
+        users={users}
+        onAfterDelete={() => void loadUsage()}
+      />
     </>
   );
 }
@@ -1011,6 +774,839 @@ function EmailTab({
             </button>
           </div>
         </form>
+      )}
+    </section>
+  );
+}
+
+// ── Unified Data Cleanup Panel ─────────────────────────────────────────────
+
+const ALL_TOOLS = '__all__';
+
+/** Format a date range (YYYY-MM-DD) into a compact label. */
+function rangeLabel(start: string, end: string): string {
+  if (!start && !end) return '全部时间';
+  return `${start || '…'} ~ ${end || '…'}`;
+}
+
+/** A compact button that opens a popover with two date inputs (day granularity). */
+function DateRangePicker({
+  start,
+  end,
+  onChange,
+  disabled,
+}: {
+  start: string;
+  end: string;
+  onChange: (start: string, end: string) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        className="chip small"
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={disabled ? { opacity: 0.5 } : undefined}
+      >
+        <Calendar size={13} />{rangeLabel(start, end)}
+      </button>
+      {open && !disabled && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 20 }}
+            onClick={() => setOpen(false)}
+          />
+          <div
+            className="date-range-popover"
+            style={{
+              position: 'absolute',
+              zIndex: 21,
+              top: 'calc(100% + 6px)',
+              right: 0,
+              display: 'grid',
+              gap: 8,
+              padding: 12,
+              minWidth: 230,
+            }}
+          >
+            <label className="date-range-field">
+              <span>起始日期（含）</span>
+              <input
+                className="text-input"
+                type="date"
+                value={start}
+                max={end || undefined}
+                onChange={(e) => onChange(e.target.value, end)}
+              />
+            </label>
+            <label className="date-range-field">
+              <span>结束日期（含）</span>
+              <input
+                className="text-input"
+                type="date"
+                value={end}
+                min={start || undefined}
+                onChange={(e) => onChange(start, e.target.value)}
+              />
+            </label>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                className="chip tiny"
+                type="button"
+                onClick={() => { onChange('', ''); setOpen(false); }}
+              >
+                清除
+              </button>
+              <button className="chip tiny" type="button" onClick={() => setOpen(false)}>
+                确定
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Donut Chart ───────────────────────────────────────────────────────────
+
+const DONUT_COLORS = [
+  '#1a73e8', '#0f766e', '#d97706', '#dc2626', '#7c3aed',
+  '#0891b2', '#c026d3', '#65a30d', '#ea580c', '#4f46e5',
+  '#0d9488', '#be185d', '#4338ca', '#b45309', '#0369a1',
+];
+
+type DonutSegment = {
+  id: string;
+  label: string;
+  value: number;
+  color: string;
+};
+
+function DonutChart({
+  segments,
+  size = 200,
+  thickness = 34,
+  centerValue,
+  centerTitle,
+  selectedId,
+  onSelect,
+  formatValue,
+  emptyText = '暂无数据',
+}: {
+  segments: DonutSegment[];
+  size?: number;
+  thickness?: number;
+  centerValue?: string;
+  centerTitle?: string;
+  selectedId?: string | null;
+  onSelect?: (id: string) => void;
+  formatValue?: (v: number) => string;
+  emptyText?: string;
+}) {
+  const total = segments.reduce((sum, s) => sum + s.value, 0);
+  const radius = size / 2 - thickness / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const circumference = 2 * Math.PI * radius;
+  const fmt = formatValue ?? ((v: number) => String(v));
+
+  if (total === 0 || segments.length === 0) {
+    return (
+      <div className="donut-card">
+        <div className="donut-chart-wrapper" style={{ width: size, height: size }}>
+          <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+            <circle cx={cx} cy={cy} r={radius} fill="none" stroke="#eef2f7" strokeWidth={thickness} />
+          </svg>
+          <div className="donut-center">
+            <small className="muted">{emptyText}</small>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  let cumulativeOffset = 0;
+  return (
+    <div className="donut-card">
+      <div className="donut-chart-wrapper" style={{ width: size, height: size }}>
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="donut-svg">
+          <circle cx={cx} cy={cy} r={radius} fill="none" stroke="#f1f5f9" strokeWidth={thickness} />
+          {segments.map((seg) => {
+            const fraction = seg.value / total;
+            const segLength = fraction * circumference;
+            const dashOffset = -cumulativeOffset;
+            cumulativeOffset += segLength;
+            const isSelected = selectedId === seg.id;
+            const isDimmed = selectedId != null && !isSelected;
+            return (
+              <circle
+                key={seg.id}
+                cx={cx}
+                cy={cy}
+                r={radius}
+                fill="none"
+                stroke={seg.color}
+                strokeWidth={thickness}
+                strokeDasharray={`${Math.max(segLength - 1.5, 0.5)} ${circumference}`}
+                strokeDashoffset={dashOffset}
+                transform={`rotate(-90 ${cx} ${cy})`}
+                style={{
+                  cursor: onSelect ? 'pointer' : 'default',
+                  opacity: isDimmed ? 0.3 : 1,
+                  transition: 'opacity 150ms ease',
+                }}
+                onClick={onSelect ? () => onSelect(seg.id) : undefined}
+              />
+            );
+          })}
+        </svg>
+        <div className="donut-center">
+          {centerValue && <strong>{centerValue}</strong>}
+          {centerTitle && <small className="muted">{centerTitle}</small>}
+        </div>
+      </div>
+      <ul className="donut-legend">
+        {segments.map((seg) => {
+          const pct = total > 0 ? (seg.value / total) * 100 : 0;
+          const isSelected = selectedId === seg.id;
+          return (
+            <li
+              key={seg.id}
+              className={isSelected ? 'active' : ''}
+              style={{ cursor: onSelect ? 'pointer' : 'default' }}
+              onClick={onSelect ? () => onSelect(seg.id) : undefined}
+            >
+              <span className="donut-legend-dot" style={{ background: seg.color }} />
+              <span className="donut-legend-label">{seg.label}</span>
+              <span className="donut-legend-value">{fmt(seg.value)} · {pct.toFixed(1)}%</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+type CategoryState = { selected: boolean; start: string; end: string };
+
+function DataCleanupPanel({
+  onError,
+  onSuccess,
+  isAdminMode,
+  storageMap,
+  totalBytes,
+  users,
+  onAfterDelete,
+}: {
+  onError: (err: unknown, fallback: string) => void;
+  onSuccess: (msg: string) => void;
+  isAdminMode: boolean;
+  storageMap: Record<string, number>;
+  totalBytes: number;
+  users?: StorageUsageUser[];
+  onAfterDelete?: () => void | Promise<void>;
+}) {
+  const ALL_USERS = '__all__';
+  const [tools, setTools] = useState<ToolDataCategories[]>([]);
+  const [selectedTool, setSelectedTool] = useState<string>(ALL_TOOLS);
+  const [selectedUser, setSelectedUser] = useState<string>(ALL_USERS);
+  const [usage, setUsage] = useState<DataCategoryUsage[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [catState, setCatState] = useState<Record<string, CategoryState>>({});
+  const [globalRange, setGlobalRange] = useState<{ start: string; end: string }>({ start: '', end: '' });
+  const [donutFocusTool, setDonutFocusTool] = useState<string | null>(null);
+  const [donutCatUsage, setDonutCatUsage] = useState<DataCategoryUsage[]>([]);
+  const [donutLoading, setDonutLoading] = useState(false);
+  // Selected (date-range-filtered) row counts per category, keyed by category name.
+  const [selectedCounts, setSelectedCounts] = useState<Record<string, number>>({});
+  const [countLoading, setCountLoading] = useState(false);
+
+  // In admin mode, null = all users; otherwise the current user (null is fine
+  // because the backend defaults to self for non-admins).
+  const targetUserId = isAdminMode
+    ? (selectedUser === ALL_USERS ? null : selectedUser)
+    : null;
+
+  useEffect(() => {
+    void loadCategories();
+  }, []);
+
+  async function loadCategories() {
+    setLoading(true);
+    try {
+      const data = await fetchDataCategories();
+      setTools(data.tools);
+    } catch (err) {
+      onError(err, '加载数据分类失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (selectedTool === ALL_TOOLS) {
+      setUsage([]);
+      setCatState({});
+      return;
+    }
+    void loadUsage(selectedTool, targetUserId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTool, selectedUser]);
+
+  async function loadUsage(toolId: string, userId: string | null) {
+    try {
+      const data = await fetchDataUsage(toolId, isAdminMode ? userId : undefined);
+      setUsage(data.categories);
+      const tool = tools.find((t) => t.toolId === toolId);
+      const next: Record<string, CategoryState> = {};
+      tool?.categories.forEach((c) => {
+        next[c.name] = { selected: false, start: '', end: '' };
+      });
+      setCatState(next);
+    } catch (err) {
+      onError(err, '加载数据用量失败');
+    }
+  }
+
+  // When the donut focus tool changes, fetch its category usage for the second donut.
+  useEffect(() => {
+    if (!donutFocusTool) {
+      setDonutCatUsage([]);
+      return;
+    }
+    // If the focused tool is the same as the selected tool, reuse `usage`.
+    if (donutFocusTool === selectedTool && usage.length > 0) {
+      setDonutCatUsage(usage);
+      return;
+    }
+    let cancelled = false;
+    setDonutLoading(true);
+    fetchDataUsage(donutFocusTool, isAdminMode ? targetUserId : undefined)
+      .then((data) => {
+        if (!cancelled) setDonutCatUsage(data.categories);
+      })
+      .catch((err) => {
+        if (!cancelled) onError(err, '加载数据用量失败');
+      })
+      .finally(() => {
+        if (!cancelled) setDonutLoading(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [donutFocusTool, targetUserId]);
+
+  function patchCat(name: string, patch: Partial<CategoryState>) {
+    setCatState((prev) => ({
+      ...prev,
+      [name]: { ...(prev[name] ?? { selected: false, start: '', end: '' }), ...patch },
+    }));
+  }
+
+  // Fetch date-range-filtered ("selected") row counts so the UI can show
+  // "selected X / total Y" when a date range is chosen.
+  useEffect(() => {
+    if (selectedTool === ALL_TOOLS) {
+      setSelectedCounts({});
+      return;
+    }
+    const tool = tools.find((t) => t.toolId === selectedTool);
+    if (!tool) {
+      setSelectedCounts({});
+      return;
+    }
+    // Only time-based categories with a non-empty date range need preview counts.
+    const items = tool.categories
+      .filter((c) => c.timeColumn !== null)
+      .map((c) => {
+        const st = catState[c.name];
+        return { category: c.name, startDate: st?.start || null, endDate: st?.end || null };
+      })
+      .filter((it) => it.startDate || it.endDate);
+    if (items.length === 0) {
+      setSelectedCounts({});
+      return;
+    }
+    let cancelled = false;
+    setCountLoading(true);
+    fetchDataCount({ toolId: selectedTool, items, userId: targetUserId })
+      .then((data) => {
+        if (!cancelled) setSelectedCounts(data.counts);
+      })
+      .catch((err) => {
+        if (!cancelled) onError(err, '获取选中计数失败');
+      })
+      .finally(() => {
+        if (!cancelled) setCountLoading(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catState, selectedTool, tools, selectedUser]);
+
+  // For all-tools mode, fetch the global date-range-filtered count per tool.
+  const allToolsSelectedTotal = useMemo(() => {
+    if (selectedTool !== ALL_TOOLS) return null;
+    if (!globalRange.start && !globalRange.end) return null;
+    return Object.values(selectedCounts).reduce((s, n) => s + n, 0);
+  }, [selectedTool, globalRange, selectedCounts]);
+
+  useEffect(() => {
+    if (selectedTool !== ALL_TOOLS) {
+      setSelectedCounts({});
+      return;
+    }
+    if (!globalRange.start && !globalRange.end) {
+      setSelectedCounts({});
+      return;
+    }
+    // Backend counts per category; for "all tools" we query each tool with
+    // category=null (all time-based categories) in the chosen date range.
+    let cancelled = false;
+    setCountLoading(true);
+    Promise.all(
+      tools.map((t) =>
+        fetchDataCount({
+          toolId: t.toolId,
+          items: [{ category: null, startDate: globalRange.start || null, endDate: globalRange.end || null }],
+          userId: targetUserId,
+        }).then((data) => ({ toolId: t.toolId, count: data.counts['__all__'] ?? 0 })),
+      ),
+    )
+      .then((results) => {
+        if (cancelled) return;
+        const map: Record<string, number> = {};
+        results.forEach((r) => { map[r.toolId] = r.count; });
+        setSelectedCounts(map);
+      })
+      .catch((err) => {
+        if (!cancelled) onError(err, '获取选中计数失败');
+      })
+      .finally(() => {
+        if (!cancelled) setCountLoading(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTool, globalRange, tools, selectedUser]);
+
+  function countDeleted(result: DataDeletionResult): number {
+    let total = 0;
+    for (const cat of Object.keys(result.deleted)) {
+      for (const table of Object.keys(result.deleted[cat])) {
+        total += result.deleted[cat][table];
+      }
+    }
+    return total;
+  }
+
+  async function handleDelete() {
+    const scopeLabel = isAdminMode
+      ? (targetUserId ? '用户' : '所有用户')
+      : '您';
+    const userClause = isAdminMode && targetUserId
+      ? `「${users?.find((u) => u.userId === targetUserId)?.displayName ?? targetUserId}」的`
+      : '';
+
+    if (selectedTool === ALL_TOOLS) {
+      const timeLabel = rangeLabel(globalRange.start, globalRange.end);
+      if (!window.confirm(`确认删除${userClause || scopeLabel}在「全部工具」中「${timeLabel}」的数据？该操作不可恢复。`)) return;
+      setDeleting(true);
+      try {
+        let total = 0;
+        let message: string | null = null;
+        for (const t of tools) {
+          const result = await deleteData({
+            toolId: t.toolId,
+            category: null,
+            startDate: globalRange.start || null,
+            endDate: globalRange.end || null,
+            userId: targetUserId,
+          });
+          if (result.message) message = result.message;
+          total += countDeleted(result);
+        }
+        if (message) onSuccess(message);
+        else onSuccess(`已删除 ${total} 条记录`);
+        await onAfterDelete?.();
+      } catch (err) {
+        onError(err, '删除数据失败');
+      } finally {
+        setDeleting(false);
+      }
+      return;
+    }
+
+    const tool = tools.find((t) => t.toolId === selectedTool);
+    if (!tool) return;
+
+    const selectedCats = tool.categories.filter((c) => catState[c.name]?.selected);
+    const catsToDelete = selectedCats.length > 0 ? selectedCats : tool.categories;
+    const descList = catsToDelete.map((c) => c.description).join('、');
+    if (!window.confirm(`确认删除${userClause || scopeLabel}在「${tool.toolName}」中的「${descList}」？该操作不可恢复。`)) return;
+
+    setDeleting(true);
+    try {
+      let total = 0;
+      let message: string | null = null;
+      for (const c of catsToDelete) {
+        const st = catState[c.name];
+        // Non-time-based categories ignore the date range (delete all of their rows).
+        const start = c.timeColumn ? (st?.start || null) : null;
+        const end = c.timeColumn ? (st?.end || null) : null;
+        const result = await deleteData({
+          toolId: selectedTool,
+          category: c.name,
+          startDate: start,
+          endDate: end,
+          userId: targetUserId,
+        });
+        if (result.message) message = result.message;
+        total += countDeleted(result);
+      }
+      if (message) onSuccess(message);
+      else onSuccess(`已删除 ${total} 条记录`);
+      await onAfterDelete?.();
+      await loadUsage(selectedTool, targetUserId);
+    } catch (err) {
+      onError(err, '删除数据失败');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const selectedToolData = tools.find((t) => t.toolId === selectedTool);
+  const selectedCount = selectedToolData
+    ? selectedToolData.categories.filter((c) => catState[c.name]?.selected).length
+    : 0;
+
+  const deleteLabel = deleting
+    ? '删除中...'
+    : selectedTool === ALL_TOOLS
+      ? '删除全部工具数据'
+      : selectedCount > 0
+        ? `删除选中 ${selectedCount} 项`
+        : '删除全部数据';
+
+  return (
+    <section className="panel">
+      <div className="result-header">
+        <span><Clock size={17} />数据清理</span>
+        <small className="muted">总占用 {formatBytes(totalBytes)}</small>
+      </div>
+      <div className="admin-notice" style={{ marginBottom: '12px' }}>
+        <Shield size={14} />
+        <span>
+          选择工具与数据分类，可按时间范围精确删除。
+          {isAdminMode
+            ? (targetUserId
+                ? `管理员模式：将影响用户「${users?.find((u) => u.userId === targetUserId)?.displayName ?? targetUserId}」的数据。`
+                : '管理员模式：将影响所有用户的数据。')
+            : '仅删除您自己的数据。'}
+        </span>
+      </div>
+
+      {tools.length === 0 && !loading && (
+        <div className="muted" style={{ padding: '12px 4px' }}>暂无已注册数据分类的工具</div>
+      )}
+
+      {tools.length > 0 && (
+        <>
+          {/* Tool selector + (admin) user selector */}
+          <div className="responsive-row" style={{ gap: '12px', marginBottom: '12px' }}>
+            <div className="form-group" style={{ flex: '1 1 200px', marginBottom: 0 }}>
+              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
+                选择工具
+              </label>
+              <select
+                className="text-input"
+                value={selectedTool}
+                onChange={(e) => setSelectedTool(e.target.value)}
+                disabled={loading}
+              >
+                <option value={ALL_TOOLS}>全部工具</option>
+                {tools.map((t) => (
+                  <option key={t.toolId} value={t.toolId}>{t.toolName}</option>
+                ))}
+              </select>
+            </div>
+            {isAdminMode && users && users.length > 0 && (
+              <div className="form-group" style={{ flex: '1 1 200px', marginBottom: 0 }}>
+                <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
+                  选择用户
+                </label>
+                <select
+                  className="text-input"
+                  value={selectedUser}
+                  onChange={(e) => setSelectedUser(e.target.value)}
+                  disabled={loading}
+                >
+                  <option value={ALL_USERS}>全部用户</option>
+                  {users.map((u) => (
+                    <option key={u.userId} value={u.userId}>
+                      {u.displayName}（{u.username}）{u.totalBytes > 0 ? ` · ${formatBytes(u.totalBytes)}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {selectedTool === ALL_TOOLS ? (
+            <>
+              {/* All-tools mode: donut visualization + global time range */}
+              <div
+                className="storage-donuts"
+                style={{ gridTemplateColumns: donutFocusTool ? '1fr 1fr' : '1fr' }}
+              >
+                <DonutChart
+                  segments={tools
+                    .filter((t) => (storageMap[t.toolId] ?? 0) > 0)
+                    .map((t, i) => ({
+                      id: t.toolId,
+                      label: t.toolName,
+                      value: storageMap[t.toolId] ?? 0,
+                      color: DONUT_COLORS[i % DONUT_COLORS.length],
+                    }))}
+                  size={200}
+                  thickness={34}
+                  centerValue={formatBytes(totalBytes)}
+                  centerTitle="总占用"
+                  selectedId={donutFocusTool}
+                  onSelect={(id) => setDonutFocusTool((prev) => (prev === id ? null : id))}
+                  formatValue={(v) => formatBytes(v)}
+                  emptyText="暂无存储数据"
+                />
+                {donutFocusTool && (
+                  <DonutChart
+                    segments={donutCatUsage
+                      .filter((u) => u.totalRows > 0)
+                      .map((u, i) => ({
+                        id: u.category,
+                        label: u.description,
+                        value: u.totalRows,
+                        color: DONUT_COLORS[i % DONUT_COLORS.length],
+                      }))}
+                    size={200}
+                    thickness={34}
+                    centerValue={
+                      donutLoading
+                        ? '...'
+                        : `${donutCatUsage.reduce((s, u) => s + u.totalRows, 0)} 条`
+                    }
+                    centerTitle={
+                      tools.find((t) => t.toolId === donutFocusTool)?.toolName ?? '记录数占比'
+                    }
+                    formatValue={(v) => `${v} 条`}
+                    emptyText={donutLoading ? '加载中...' : '暂无记录'}
+                  />
+                )}
+              </div>
+              {donutFocusTool ? (
+                <small className="muted" style={{ textAlign: 'center', display: 'block', marginBottom: '12px' }}>
+                  左图为各工具存储占用占比，右图为「{tools.find((t) => t.toolId === donutFocusTool)?.toolName}」各数据分类的记录数占比。点击左侧扇区可切换工具，再次点击可取消。
+                </small>
+              ) : (
+                <small className="muted" style={{ textAlign: 'center', display: 'block', marginBottom: '12px' }}>
+                  各工具存储占用占比。点击环状图任一扇区可查看该工具的数据分类分布。
+                </small>
+              )}
+
+              {/* Time range */}
+              <div className="form-group" style={{ marginBottom: '12px' }}>
+                <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '6px' }}>
+                  时间范围
+                </label>
+                <DateRangePicker
+                  start={globalRange.start}
+                  end={globalRange.end}
+                  onChange={(s, e) => setGlobalRange({ start: s, end: e })}
+                />
+              </div>
+              {allToolsSelectedTotal !== null && (
+                <div className="admin-notice" style={{ marginBottom: '12px' }}>
+                  <Shield size={14} />
+                  <span>
+                    所选时间范围内共 <strong>{countLoading ? '...' : `${allToolsSelectedTotal} 条`}</strong> 记录将被删除（总占用 {formatBytes(totalBytes)}）。
+                  </span>
+                </div>
+              )}
+              <div className="admin-notice" style={{ marginBottom: '12px' }}>
+                <Shield size={14} />
+                <span>将删除全部工具在所选时间范围内的全部数据（仅含支持时间维度的数据分类）。</span>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Single-tool mode: donut + per-category selection + per-category date range */}
+              {selectedToolData && (
+                <>
+                  <div className="responsive-row between" style={{ marginBottom: '8px' }}>
+                    <small className="muted">{selectedToolData.toolId}</small>
+                    <small className="muted">占用 {formatBytes(storageMap[selectedToolData.toolId] ?? 0)}</small>
+                  </div>
+
+                  {/* Category proportion donut */}
+                  <div className="storage-donuts" style={{ gridTemplateColumns: '1fr', marginBottom: '12px' }}>
+                    <DonutChart
+                      segments={usage
+                        .filter((u) => u.totalRows > 0)
+                        .map((u, i) => ({
+                          id: u.category,
+                          label: u.description,
+                          value: u.totalRows,
+                          color: DONUT_COLORS[i % DONUT_COLORS.length],
+                        }))}
+                      size={180}
+                      thickness={30}
+                      centerValue={
+                        Object.keys(selectedCounts).length > 0
+                          ? `${Object.values(selectedCounts).reduce((s, n) => s + n, 0)} / ${usage.reduce((s, u) => s + u.totalRows, 0)} 条`
+                          : `${usage.reduce((s, u) => s + u.totalRows, 0)} 条`
+                      }
+                      centerTitle={Object.keys(selectedCounts).length > 0 ? '选中 / 全部记录' : '记录数占比'}
+                      formatValue={(v) => `${v} 条`}
+                      emptyText="暂无记录"
+                    />
+                  </div>
+
+                  {/* Category checkboxes */}
+                  <div className="compact-list" style={{ marginBottom: '12px' }}>
+                    {selectedToolData.categories.map((cat) => {
+                      const usageItem = usage.find((u) => u.category === cat.name);
+                      const rowCount = usageItem?.totalRows ?? 0;
+                      const isTimeBased = cat.timeColumn !== null;
+                      const st = catState[cat.name] ?? { selected: false, start: '', end: '' };
+                      const hasRange = !!(st.start || st.end);
+                      const selCount = hasRange ? (selectedCounts[cat.name] ?? null) : null;
+                      return (
+                        <div className="user-row" key={cat.name} style={{ alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', flex: '1 1 220px', minWidth: 0 }}>
+                            <input
+                              type="checkbox"
+                              checked={st.selected}
+                              onChange={() => patchCat(cat.name, { selected: !st.selected })}
+                            />
+                            <span>
+                              <strong>{cat.description}</strong>
+                              <small>
+                                {cat.name} · {rowCount} 条记录
+                                {selCount !== null && ` · 选中 ${selCount} 条`}
+                                {cat.storage === 'platform_db' ? ' · 共享数据库' : ' · 用户数据库'}
+                                {!isTimeBased && ' · 配置数据（不支持按时间删除）'}
+                              </small>
+                            </span>
+                          </label>
+                          {isTimeBased && (
+                            <DateRangePicker
+                              start={st.start}
+                              end={st.end}
+                              onChange={(s, e) => patchCat(cat.name, { start: s, end: e })}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          <div className="responsive-actions">
+            <button
+              className="chip"
+              type="button"
+              disabled={deleting || tools.length === 0}
+              onClick={() => void handleDelete()}
+              style={{ color: 'var(--danger)' }}
+            >
+              <Trash2 size={14} />{deleteLabel}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ── About Tab ─────────────────────────────────────────────────────────────
+
+function AboutTab({
+  onError,
+}: {
+  onError: (err: unknown, fallback: string) => void;
+}) {
+  const [about, setAbout] = useState<AboutInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    void loadAbout();
+  }, []);
+
+  async function loadAbout() {
+    setLoading(true);
+    try {
+      const data = await fetchAbout();
+      setAbout(data);
+    } catch (err) {
+      onError(err, '加载关于信息失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="result-header">
+        <span><Info size={17} />关于</span>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: '24px', color: 'var(--color-muted)', textAlign: 'center' }}>
+          加载中…
+        </div>
+      ) : about ? (
+        <div style={{ padding: '20px', maxWidth: '640px' }}>
+          {about.title && (
+            <h2 style={{ margin: '0 0 8px', fontSize: '20px' }}>{about.title}</h2>
+          )}
+          {about.description && (
+            <p style={{ margin: '0 0 20px', color: 'var(--color-muted)', lineHeight: 1.6 }}>
+              {about.description}
+            </p>
+          )}
+          {about.items && about.items.length > 0 && (
+            <dl style={{ margin: 0, display: 'grid', gap: '12px' }}>
+              {about.items.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="user-row"
+                  style={{ alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px' }}
+                >
+                  <dt style={{ color: 'var(--color-muted)', fontSize: '13px' }}>{item.label}</dt>
+                  <dd style={{ margin: 0, fontWeight: 500 }}>
+                    {item.type === 'email' && item.value ? (
+                      <a href={`mailto:${item.value}`} style={{ color: 'var(--color-primary)' }}>{item.value}</a>
+                    ) : item.type === 'url' && item.value ? (
+                      <a href={item.value} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>{item.value}</a>
+                    ) : (
+                      item.value
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {!about.title && !about.description && (!about.items || about.items.length === 0) && (
+            <p style={{ color: 'var(--color-muted)' }}>暂无关于信息。</p>
+          )}
+        </div>
+      ) : (
+        <div style={{ padding: '24px', color: 'var(--color-muted)' }}>暂无关于信息。</div>
       )}
     </section>
   );

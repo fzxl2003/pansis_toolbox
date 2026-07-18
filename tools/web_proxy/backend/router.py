@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import os
 import re
@@ -24,7 +23,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.core.security import get_optional_user, require_user, require_user_tool_data_dir
+from backend.app.core.security import get_optional_user, require_user
+from tools.web_proxy.backend.service import (
+    clear_session as clear_session_db,
+    get_session as get_session_db,
+    save_session as save_session_db,
+)
 
 router = APIRouter()
 
@@ -37,7 +41,6 @@ SIDECAR_CROSS_PORT = 8788
 SIDECAR_BASE_URL = f"http://{SIDECAR_HOST}:{SIDECAR_PORT}"
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR_DIR = ROOT / "vendor" / "rammerhead"
-SESSION_META = "session.json"
 _sidecar_process: subprocess.Popen | None = None
 _sidecar_lock = threading.Lock()
 _sidecar_log_handle = None
@@ -53,17 +56,17 @@ def open_proxy(request: Request, url: str | None = None) -> HTMLResponse | Redir
     if not url:
         return _direct_entry_page()
 
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
     target_url = _normalize_target_url(url)
-    session_id = _get_or_create_session(data_dir, request)
+    session_id = _get_or_create_session(user.id, request)
     _edit_session(session_id, enable_shuffling=False)
     return RedirectResponse(f"{_external_origin(request)}/{session_id}/{target_url}", status_code=302)
 
 
 @router.get("/session")
 def session_status(request: Request) -> dict[str, str | bool | None]:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    session_id = _read_session_id(data_dir)
+    user = require_user(request)
+    session = get_session_db(user.id)
+    session_id = session["sessionId"] if session else None
     return {
         "active": bool(session_id and _sidecar_session_exists(session_id, request)),
         "sessionId": session_id,
@@ -73,22 +76,22 @@ def session_status(request: Request) -> dict[str, str | bool | None]:
 
 @router.post("/session/clear")
 def clear_session(request: Request) -> dict[str, bool]:
-    require_user(request)
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    session_id = _read_session_id(data_dir)
-    if session_id:
-        _delete_sidecar_session(session_id)
-    _session_meta_path(data_dir).unlink(missing_ok=True)
+    user = require_user(request)
+    session = get_session_db(user.id)
+    if session:
+        _delete_sidecar_session(session["sessionId"])
+    clear_session_db(user.id)
     return {"cleared": True}
 
 
-def _get_or_create_session(data_dir: Path, request: Request | None = None) -> str:
-    session_id = _read_session_id(data_dir)
+def _get_or_create_session(user_id: str, request: Request | None = None) -> str:
+    session = get_session_db(user_id)
+    session_id = session["sessionId"] if session else None
     if session_id and _sidecar_session_exists(session_id, request):
         return session_id
 
     session_id = _create_sidecar_session(request)
-    _write_session_id(data_dir, session_id)
+    save_session_db(user_id, session_id)
     return session_id
 
 
@@ -240,26 +243,6 @@ def _sidecar_get(path: str, timeout: int = 10) -> str:
             return response.read().decode("utf-8", errors="replace")
     except URLError as exc:
         raise ToolboxError("WEB_PROXY_UNAVAILABLE", "网页代理进程不可用", status_code=502, tool_id=TOOL_ID) from exc
-
-
-def _read_session_id(data_dir: Path) -> str | None:
-    path = _session_meta_path(data_dir)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    session_id = payload.get("sessionId")
-    return session_id if isinstance(session_id, str) and session_id else None
-
-
-def _write_session_id(data_dir: Path, session_id: str) -> None:
-    _session_meta_path(data_dir).write_text(json.dumps({"sessionId": session_id}, indent=2), encoding="utf-8")
-
-
-def _session_meta_path(data_dir: Path) -> Path:
-    return data_dir / SESSION_META
 
 
 def _global_data_dir() -> Path:

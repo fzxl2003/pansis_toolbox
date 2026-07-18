@@ -1,4 +1,3 @@
-import json
 import mimetypes
 import re
 from datetime import datetime, timezone
@@ -15,13 +14,20 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.app.core.errors import ToolboxError
-from backend.app.core.security import require_user_tool_data_dir
+from backend.app.core.security import require_user, require_user_tool_data_dir
+from tools.url_navigator.backend.service import (
+    create_link as create_link_svc,
+    delete_link as delete_link_svc,
+    list_links as list_links_svc,
+    reset_links as reset_links_svc,
+    update_link as update_link_svc,
+    update_link_icon as update_link_icon_svc,
+    get_link,
+)
 
 router = APIRouter()
 
 TOOL_ID = "url_navigator"
-LINKS_FILE = "links.json"
-DEFAULT_LINKS_PATH = Path(__file__).resolve().parents[1] / "default_links.json"
 MAX_ICON_SIZE = 1024 * 1024
 ICON_EXTENSIONS = {".ico", ".png", ".jpg", ".jpeg", ".webp", ".svg"}
 
@@ -130,70 +136,66 @@ class FaviconParser(HTMLParser):
         values = {name.lower(): value or "" for name, value in attrs}
         rel = values.get("rel", "").lower()
         if "icon" in rel and values.get("href"):
-            self.hrefs.append(values["href"])
+            self.hrefs.append(values.get("href", ""))
 
 
 @router.get("/links", response_model=list[Link])
 def list_links(request: Request) -> list[Link]:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    links = _load_or_initialize_links(data_dir)
-    return [Link.model_validate(item) for item in links]
+    user = require_user(request)
+    return [Link.model_validate(item) for item in list_links_svc(user.id)]
 
 
 @router.post("/links", response_model=Link)
 def create_link(request: Request, payload: dict) -> Link:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
+    user = require_user(request)
     link_payload = _validate_payload(LinkCreate, payload)
-    links = _load_or_initialize_links(data_dir)
-    now = _now()
-    link = Link(id=uuid4().hex, createdAt=now, updatedAt=now, **link_payload.model_dump())
-    links.insert(0, link.model_dump())
-    _save_links(data_dir, links)
-    return link
+    created = create_link_svc(user.id, link_payload.model_dump())
+    return Link.model_validate(created)
 
 
 @router.put("/links/{link_id}", response_model=Link)
 def update_link(request: Request, link_id: str, payload: dict) -> Link:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
+    user = require_user(request)
     link_payload = _validate_payload(LinkUpdate, payload)
-    links = _load_or_initialize_links(data_dir)
-    for index, item in enumerate(links):
-        if item["id"] == link_id:
-            existing_icon = LinkIcon.model_validate(item.get("icon", {}))
-            incoming = link_payload.model_dump()
-            incoming["icon"] = existing_icon.model_dump()
-            updated = Link(id=link_id, createdAt=item["createdAt"], updatedAt=_now(), **incoming)
-            links[index] = updated.model_dump()
-            _save_links(data_dir, links)
-            return updated
-    raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
+    # Preserve existing icon (icon updates go through dedicated endpoints)
+    existing = get_link(user.id, link_id)
+    if existing is None:
+        raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
+    merged = link_payload.model_dump()
+    merged["icon"] = existing.get("icon", {})
+    updated = update_link_svc(user.id, link_id, merged)
+    if updated is None:
+        raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
+    return Link.model_validate(updated)
 
 
 @router.delete("/links/{link_id}")
 def delete_link(request: Request, link_id: str) -> dict[str, bool]:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    links = _load_or_initialize_links(data_dir)
-    target = next((item for item in links if item["id"] == link_id), None)
-    if target is None:
+    user = require_user(request)
+    existing = get_link(user.id, link_id)
+    if existing is None:
         raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
-    _delete_icon_file(data_dir, LinkIcon.model_validate(target.get("icon", {})))
-    _save_links(data_dir, [item for item in links if item["id"] != link_id])
+    data_dir = require_user_tool_data_dir(request, TOOL_ID)
+    _delete_icon_file(data_dir, LinkIcon.model_validate(existing.get("icon", {})))
+    delete_link_svc(user.id, link_id)
     return {"deleted": True}
 
 
 @router.post("/links/reset", response_model=list[Link])
 def reset_links(request: Request) -> list[Link]:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    links = _default_links()
-    _save_links(data_dir, links)
+    user = require_user(request)
+    links = reset_links_svc(user.id)
     return [Link.model_validate(item) for item in links]
 
 
 @router.get("/links/{link_id}/icon")
 def get_icon(request: Request, link_id: str) -> FileResponse:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    link = _find_link(data_dir, link_id)
+    user = require_user(request)
+    link = get_link(user.id, link_id)
+    if link is None:
+        raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
     icon = LinkIcon.model_validate(link.get("icon", {}))
+    data_dir = require_user_tool_data_dir(request, TOOL_ID)
     path = _icon_path(data_dir, icon)
     if path is None or not path.exists():
         raise ToolboxError("ICON_NOT_FOUND", "图标不存在", status_code=404, tool_id=TOOL_ID)
@@ -202,6 +204,10 @@ def get_icon(request: Request, link_id: str) -> FileResponse:
 
 @router.post("/links/{link_id}/icon/upload", response_model=Link)
 async def upload_icon(request: Request, link_id: str, file: UploadFile = File(...)) -> Link:
+    user = require_user(request)
+    existing = get_link(user.id, link_id)
+    if existing is None:
+        raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
     data_dir = require_user_tool_data_dir(request, TOOL_ID)
     original_name = Path(file.filename or "icon").name
     suffix = _safe_icon_suffix(original_name)
@@ -211,44 +217,40 @@ async def upload_icon(request: Request, link_id: str, file: UploadFile = File(..
     filename = f"{link_id}-custom{suffix}"
     _icons_dir(data_dir).mkdir(parents=True, exist_ok=True)
     (_icons_dir(data_dir) / filename).write_bytes(content)
-    return _update_link_icon(data_dir, link_id, LinkIcon(source="custom", filename=filename, updatedAt=_now()))
+    # Remove old icon file if any
+    _delete_icon_file(data_dir, LinkIcon.model_validate(existing.get("icon", {})))
+    updated = update_link_icon_svc(user.id, link_id, {
+        "source": "custom",
+        "filename": filename,
+        "updatedAt": _now(),
+    })
+    return Link.model_validate(updated)
 
 
 @router.post("/links/{link_id}/icon/refresh", response_model=Link)
 def refresh_icon(request: Request, link_id: str) -> Link:
-    data_dir = require_user_tool_data_dir(request, TOOL_ID)
-    link = Link.model_validate(_find_link(data_dir, link_id))
+    user = require_user(request)
+    existing = get_link(user.id, link_id)
+    if existing is None:
+        raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
+    link = Link.model_validate(existing)
     try:
         icon_url = _discover_icon_url(link.entries[0].url)
         content, suffix = _download_icon(icon_url)
     except (OSError, URLError, TimeoutError) as exc:
         raise ToolboxError("ICON_REFRESH_FAILED", "自动抓取图标失败", status_code=400, tool_id=TOOL_ID) from exc
     filename = f"{link_id}-auto-{uuid4().hex[:8]}{suffix}"
+    data_dir = require_user_tool_data_dir(request, TOOL_ID)
     _icons_dir(data_dir).mkdir(parents=True, exist_ok=True)
     (_icons_dir(data_dir) / filename).write_bytes(content)
-    return _update_link_icon(data_dir, link_id, LinkIcon(source="auto", filename=filename, updatedAt=_now()))
-
-
-def _load_or_initialize_links(data_dir: Path) -> list[dict]:
-    path = data_dir / LINKS_FILE
-    if not path.exists():
-        links = _default_links()
-        _save_links(data_dir, links)
-        return links
-    raw_links = json.loads(path.read_text(encoding="utf-8"))
-    return [Link.model_validate(item).model_dump() for item in raw_links]
-
-
-def _save_links(data_dir: Path, links: list[dict]) -> None:
-    (data_dir / LINKS_FILE).write_text(json.dumps(links, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _default_links() -> list[dict]:
-    if not DEFAULT_LINKS_PATH.exists():
-        return []
-    raw_links = json.loads(DEFAULT_LINKS_PATH.read_text(encoding="utf-8"))
-    now = _now()
-    return [Link(id=uuid4().hex, createdAt=now, updatedAt=now, **raw).model_dump() for raw in raw_links]
+    # Remove old icon file if any
+    _delete_icon_file(data_dir, LinkIcon.model_validate(existing.get("icon", {})))
+    updated = update_link_icon_svc(user.id, link_id, {
+        "source": "auto",
+        "filename": filename,
+        "updatedAt": _now(),
+    })
+    return Link.model_validate(updated)
 
 
 def _validate_payload(model: type[LinkCreate] | type[LinkUpdate], payload: dict) -> LinkCreate | LinkUpdate:
@@ -259,26 +261,6 @@ def _validate_payload(model: type[LinkCreate] | type[LinkUpdate], payload: dict)
     except ValidationError as exc:
         details = [{"loc": error["loc"], "msg": error["msg"], "type": error["type"]} for error in exc.errors()]
         raise ToolboxError("INVALID_LINK", "导航数据不合法", status_code=400, tool_id=TOOL_ID, extra={"details": details}) from exc
-
-
-def _find_link(data_dir: Path, link_id: str) -> dict:
-    for item in _load_or_initialize_links(data_dir):
-        if item["id"] == link_id:
-            return item
-    raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
-
-
-def _update_link_icon(data_dir: Path, link_id: str, icon: LinkIcon) -> Link:
-    links = _load_or_initialize_links(data_dir)
-    for index, item in enumerate(links):
-        if item["id"] == link_id:
-            _delete_icon_file(data_dir, LinkIcon.model_validate(item.get("icon", {})))
-            item["icon"] = icon.model_dump()
-            item["updatedAt"] = _now()
-            links[index] = item
-            _save_links(data_dir, links)
-            return Link.model_validate(item)
-    raise ToolboxError("LINK_NOT_FOUND", "导航项不存在", status_code=404, tool_id=TOOL_ID)
 
 
 def _discover_icon_url(page_url: str) -> str:

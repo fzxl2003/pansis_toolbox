@@ -103,6 +103,8 @@ class MonitorTaskPayload(BaseModel):
     alertChangeAmount: int = 1
     confirmCount: int = 3
     checkIntervalSeconds: int = 30
+    repeatIntervalSeconds: int = 0  # 重复报警冷却时间（秒），0 = 不限制
+    maxRepeatCount: int = 0  # 最多重复报警次数，0 = 不限制
     enabled: bool = True
 
 
@@ -153,7 +155,7 @@ def reset_alert_route(request: Request, task_id: str) -> dict:
 @router.post("/tasks/{task_id}/check-now")
 def check_now_route(request: Request, task_id: str) -> dict:
     user = require_user(request)
-    result = run_monitor_check(task_id)
+    result = run_monitor_check(user.id, task_id)
     return result
 
 

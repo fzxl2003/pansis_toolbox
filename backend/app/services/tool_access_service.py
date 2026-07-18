@@ -9,16 +9,17 @@ from starlette.requests import HTTPConnection
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.db.database import get_connection, init_database
+from backend.app.db.database import get_connection, init_database, list_user_tool_dbs
 from backend.app.registry.models import RegisteredTool
 from backend.app.services.auth_service import User, list_users
 
 
+# Tools that still store tables in the shared platform database.
+# Other tools (experiment_monitor, server_monitor, ssh_workspace,
+# memo_demo, url_navigator, web_proxy) now use per-user SQLite databases
+# and are cleaned up by deleting the per-user ``data.db`` files.
 TOOL_TABLE_PREFIXES: dict[str, tuple[str, ...]] = {
     "docker_manager": ("docker_",),
-    "experiment_monitor": ("em_",),
-    "server_monitor": ("monitor_",),
-    "ssh_workspace": ("ssh_",),
 }
 
 
@@ -145,14 +146,29 @@ def update_tool_access(tool_id: str, global_public: bool, allowed_user_ids: list
 
 
 def clear_tool_storage(tool: RegisteredTool) -> dict[str, Any]:
+    """Clear ALL data for a tool: platform DB tables + per-user DB files + file storage.
+
+    This is the nuclear option used by the admin "清除全部" button.  For
+    surgical deletion by category/time, use ``data_management.delete_data``.
+    """
     ensure_tool_access_tables()
     dropped_tables = _drop_tool_tables(tool.tool_id)
     removed_paths = _remove_tool_paths(tool.tool_id)
-    return {"toolId": tool.tool_id, "droppedTables": dropped_tables, "removedPaths": removed_paths}
+    # Also remove per-user DB files for tools that use per-user databases.
+    removed_db_files = _remove_per_user_dbs(tool.tool_id)
+    return {
+        "toolId": tool.tool_id,
+        "droppedTables": dropped_tables,
+        "removedPaths": removed_paths + removed_db_files,
+    }
 
 
 def clear_user_tool_storage(tool_id: str, user_id: str) -> dict[str, Any]:
-    """Clear file storage for a specific user+tool combination (user-scoped files only)."""
+    """Clear file storage for a specific user+tool combination.
+
+    Removes the user's per-tool directory which includes the per-user
+    ``data.db`` file and any auxiliary file storage (icons, etc.).
+    """
     ensure_tool_access_tables()
     removed_paths = _remove_user_tool_paths(tool_id, user_id)
     return {"toolId": tool_id, "userId": user_id, "droppedTables": [], "removedPaths": removed_paths}
@@ -378,6 +394,25 @@ def _remove_user_tool_paths(tool_id: str, user_id: str) -> list[str]:
     elif resolved.exists():
         resolved.unlink()
         removed.append(str(resolved))
+    return removed
+
+
+def _remove_per_user_dbs(tool_id: str) -> list[str]:
+    """Delete per-user ``data.db`` files for *tool_id* across all users.
+
+    This is a safety net: ``_remove_tool_paths`` already deletes the entire
+    ``user_data/<uid>/tools/<tool_id>`` directory, but we call this explicitly
+    to report the DB files separately and to handle any orphaned DB files
+    that might exist outside the standard directory structure.
+    """
+    removed: list[str] = []
+    for uid, db_path in list_user_tool_dbs(tool_id):
+        try:
+            if db_path.exists():
+                db_path.unlink()
+                removed.append(str(db_path))
+        except OSError:
+            pass
     return removed
 
 

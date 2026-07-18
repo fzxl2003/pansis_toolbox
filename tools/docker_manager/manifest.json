@@ -1,7 +1,7 @@
 {
   "id": "docker_manager",
   "name": "Docker 多租户管理",
-  "description": "实验室环境多服务器 Docker 管理平台，支持服务器聚合、镜像管理、容器管理和卷管理，提供管理员与用户双角色界面。",
+  "description": "（开发阶段，部分功能不可用）实验室环境多服务器 Docker 管理平台，支持服务器聚合、镜像管理、容器管理和卷管理，提供管理员与用户双角色界面。",
   "version": "1.0.0",
   "enabled": true,
   "category": "ops",

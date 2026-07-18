@@ -5,7 +5,11 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
-from backend.app.db.database import get_connection
+from backend.app.db.database import (
+    get_connection,
+    list_user_tool_dbs,
+    user_tool_connection_context,
+)
 from backend.app.main import app
 from backend.app.registry.loader import discover_tools
 from backend.app.registry.models import ToolStatus
@@ -433,9 +437,9 @@ def test_cannot_delete_super_admin() -> None:
 
 def test_experiment_monitor_create_task_uses_preview_processes() -> None:
     _cleanup_experiment_test_data()
-    experiment_service.init_database()
-    with get_connection() as connection:
-        server_id = "experiment_preview_server"
+    experiment_service.init_database(EXPERIMENT_USER.id)
+    server_id = "experiment_preview_server"
+    with user_tool_connection_context(EXPERIMENT_USER.id, "experiment_monitor") as connection:
         connection.execute(
             """
             INSERT INTO em_servers (
@@ -464,9 +468,16 @@ def test_experiment_monitor_create_task_uses_preview_processes() -> None:
 
     history = experiment_service.get_task_history(task["id"], EXPERIMENT_USER)
     assert history["samples"][-1]["processCount"] == 10
-    assert history["samples"][-1]["matchedProcesses"] == preview_processes
+    # get_task_history uses lightweight queries (no matchedProcesses),
+    # so verify matchedProcesses via direct DB query
+    with user_tool_connection_context(EXPERIMENT_USER.id, "experiment_monitor") as connection:
+        sample_row = connection.execute(
+            "SELECT matched_processes FROM em_samples WHERE task_id = ? ORDER BY checked_at DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+    assert experiment_service.json.loads(sample_row["matched_processes"]) == preview_processes
     assert history["alertState"]["lastCheckCount"] == 10
-    with get_connection() as connection:
+    with user_tool_connection_context(EXPERIMENT_USER.id, "experiment_monitor") as connection:
         task_row = connection.execute(
             "SELECT id, last_checked_at, check_interval_seconds FROM em_monitor_tasks WHERE id = ?",
             (task["id"],),
@@ -483,7 +494,13 @@ def test_experiment_monitor_create_task_uses_preview_processes() -> None:
     )
     edited_history = experiment_service.get_task_history(task["id"], EXPERIMENT_USER)
     assert edited_history["samples"][-1]["processCount"] == 2
-    assert edited_history["samples"][-1]["matchedProcesses"] == updated_processes
+    # Verify updated matchedProcesses via direct DB query
+    with user_tool_connection_context(EXPERIMENT_USER.id, "experiment_monitor") as connection:
+        updated_sample_row = connection.execute(
+            "SELECT matched_processes FROM em_samples WHERE task_id = ? ORDER BY checked_at DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+    assert experiment_service.json.loads(updated_sample_row["matched_processes"]) == updated_processes
     assert edited_history["alertState"]["lastCheckCount"] == 2
     _cleanup_experiment_test_data()
 
@@ -548,6 +565,7 @@ def test_server_monitor_parse_gpu_processes() -> None:
 def test_server_monitor_default_visibility_and_snapshot(monkeypatch) -> None:
     _cleanup_monitor_test_data()
     monkeypatch.setattr(monitor_service, "_run_ssh", lambda row, command, timeout=20: _monitor_output())
+    monkeypatch.setattr(monitor_service, "_run_ssh_cached", lambda row, command: _monitor_output())
     auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
     cookies = auth.cookies
     created = client.post(
@@ -568,12 +586,12 @@ def test_server_monitor_default_visibility_and_snapshot(monkeypatch) -> None:
     server = created.json()["server"]
     assert server["isDefault"] is True
 
-    client.cookies.clear()
-    anonymous_list = client.get("/api/tools/server-monitor/servers")
-    assert anonymous_list.status_code == 200
-    assert any(item["id"] == server["id"] for item in anonymous_list.json()["servers"])
+    # Default servers are visible to any logged-in user (data is per-user now)
+    admin_list = client.get("/api/tools/server-monitor/servers", cookies=cookies)
+    assert admin_list.status_code == 200
+    assert any(item["id"] == server["id"] for item in admin_list.json()["servers"])
 
-    snapshot = client.get(f"/api/tools/server-monitor/servers/{server['id']}/snapshot?force=true")
+    snapshot = client.get(f"/api/tools/server-monitor/servers/{server['id']}/snapshot?force=true", cookies=cookies)
     assert snapshot.status_code == 200
     assert snapshot.json()["sample"]["gpus"][0]["name"] == "NVIDIA A100"
     _cleanup_monitor_test_data()
@@ -617,6 +635,7 @@ def test_server_monitor_private_visibility_and_directory_whitelist(monkeypatch) 
 
     client.cookies.clear()
     anonymous_list = client.get("/api/tools/server-monitor/servers")
+    assert anonymous_list.status_code == 200
     assert all(item["id"] != server["id"] for item in anonymous_list.json()["servers"])
 
     allowed = client.post(
@@ -657,43 +676,61 @@ __GPU__
 
 
 def _cleanup_monitor_test_data() -> None:
-    monitor_service.init_monitor_database()
-    with monitor_service.get_connection() as connection:
-        server_ids = [
-            row["id"]
-            for row in connection.execute(
-                "SELECT id FROM monitor_servers WHERE name IN ('Default Monitor Test', 'Private Monitor Test')"
-            ).fetchall()
-        ]
-        for server_id in server_ids:
-            connection.execute("DELETE FROM monitor_samples WHERE server_id = ?", (server_id,))
-            connection.execute("DELETE FROM monitor_directory_cache WHERE server_id = ?", (server_id,))
-            connection.execute("DELETE FROM monitor_servers WHERE id = ?", (server_id,))
+    # Clean up platform-level default servers table
+    with get_connection() as connection:
+        # Check if monitor_default_servers table exists before trying to delete
+        table_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='monitor_default_servers'"
+        ).fetchone()
+        if table_exists:
+            connection.execute(
+                "DELETE FROM monitor_default_servers WHERE name IN ('Default Monitor Test', 'Private Monitor Test')"
+            )
         connection.execute(
             "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user'))"
         )
         connection.execute("DELETE FROM users WHERE username IN ('monitor_user_test', 'monitor_private_user')")
         connection.commit()
 
+    # Clean up per-user databases for server_monitor
+    for user_id, _db_path in list_user_tool_dbs("server_monitor"):
+        try:
+            with user_tool_connection_context(user_id, "server_monitor") as connection:
+                server_ids = [
+                    row["id"]
+                    for row in connection.execute(
+                        "SELECT id FROM monitor_servers WHERE name IN ('Default Monitor Test', 'Private Monitor Test')"
+                    ).fetchall()
+                ]
+                for server_id in server_ids:
+                    connection.execute("DELETE FROM monitor_samples WHERE server_id = ?", (server_id,))
+                    connection.execute("DELETE FROM monitor_directory_cache WHERE server_id = ?", (server_id,))
+                    connection.execute("DELETE FROM monitor_servers WHERE id = ?", (server_id,))
+                connection.commit()
+        except Exception:
+            pass  # Ignore cleanup errors for per-user DBs
+
 
 def _cleanup_experiment_test_data() -> None:
-    experiment_service.init_database()
-    with get_connection() as connection:
-        task_ids = [
-            row["id"]
-            for row in connection.execute(
-                "SELECT id FROM em_monitor_tasks WHERE owner_user_id = ?",
-                (EXPERIMENT_USER.id,),
-            ).fetchall()
-        ]
-        for task_id in task_ids:
-            connection.execute("DELETE FROM em_alert_actions WHERE task_id = ?", (task_id,))
-            connection.execute("DELETE FROM em_alert_events WHERE task_id = ?", (task_id,))
-            connection.execute("DELETE FROM em_alert_states WHERE task_id = ?", (task_id,))
-            connection.execute("DELETE FROM em_samples WHERE task_id = ?", (task_id,))
-            connection.execute("DELETE FROM em_monitor_tasks WHERE id = ?", (task_id,))
-        connection.execute("DELETE FROM em_servers WHERE owner_user_id = ?", (EXPERIMENT_USER.id,))
-        connection.commit()
+    try:
+        with user_tool_connection_context(EXPERIMENT_USER.id, "experiment_monitor") as connection:
+            task_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM em_monitor_tasks WHERE owner_user_id = ?",
+                    (EXPERIMENT_USER.id,),
+                ).fetchall()
+            ]
+            for task_id in task_ids:
+                connection.execute("DELETE FROM em_alert_actions WHERE task_id = ?", (task_id,))
+                connection.execute("DELETE FROM em_alert_events WHERE task_id = ?", (task_id,))
+                connection.execute("DELETE FROM em_alert_states WHERE task_id = ?", (task_id,))
+                connection.execute("DELETE FROM em_samples WHERE task_id = ?", (task_id,))
+                connection.execute("DELETE FROM em_monitor_tasks WHERE id = ?", (task_id,))
+            connection.execute("DELETE FROM em_servers WHERE owner_user_id = ?", (EXPERIMENT_USER.id,))
+            connection.commit()
+    except Exception:
+        pass  # Ignore cleanup errors for per-user DBs
 
 
 def _reset_tool_access(tool_id: str) -> None:

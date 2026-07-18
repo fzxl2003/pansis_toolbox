@@ -195,6 +195,13 @@
   font-size: 12px;
 }
 
+.em-alert-state-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 /* ── Actions Section ── */
 
 .em-actions-section {

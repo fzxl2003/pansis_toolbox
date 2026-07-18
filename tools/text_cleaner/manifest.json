@@ -3,7 +3,7 @@
   "name": "文本清洗",
   "description": "清理多余空白、空行并支持大小写转换的轻量文本工具。",
   "version": "1.0.0",
-  "enabled": true,
+  "enabled": false,
   "category": "text",
   "icon": "text",
   "entry": {

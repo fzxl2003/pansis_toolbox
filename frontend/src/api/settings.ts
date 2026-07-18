@@ -29,3 +29,19 @@ export function saveEmailConfig(payload: EmailConfigPayload): Promise<EmailConfi
 export function testEmailConfig(payload: EmailConfigPayload): Promise<{ success: boolean; testTo: string }> {
   return apiPost<{ success: boolean; testTo: string }>('/api/settings/email-config/test', payload);
 }
+
+export type AboutItem = {
+  label: string;
+  value: string;
+  type?: 'text' | 'email' | 'url';
+};
+
+export type AboutInfo = {
+  title?: string;
+  description?: string;
+  items?: AboutItem[];
+};
+
+export function fetchAbout(): Promise<AboutInfo> {
+  return apiGet<AboutInfo>('/api/settings/about');
+}

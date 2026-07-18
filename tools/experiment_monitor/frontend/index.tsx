@@ -59,6 +59,8 @@ type MonitorTask = {
   alertChangeAmount: number;
   confirmCount: number;
   checkIntervalSeconds: number;
+  repeatIntervalSeconds: number;
+  maxRepeatCount: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -139,6 +141,8 @@ type AlertState = {
   isAlerting: boolean;
   lastAlertedAt: string | null;
   resolvedAt: string | null;
+  repeatCount: number;
+  repeatExhausted: boolean;
   updatedAt: string;
 };
 
@@ -193,6 +197,8 @@ type TaskFormState = {
   alertChangeAmount: number;
   confirmCount: number;
   checkIntervalSeconds: number;
+  repeatIntervalSeconds: number;
+  maxRepeatCount: number;
   enabled: boolean;
 };
 
@@ -227,6 +233,8 @@ const emptyTask: TaskFormState = {
   alertChangeAmount: 1,
   confirmCount: 3,
   checkIntervalSeconds: 30,
+  repeatIntervalSeconds: 0,
+  maxRepeatCount: 0,
   enabled: true,
 };
 
@@ -531,6 +539,8 @@ export default function ExperimentMonitorTool() {
       alertChangeAmount: task.alertChangeAmount,
       confirmCount: task.confirmCount,
       checkIntervalSeconds: task.checkIntervalSeconds,
+      repeatIntervalSeconds: task.repeatIntervalSeconds,
+      maxRepeatCount: task.maxRepeatCount,
       enabled: task.enabled,
     });
     setModal('task-edit');
@@ -928,11 +938,18 @@ export default function ExperimentMonitorTool() {
           {/* Alert State */}
 {selectedTaskDetail.alertState?.isAlerting && (
 <div className="em-alert-state alerting">
+<span className="em-alert-state-info">
+<span className="badge danger">报警中</span>
+{selectedTaskDetail.alertState.repeatCount > 0 && (
+<span className="badge">已报警 {selectedTaskDetail.alertState.repeatCount} 次{selectedTask && selectedTask.maxRepeatCount > 0 ? ` / ${selectedTask.maxRepeatCount}` : ''}</span>
+)}
+{selectedTaskDetail.alertState.repeatExhausted && <span className="badge warning">已达重复上限</span>}
+</span>
 <button className="chip small" type="button" onClick={() => void resetAlert(selectedTaskId)}>
 <RotateCcw size={13} />重置报警
 </button>
 </div>
-          )}
+)}
 
           {/* Process Count Chart */}
           <MiniChart samples={selectedTaskDetail.samples} />
@@ -1102,6 +1119,12 @@ function TaskCard(props: {
                 进程数: <strong>{latestSample.processCount}</strong>
               </span>
             )}
+            {task.maxRepeatCount > 0 && alertState && (
+              <span className={alertState.repeatExhausted ? 'text-warning' : ''}>
+                重复报警: <strong>{alertState.repeatCount}</strong>/{task.maxRepeatCount}
+                {alertState.repeatExhausted && ' · 已达上限'}
+              </span>
+            )}
           </div>
         </div>
         <div className="em-task-actions">
@@ -1114,13 +1137,20 @@ function TaskCard(props: {
       {props.isExpanded && (
         <div className="em-task-detail">
           {/* Alert State */}
-{alertState?.isAlerting && (
+{(alertState?.isAlerting || alertState?.repeatExhausted || (alertState && alertState.repeatCount > 0)) && (
 <div className="em-alert-state inline alerting">
+<span className="em-alert-state-info">
+{alertState?.isAlerting && <span className="badge danger">报警中</span>}
+{alertState && alertState.repeatCount > 0 && (
+<span className="badge">已报警 {alertState.repeatCount} 次{props.task.maxRepeatCount > 0 ? ` / ${props.task.maxRepeatCount}` : ''}</span>
+)}
+{alertState?.repeatExhausted && <span className="badge warning">已达重复上限</span>}
+</span>
 <button className="chip tiny" type="button" onClick={(e) => { e.stopPropagation(); props.onResetAlert(); }}>
-<RotateCcw size={12} />重置
+<RotateCcw size={12} />重置报警
 </button>
 </div>
-          )}
+)}
 
           {/* Actions */}
           <div className="em-actions-section">
@@ -1559,6 +1589,28 @@ function TaskForm(props: {
         <div className="form-group">
           <label>检查间隔（秒）</label>
           <input className="text-input" type="number" min="10" max="3600" value={form.checkIntervalSeconds} onChange={(e) => props.onChange({ ...form, checkIntervalSeconds: Number(e.target.value) })} />
+        </div>
+      </fieldset>
+
+      <fieldset className="em-fieldset">
+        <legend>重复报警控制</legend>
+        <div className="form-group">
+          <label>重复报警冷却时间（秒）</label>
+          <input className="text-input" type="number" min="0" value={form.repeatIntervalSeconds} onChange={(e) => props.onChange({ ...form, repeatIntervalSeconds: Number(e.target.value) })} />
+          <small className="form-hint">
+            {form.repeatIntervalSeconds > 0
+              ? `报警后 ${form.repeatIntervalSeconds} 秒内不重复报警（冷却期内条件仍满足时会在冷却结束后立即再次触发）`
+              : '设为 0 表示不限制冷却，每次确认达标都会触发'}
+          </small>
+        </div>
+        <div className="form-group">
+          <label>最多重复报警次数</label>
+          <input className="text-input" type="number" min="0" value={form.maxRepeatCount} onChange={(e) => props.onChange({ ...form, maxRepeatCount: Number(e.target.value) })} />
+          <small className="form-hint">
+            {form.maxRepeatCount > 0
+              ? `达到 ${form.maxRepeatCount} 次后停止重复报警，需在任务卡片中手动「重置」后才能继续`
+              : '设为 0 表示不限制重复次数（持续按冷却时间重复）'}
+          </small>
         </div>
       </fieldset>
 

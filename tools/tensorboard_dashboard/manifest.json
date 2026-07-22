@@ -1,0 +1,31 @@
+{
+  "id": "tensorboard_dashboard",
+  "name": "TensorBoard 看板",
+  "description": "在远程 SSH 服务器上启动 TensorBoard，通过 SSH 端口映射和反向代理在浏览器中直接访问。",
+  "version": "0.1.0",
+  "enabled": true,
+  "category": "ops",
+  "icon": {
+    "type": "lucide",
+    "name": "bar-chart-3"
+  },
+  "displayMode": "standard",
+  "entry": {
+    "frontend": "frontend/index.tsx",
+    "backend": "backend/router.py"
+  },
+  "api": {
+    "prefix": "/api/tools/tensorboard-dashboard"
+  },
+  "widgets": [],
+  "dependencies": {
+    "paramiko": ">=3.0.0",
+    "cryptography": ">=41.0.0"
+  },
+  "permissions": {
+    "filesystem": false,
+    "network": true,
+    "longRunningTask": true,
+    "userData": true
+  }
+}

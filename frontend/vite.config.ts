@@ -23,6 +23,16 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/tb': {
+        target: 'http://127.0.0.1:8000',
+        ws: true,
+        changeOrigin: true,
+      },
+      '/web-proxy': {
+        target: 'http://127.0.0.1:8000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
     fs: {
       allow: ['..'],

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import secrets
 import shlex
@@ -29,7 +30,7 @@ TOOL_ID = "tensorboard_dashboard"
 
 # Port range for remote TensorBoard instances.
 REMOTE_PORT_START = 6006
-REMOTE_PORT_END = 6099
+REMOTE_PORT_END = 7005  # 1000 ports for large-scale concurrent sessions
 
 _initialized_dbs: set[str] = set()
 
@@ -726,7 +727,7 @@ def start_session(payload: dict[str, Any], user: Any) -> dict[str, Any]:
         raise ToolboxError("CONDA_ENV_REQUIRED", "conda 模式需要指定 conda 环境名", status_code=400, tool_id=TOOL_ID)
     if python_mode == "path" and not python_path:
         raise ToolboxError("PYTHON_PATH_REQUIRED", "path 模式需要指定 Python 路径", status_code=400, tool_id=TOOL_ID)
-    extra_params = (payload.get("extraParams") or "").strip()
+    extra_params = _serialize_extra_params(payload.get("extraParams"))
 
     # Limit active sessions to prevent resource exhaustion.
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
@@ -734,7 +735,7 @@ def start_session(payload: dict[str, Any], user: Any) -> dict[str, Any]:
             "SELECT COUNT(*) as c FROM tb_sessions WHERE owner_user_id = ? AND status IN ('starting', 'running')",
             (user.id,),
         ).fetchone()
-    if active_count and active_count["c"] >= 20:
+    if active_count and active_count["c"] >= 1000:
         raise ToolboxError("TOO_MANY_SESSIONS", "活跃会话数过多，请先停止部分会话", status_code=400, tool_id=TOOL_ID)
 
     session_id = _new_id()
@@ -895,8 +896,8 @@ def update_session(session_id: str, payload: dict[str, Any], user: Any) -> dict[
         ).fetchone()
     if row is None:
         raise ToolboxError("SESSION_NOT_FOUND", "会话不存在或不可访问", status_code=404, tool_id=TOOL_ID)
-    if row["status"] in ("starting", "running"):
-        raise ToolboxError("SESSION_ACTIVE", "会话运行中，请先停止再编辑", status_code=400, tool_id=TOOL_ID)
+    # Allow editing even when running — extraParams changes take effect immediately
+    # (URL-only); other changes require a restart to take effect.
     now = _now()
     updates: dict[str, Any] = {}
     if "name" in payload and payload["name"].strip():
@@ -910,7 +911,7 @@ def update_session(session_id: str, payload: dict[str, Any], user: Any) -> dict[
     if "pythonPath" in payload:
         updates["python_path"] = (payload["pythonPath"] or "").strip()
     if "extraParams" in payload:
-        updates["extra_params"] = (payload["extraParams"] or "").strip()
+        updates["extra_params"] = _serialize_extra_params(payload["extraParams"])
     if "serverId" in payload and payload["serverId"].strip():
         get_server(payload["serverId"].strip(), user)
         updates["server_id"] = payload["serverId"].strip()
@@ -1160,15 +1161,23 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _public_session(row: sqlite3.Row) -> dict[str, Any]:
-    extra = row["extra_params"] if "extra_params" in row.keys() else ""
+    raw = row["extra_params"] if "extra_params" in row.keys() else ""
+    extra_params: list[dict[str, str]] = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                extra_params = parsed
+            elif isinstance(parsed, str) and parsed:
+                extra_params = [{"label": "", "params": parsed}]
+        except (json.JSONDecodeError, TypeError):
+            extra_params = [{"label": "", "params": raw}]
     url = f"/tb/{row['tb_session_id']}/"
-    if extra:
-        url = url + extra
     return {
         "id": row["id"], "serverId": row["server_id"], "name": row["name"],
         "logdir": row["logdir"], "remotePort": row["remote_port"], "localPort": row["local_port"],
         "pythonMode": row["python_mode"], "condaEnv": row["conda_env"], "pythonPath": row["python_path"],
-        "extraParams": extra,
+        "extraParams": extra_params,
         "remotePid": row["remote_pid"], "tbSessionId": row["tb_session_id"],
         "status": row["status"], "error": row["error"],
         "startedAt": row["started_at"], "stoppedAt": row["stopped_at"],
@@ -1198,6 +1207,37 @@ def _decrypt(cipher: str) -> str:
         return _get_fernet().decrypt(cipher.encode("utf-8")).decode("utf-8")
     except InvalidToken as exc:
         raise ToolboxError("DECRYPT_ERROR", "凭证解密失败", status_code=500, tool_id=TOOL_ID) from exc
+
+
+def _serialize_extra_params(value: Any) -> str:
+    """Serialize extraParams to a JSON string for DB storage.
+
+    Accepts a list of {label, params} dicts, or a legacy string.
+    Returns empty string if value is empty/None.
+    """
+    if not value:
+        return ""
+    if isinstance(value, list):
+        cleaned = [
+            {"label": str(item.get("label", "")).strip(), "params": str(item.get("params", "")).strip()}
+            for item in value
+            if isinstance(item, dict) and (item.get("params") or item.get("label"))
+        ]
+        return json.dumps(cleaned) if cleaned else ""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        # Try to parse as JSON (already serialized)
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return _serialize_extra_params(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Legacy plain string
+        return json.dumps([{"label": "", "params": stripped}])
+    return ""
 
 
 def _now() -> str:

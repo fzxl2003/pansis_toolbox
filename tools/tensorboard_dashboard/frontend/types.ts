@@ -53,6 +53,11 @@ export type SessionStatus = 'starting' | 'running' | 'stopped' | 'failed';
 
 export type PythonMode = 'conda' | 'path';
 
+export type ExtraParam = {
+  label: string;
+  params: string;
+};
+
 export type TbSession = {
   id: string;
   serverId: string;
@@ -63,7 +68,7 @@ export type TbSession = {
   pythonMode: PythonMode;
   condaEnv: string;
   pythonPath: string;
-  extraParams: string;
+  extraParams: ExtraParam[];
   remotePid: string;
   tbSessionId: string;
   status: SessionStatus;
@@ -81,7 +86,7 @@ export type SessionForm = {
   pythonMode: PythonMode;
   condaEnv: string;
   pythonPath: string;
-  extraParams: string;
+  extraParams: ExtraParam[];
 };
 
 export const EMPTY_SESSION_FORM: SessionForm = {
@@ -91,7 +96,7 @@ export const EMPTY_SESSION_FORM: SessionForm = {
   pythonMode: 'conda',
   condaEnv: '',
   pythonPath: '',
-  extraParams: '',
+  extraParams: [],
 };
 
 // ---- Top-level tab ----

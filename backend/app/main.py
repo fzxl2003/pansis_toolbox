@@ -68,7 +68,7 @@ def mount_frontend(app: FastAPI, dist_dir: Path) -> None:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_frontend(full_path: str) -> FileResponse:
-        if full_path.startswith(("api/", "tool-assets/")):
+        if full_path.startswith(("api/", "tool-assets/", "tb/", "web-proxy")):
             raise HTTPException(status_code=404)
 
         requested_path = dist_dir / full_path

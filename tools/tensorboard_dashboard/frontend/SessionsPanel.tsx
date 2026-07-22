@@ -5,7 +5,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   CheckCircle,
+  ChevronDown,
   ChevronRight,
+  Copy,
   ExternalLink,
   Folder,
   Loader2,
@@ -35,6 +37,7 @@ export function SessionsPanel({ servers, serversLoading }: SessionsPanelProps) {
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editingSession, setEditingSession] = useState<TbSession | null>(null);
+  const [copyForm, setCopyForm] = useState<SessionForm | null>(null);
   const { confirm, dialog } = useConfirm();
 
   async function loadSessions() {
@@ -74,15 +77,6 @@ export function SessionsPanel({ servers, serversLoading }: SessionsPanelProps) {
     }
   }
 
-  async function handleCheck(session: TbSession) {
-    try {
-      await apiPost(`${API}/sessions/${session.id}/check`, {});
-      await loadSessions();
-    } catch (exc) {
-      setError(messageFromError(exc));
-    }
-  }
-
   function handleDelete(session: TbSession) {
     confirm({
       title: '删除会话',
@@ -100,6 +94,19 @@ export function SessionsPanel({ servers, serversLoading }: SessionsPanelProps) {
 
   function handleOpen(session: TbSession) {
     window.open(session.url, '_blank');
+  }
+
+  function handleCopy(session: TbSession) {
+    setCopyForm({
+      serverId: session.serverId,
+      name: `${session.name} (副本)`,
+      logdir: session.logdir,
+      pythonMode: session.pythonMode,
+      condaEnv: session.condaEnv,
+      pythonPath: session.pythonPath,
+      extraParams: session.extraParams || [],
+    });
+    setShowForm(true);
   }
 
   return (
@@ -150,9 +157,9 @@ export function SessionsPanel({ servers, serversLoading }: SessionsPanelProps) {
                   onOpen={() => handleOpen(session)}
                   onStop={() => void handleStop(session)}
                   onRestart={() => void handleRestart(session)}
-                  onCheck={() => void handleCheck(session)}
                   onDelete={() => handleDelete(session)}
                   onEdit={() => setEditingSession(session)}
+                  onCopy={() => handleCopy(session)}
                 />
               ))}
             </tbody>
@@ -163,8 +170,9 @@ export function SessionsPanel({ servers, serversLoading }: SessionsPanelProps) {
       {showForm && (
         <SessionFormModal
           servers={servers}
-          onClose={() => setShowForm(false)}
-          onSaved={() => { setShowForm(false); void loadSessions(); }}
+          initialForm={copyForm || undefined}
+          onClose={() => { setShowForm(false); setCopyForm(null); }}
+          onSaved={() => { setShowForm(false); setCopyForm(null); void loadSessions(); }}
         />
       )}
       {editingSession && (
@@ -199,14 +207,15 @@ type SessionRowProps = {
   onOpen: () => void;
   onStop: () => void;
   onRestart: () => void;
-  onCheck: () => void;
   onDelete: () => void;
   onEdit: () => void;
+  onCopy: () => void;
 };
 
-function SessionRow({ session, serverName, onOpen, onStop, onRestart, onCheck, onDelete, onEdit }: SessionRowProps) {
+function SessionRow({ session, serverName, onOpen, onStop, onRestart, onDelete, onEdit, onCopy }: SessionRowProps) {
   const [stopping, setStopping] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const isActive = session.status === 'running' || session.status === 'starting';
 
   async function handleStop() {
@@ -220,6 +229,7 @@ function SessionRow({ session, serverName, onOpen, onStop, onRestart, onCheck, o
   }
 
   return (
+    <>
     <tr>
       <td style={{ fontWeight: 600 }}>{session.name}</td>
       <td>{serverName}</td>
@@ -244,17 +254,15 @@ function SessionRow({ session, serverName, onOpen, onStop, onRestart, onCheck, o
             </button>
           )}
           {!isActive && (
-            <>
-              <button className="tb-btn tb-btn-sm tb-btn-primary" onClick={handleRestart} type="button" disabled={restarting} title="重新启动">
-                {restarting ? <Loader2 size={12} className="spin" /> : <Play size={12} />} 重启
-              </button>
-              <button className="tb-btn tb-btn-sm tb-btn-ghost" onClick={onEdit} type="button" title="编辑">
-                <Pencil size={12} /> 编辑
-              </button>
-            </>
+            <button className="tb-btn tb-btn-sm tb-btn-primary" onClick={handleRestart} type="button" disabled={restarting} title="重新启动">
+              {restarting ? <Loader2 size={12} className="spin" /> : <Play size={12} />} 重启
+            </button>
           )}
-          <button className="tb-btn tb-btn-sm tb-btn-ghost" onClick={onCheck} type="button" title="检查状态">
-            <RefreshCw size={12} />
+          <button className="tb-btn tb-btn-sm tb-btn-ghost" onClick={onEdit} type="button" title="编辑">
+            <Pencil size={12} /> 编辑
+          </button>
+          <button className="tb-btn tb-btn-sm tb-btn-ghost" onClick={onCopy} type="button" title="复制配置">
+            <Copy size={12} /> 复制
           </button>
           <button className="tb-btn tb-btn-sm tb-btn-ghost" onClick={onDelete} type="button" title="删除" style={{ color: '#dc2626' }}>
             <Trash2 size={12} />
@@ -262,6 +270,35 @@ function SessionRow({ session, serverName, onOpen, onStop, onRestart, onCheck, o
         </div>
       </td>
     </tr>
+    {isActive && session.extraParams.length > 0 && (
+      <tr>
+        <td colSpan={6} style={{ padding: '0 12px 8px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            <button
+              className="tb-btn tb-btn-sm tb-btn-ghost"
+              type="button"
+              onClick={() => setExpanded(!expanded)}
+              style={{ fontSize: 11 }}
+            >
+              <ChevronDown size={10} style={{ transform: expanded ? 'rotate(180deg)' : '', transition: 'transform 0.15s' }} />
+              更多打开（{session.extraParams.length}）
+            </button>
+            {expanded && session.extraParams.map((ep, i) => (
+              <button
+                key={i}
+                className="tb-btn tb-btn-sm tb-btn-secondary"
+                type="button"
+                title={ep.params}
+                onClick={() => window.open(session.url + ep.params, '_blank')}
+              >
+                <ExternalLink size={10} /> {ep.label || `参数${i + 1}`}
+              </button>
+            ))}
+          </div>
+        </td>
+      </tr>
+    )}
+    </>
   );
 }
 
@@ -589,8 +626,42 @@ function SessionFormFields({
           </div>
         )}
       </Field>
-      <Field label="TensorBoard URL 参数（可选）" full>
-        <input className="tb-input" value={form.extraParams} onChange={(e) => setForm({ ...form, extraParams: e.target.value })} placeholder="例如：?smoothing=0.79&runFilter=exp1#timeseries" />
+      <Field label="TensorBoard URL 参数组（可选）" full>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {form.extraParams.map((ep, i) => (
+            <div key={i} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              <input
+                className="tb-input"
+                value={ep.label}
+                onChange={(e) => setForm({ ...form, extraParams: form.extraParams.map((p, j) => j === i ? { ...p, label: e.target.value } : p) })}
+                placeholder="备注"
+                style={{ width: 120, flexShrink: 0 }}
+              />
+              <input
+                className="tb-input"
+                value={ep.params}
+                onChange={(e) => setForm({ ...form, extraParams: form.extraParams.map((p, j) => j === i ? { ...p, params: e.target.value } : p) })}
+                placeholder="?smoothing=0.79#timeseries"
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <button
+                className="tb-btn tb-btn-sm tb-btn-ghost"
+                type="button"
+                onClick={() => setForm({ ...form, extraParams: form.extraParams.filter((_, j) => j !== i) })}
+                style={{ flexShrink: 0, color: '#dc2626' }}
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
+          ))}
+          <button
+            className="tb-btn tb-btn-sm tb-btn-ghost"
+            type="button"
+            onClick={() => setForm({ ...form, extraParams: [...form.extraParams, { label: '', params: '' }] })}
+          >
+            <Plus size={11} /> 添加参数组
+          </button>
+        </div>
       </Field>
     </div>
   );
@@ -602,14 +673,16 @@ function SessionFormFields({
 
 function SessionFormModal({
   servers,
+  initialForm,
   onClose,
   onSaved,
 }: {
   servers: TbServer[];
+  initialForm?: SessionForm;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [form, setForm] = useState<SessionForm>({ ...EMPTY_SESSION_FORM, serverId: servers[0]?.id || '' });
+  const [form, setForm] = useState<SessionForm>(initialForm || { ...EMPTY_SESSION_FORM, serverId: servers[0]?.id || '' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const condaState = useCondaEnvs(form.serverId, form.pythonMode, servers);
@@ -629,7 +702,7 @@ function SessionFormModal({
 
   return (
     <Modal
-      title="启动 TensorBoard"
+      title={initialForm ? '复制会话' : '启动 TensorBoard'}
       onClose={onClose}
       width={560}
       foot={
@@ -643,6 +716,9 @@ function SessionFormModal({
     >
       {error && <Alert type="error">{error}</Alert>}
       <SessionFormFields form={form} setForm={setForm} servers={servers} condaState={condaState} />
+      <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8 }}>
+        提示：TensorBoard URL 参数修改保存后立即生效（无需重启）；其他配置修改需点击「保存并重启」才能生效。
+      </div>
     </Modal>
   );
 }
@@ -671,7 +747,7 @@ function SessionEditModal({
     pythonMode: session.pythonMode,
     condaEnv: session.condaEnv,
     pythonPath: session.pythonPath,
-    extraParams: session.extraParams || '',
+    extraParams: session.extraParams || [],
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -713,6 +789,9 @@ function SessionEditModal({
     >
       {error && <Alert type="error">{error}</Alert>}
       <SessionFormFields form={form} setForm={setForm} servers={servers} condaState={condaState} />
+      <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8 }}>
+        提示：TensorBoard URL 参数修改保存后立即生效（无需重启）；其他配置修改需点击「保存并重启」才能生效。
+      </div>
     </Modal>
   );
 }

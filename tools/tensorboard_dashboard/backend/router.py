@@ -53,7 +53,7 @@ class StartSessionPayload(BaseModel):
     pythonMode: str = "conda"
     condaEnv: str = ""
     pythonPath: str = ""
-    extraParams: str = ""
+    extraParams: list[dict[str, str]] = []
 
 
 class CheckPythonEnvPayload(BaseModel):
@@ -69,7 +69,7 @@ class UpdateSessionPayload(BaseModel):
     pythonMode: str | None = None
     condaEnv: str | None = None
     pythonPath: str | None = None
-    extraParams: str | None = None
+    extraParams: list[dict[str, str]] | None = None
 
 
 # ---- Servers ----

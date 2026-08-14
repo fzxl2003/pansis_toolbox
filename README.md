@@ -17,16 +17,16 @@ storage/          本地数据库、上传文件和用户工具数据
 
 ## 当前工具
 
-| 工具 ID | 名称 | 分类 | API 前缀 | 额外运行依赖 |
-| --- | --- | --- | --- | --- |
-| `docker_manager` | Docker 多租户管理 | `ops` | `/api/tools/docker-manager` | `paramiko`, `cryptography` |
-| `experiment_monitor` | 实验监控报警与触发 | `ops` | `/api/tools/experiment-monitor` | `paramiko` |
-| `memo_demo` | 备忘录 Demo | `text` | `/api/tools/memo-demo` | 无 |
-| `server_monitor` | 服务器监控看板 | `ops` | `/api/tools/server-monitor` | 无 |
-| `ssh_workspace` | SSH 工作台 | `ops` | `/api/tools/ssh-workspace` | `paramiko`, `cryptography` |
-| `text_cleaner` | 文本清洗 | `text` | `/api/tools/text-cleaner` | 无 |
-| `url_navigator` | 网址导航 | `network` | `/api/tools/url-navigator` | 无 |
-| `web_proxy` | 网页代理 | `network` | `/web-proxy` | 内置 Rammerhead Node sidecar |
+| 工具 ID                | 名称               | 分类        | API 前缀                          | 额外运行依赖                   |
+| ---------------------- | ------------------ | ----------- | --------------------------------- | ------------------------------ |
+| `docker_manager`     | Docker 多租户管理  | `ops`     | `/api/tools/docker-manager`     | `paramiko`, `cryptography` |
+| `experiment_monitor` | 实验监控报警与触发 | `ops`     | `/api/tools/experiment-monitor` | `paramiko`                   |
+| `memo_demo`          | 备忘录 Demo        | `text`    | `/api/tools/memo-demo`          | 无                             |
+| `server_monitor`     | 服务器监控看板     | `ops`     | `/api/tools/server-monitor`     | 无                             |
+| `ssh_workspace`      | SSH 工作台         | `ops`     | `/api/tools/ssh-workspace`      | `paramiko`, `cryptography` |
+| `text_cleaner`       | 文本清洗           | `text`    | `/api/tools/text-cleaner`       | 无                             |
+| `url_navigator`      | 网址导航           | `network` | `/api/tools/url-navigator`      | 无                             |
+| `web_proxy`          | 网页代理           | `network` | `/web-proxy`                    | 内置 Rammerhead Node sidecar   |
 
 ## 本地环境配置
 
@@ -49,20 +49,20 @@ cp .env.example .env
 
 常用配置项：
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `APP_ENV` | `development` | 应用运行环境 |
-| `API_PREFIX` | `/api` | 主平台 API 前缀 |
-| `TOOLS_DIR` | `tools` | 工具发现目录 |
-| `FRONTEND_DIST_DIR` | `frontend/dist` | 生产模式静态前端目录 |
-| `STORAGE_DIR` | `storage` | 本地持久化数据目录 |
-| `PLATFORM_DB_PATH` | `storage/data/platform.db` | 平台 SQLite 数据库 |
-| `WIDGET_LAYOUT_PATH` | `storage/data/widget_layout.json` | 首页小组件布局文件 |
-| `FRONTEND_ORIGIN` | `http://localhost:5173` | 开发前端允许跨域来源 |
-| `SESSION_SECRET` | `change-me-in-production` | 会话签名密钥，生产环境必须修改 |
-| `DEFAULT_ADMIN_USERNAME` | `admin` | 默认管理员用户名 |
-| `DEFAULT_ADMIN_PASSWORD` | `admin123` | 默认管理员密码，生产环境必须修改 |
-| `DEFAULT_ADMIN_DISPLAY_NAME` | `本地管理员` | 默认管理员显示名 |
+| 变量                           | 默认值                              | 说明                             |
+| ------------------------------ | ----------------------------------- | -------------------------------- |
+| `APP_ENV`                    | `development`                     | 应用运行环境                     |
+| `API_PREFIX`                 | `/api`                            | 主平台 API 前缀                  |
+| `TOOLS_DIR`                  | `tools`                           | 工具发现目录                     |
+| `FRONTEND_DIST_DIR`          | `frontend/dist`                   | 生产模式静态前端目录             |
+| `STORAGE_DIR`                | `storage`                         | 本地持久化数据目录               |
+| `PLATFORM_DB_PATH`           | `storage/data/platform.db`        | 平台 SQLite 数据库               |
+| `WIDGET_LAYOUT_PATH`         | `storage/data/widget_layout.json` | 首页小组件布局文件               |
+| `FRONTEND_ORIGIN`            | `http://localhost:5173`           | 开发前端允许跨域来源             |
+| `SESSION_SECRET`             | `change-me-in-production`         | 会话签名密钥，生产环境必须修改   |
+| `DEFAULT_ADMIN_USERNAME`     | `admin`                           | 默认管理员用户名                 |
+| `DEFAULT_ADMIN_PASSWORD`     | `admin123`                        | 默认管理员密码，生产环境必须修改 |
+| `DEFAULT_ADMIN_DISPLAY_NAME` | `本地管理员`                      | 默认管理员显示名                 |
 
 默认登录账号为 `admin / admin123`。首次部署或对外访问前请修改 `SESSION_SECRET` 和默认管理员密码。
 

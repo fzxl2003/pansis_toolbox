@@ -1,0 +1,19 @@
+{
+  "id": "tensorboard_progress_monitor",
+  "name": "TensorBoard 实验进度监控",
+  "description": "通过 SSH 在远程服务器本地解析 TensorBoard event 文件尾部，生成实验进度与 ETA 报表。",
+  "version": "1.0.0",
+  "enabled": true,
+  "category": "ops",
+  "icon": {"type": "lucide", "name": "chart-no-axes-combined"},
+  "displayMode": "standard",
+  "entry": {"frontend": "frontend/index.tsx", "backend": "backend/router.py"},
+  "api": {"prefix": "/api/tools/tensorboard-progress-monitor"},
+  "widgets": [],
+  "dependencies": {
+    "paramiko": ">=3.0.0",
+    "cryptography": ">=41.0.0",
+    "PyYAML": ">=6.0"
+  },
+  "permissions": {"filesystem": false, "network": true, "longRunningTask": true, "userData": true}
+}

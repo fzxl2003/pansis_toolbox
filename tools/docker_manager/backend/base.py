@@ -27,6 +27,7 @@ from backend.app.db.database import get_connection
 from backend.app.services.auth_service import User
 from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services import ssh_connection_service
+from backend.app.services import ssh_server_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 TOOL_ID = "docker_manager"
@@ -370,6 +371,7 @@ def init_docker_database() -> None:
             if "is_public" not in ctr_meta_cols_public:
                 conn.execute("ALTER TABLE docker_containers_meta ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
         _DB_INITIALIZED = True
+    _migrate_legacy_docker_servers()
     _start_df_cache_refresher()
 
 
@@ -379,6 +381,21 @@ def init_docker_database() -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _migrate_legacy_docker_servers() -> None:
+    """Move existing Docker server passwords into global SSH records."""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM docker_servers WHERE ssh_password_encrypted <> ''").fetchall()
+        for row in rows:
+            owner = User(id=row["created_by"], username="", display_name="", role="user", disabled=False)
+            ssh_server_service.migrate_legacy_server(
+                server_id=row["id"], owner=owner, name=row["name"], host=row["host"], port=row["port"],
+                ssh_username=row["ssh_username"], ssh_password=_decrypt(row["ssh_password_encrypted"]),
+                source_tool=TOOL_ID,
+            )
+            conn.execute("UPDATE docker_servers SET ssh_password_encrypted='' WHERE id=?", (row["id"],))
+        conn.commit()
 
 
 def _new_id() -> str:
@@ -462,6 +479,7 @@ def _record_resource_creator(
 
 def _require_server_visible(conn: sqlite3.Connection, server_id: str, user: User) -> None:
     """校验用户对服务器是否有可见权限（server_visible 或管理员）"""
+    ssh_server_service.get_server(server_id, user)
     if user.role == "admin":
         return
     perms = _get_user_perms(conn, server_id, user)
@@ -627,14 +645,25 @@ def _ssh_exec(client, cmd: str, timeout: int = 60) -> tuple[str, str, int]:
 
 
 def _ssh_spec(server_row: sqlite3.Row, timeout: int = 15) -> SSHConnectionSpec:
+    credentials = ssh_server_service.get_server_credentials(
+        server_row["id"],
+        User(id=server_row["created_by"], username="", display_name="", role="admin", disabled=False),
+    )
     return SSHConnectionSpec(
         tool_id=TOOL_ID,
         server_id=server_row["id"],
-        host=server_row["host"],
-        port=int(server_row["port"]),
-        username=server_row["ssh_username"],
-        auth_fingerprint=ssh_connection_service.auth_fingerprint(server_row["ssh_password_encrypted"]),
-        password=_decrypt(server_row["ssh_password_encrypted"]),
+        host=credentials["host"],
+        port=int(credentials["port"]),
+        username=credentials["ssh_username"],
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(
+            credentials["auth_type"], credentials["ssh_password"], credentials["private_key"],
+        ),
+        password=credentials["ssh_password"],
+        pkey=ssh_server_service.load_private_key(
+            credentials["private_key"],
+            credentials["private_key_passphrase"],
+            __import__("paramiko"),
+        ) if credentials["auth_type"] == "private_key" else None,
         connect_timeout=timeout,
         connect_error_code="SSH_CONNECT_FAILED",
         missing_dependency_code="MISSING_DEP",

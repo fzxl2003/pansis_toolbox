@@ -24,26 +24,12 @@ export type TbServer = {
 };
 
 export type ServerForm = {
-  name: string;
-  host: string;
-  port: number;
-  sshUsername: string;
-  authType: AuthType;
-  sshPassword: string;
-  privateKey: string;
-  privateKeyPassphrase: string;
+  serverId: string;
   condaBasePath: string;
 };
 
 export const EMPTY_SERVER_FORM: ServerForm = {
-  name: '',
-  host: '',
-  port: 22,
-  sshUsername: '',
-  authType: 'password',
-  sshPassword: '',
-  privateKey: '',
-  privateKeyPassphrase: '',
+  serverId: '',
   condaBasePath: '',
 };
 

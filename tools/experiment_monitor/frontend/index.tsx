@@ -178,11 +178,7 @@ type TaskDetailState = {
 // ============================================================
 
 type ServerFormState = {
-  name: string;
-  host: string;
-  port: number;
-  sshUsername: string;
-  sshPassword: string;
+  serverId: string;
 };
 
 type TaskFormState = {
@@ -214,11 +210,7 @@ type EmailActionFormState = {
 // ============================================================
 
 const emptyServer: ServerFormState = {
-  name: '',
-  host: '',
-  port: 22,
-  sshUsername: '',
-  sshPassword: '',
+  serverId: '',
 };
 
 const emptyTask: TaskFormState = {
@@ -454,11 +446,7 @@ export default function ExperimentMonitorTool() {
     const server = servers.find((s) => s.id === serverId);
     if (!server) return;
     setServerForm({
-      name: server.name,
-      host: server.host,
-      port: server.port,
-      sshUsername: server.sshUsername,
-      sshPassword: '',
+      serverId: server.id,
     });
     setEditingServerId(serverId);
     setSshTestResult(null);
@@ -470,17 +458,11 @@ export default function ExperimentMonitorTool() {
     setIsLoading(true);
     setError(null);
     try {
-      const payload = {
-        name: serverForm.name,
-        host: serverForm.host,
-        port: serverForm.port,
-        sshUsername: serverForm.sshUsername,
-        sshPassword: serverForm.sshPassword || undefined,
-      };
+      const payload = { serverId: serverForm.serverId };
       if (modal === 'server-edit' && editingServerId) {
         await apiPut(`/api/tools/experiment-monitor/servers/${editingServerId}`, payload);
       } else {
-        await apiPost('/api/tools/experiment-monitor/servers', { ...payload, sshPassword: serverForm.sshPassword });
+        await apiPost('/api/tools/experiment-monitor/servers', payload);
       }
       setModal(null);
       showSuccess('服务器保存成功');
@@ -1362,36 +1344,21 @@ function ServerForm(props: {
   onSubmit: (event: FormEvent) => void;
   onTest: () => void;
 }) {
+  const [globalServers, setGlobalServers] = useState<EmServer[]>([]);
+  useEffect(() => { void apiGet<{ servers: EmServer[] }>('/api/settings/ssh-servers').then((result) => setGlobalServers(result.servers)).catch(() => setGlobalServers([])); }, []);
   return (
     <form className="em-form" onSubmit={props.onSubmit}>
       <div className="form-group">
-        <label>服务器名称 *</label>
-        <input className="text-input" placeholder="如：GPU 服务器 A" value={props.form.name} onChange={(e) => props.onChange({ ...props.form, name: e.target.value })} />
+        <label>选择服务器 *</label>
+        <select className="text-input" value={props.form.serverId} disabled={props.isEdit} onChange={(e) => {
+          if (e.target.value === '__add_server__') { window.location.assign('/settings'); return; }
+          props.onChange({ serverId: e.target.value });
+        }}>
+          <option value="">请选择服务器...</option>
+          {globalServers.map((server) => <option key={server.id} value={server.id}>{server.name}（{server.sshUsername}@{server.host}:{server.port}）</option>)}
+          {!props.isEdit && <option value="__add_server__">＋ 添加服务器…</option>}
+        </select>
       </div>
-
-      <fieldset className="em-fieldset">
-        <legend>SSH 连接信息</legend>
-        <div className="em-form-grid2">
-          <div className="form-group">
-            <label>主机 / IP 地址 *</label>
-            <input className="text-input" placeholder="192.168.1.100 或 example.com" value={props.form.host} onChange={(e) => props.onChange({ ...props.form, host: e.target.value })} />
-          </div>
-          <div className="form-group">
-            <label>SSH 端口</label>
-            <input className="text-input" type="number" min="1" max="65535" placeholder="22" value={props.form.port} onChange={(e) => props.onChange({ ...props.form, port: Number(e.target.value) })} />
-          </div>
-        </div>
-        <div className="em-form-grid2">
-          <div className="form-group">
-            <label>SSH 用户名 *</label>
-            <input className="text-input" placeholder="root 或 ubuntu" value={props.form.sshUsername} onChange={(e) => props.onChange({ ...props.form, sshUsername: e.target.value })} />
-          </div>
-          <div className="form-group">
-            <label>SSH 密码{props.isEdit ? '（留空则不修改）' : ' *'}</label>
-            <input className="text-input" type="password" placeholder={props.isEdit ? '留空则不修改' : '••••••••'} value={props.form.sshPassword} onChange={(e) => props.onChange({ ...props.form, sshPassword: e.target.value })} />
-          </div>
-        </div>
-      </fieldset>
 
       {props.testResult && (
         <div className={`em-test-result ${props.testResult.connected ? 'success' : 'error'}`}>

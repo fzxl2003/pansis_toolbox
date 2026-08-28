@@ -134,6 +134,35 @@ def init_database() -> None:
                 PRIMARY KEY(tool_id, user_id),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+
+            -- SSH connection records are platform resources.  Tools only
+            -- retain their own, non-connection settings and reference this id.
+            CREATE TABLE IF NOT EXISTS platform_ssh_servers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                ssh_username TEXT NOT NULL,
+                auth_type TEXT NOT NULL DEFAULT 'password',
+                ssh_password_encrypted TEXT NOT NULL DEFAULT '',
+                private_key_encrypted TEXT NOT NULL DEFAULT '',
+                private_key_passphrase_encrypted TEXT NOT NULL DEFAULT '',
+                owner_user_id TEXT NOT NULL,
+                is_public INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS platform_ssh_server_user_access (
+                server_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                granted_at TEXT NOT NULL,
+                PRIMARY KEY(server_id, user_id),
+                FOREIGN KEY(server_id) REFERENCES platform_ssh_servers(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             """
         )
         _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")

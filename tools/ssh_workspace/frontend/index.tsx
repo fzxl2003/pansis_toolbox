@@ -109,7 +109,7 @@ export default function SshWorkspaceTool() {
           <TerminalWorkspace servers={servers} serversLoading={serversLoading} />
         )}
         {activeTab === 'servers' && (
-          <ServersPanel servers={servers} loading={serversLoading} onRefresh={() => void loadServers()} />
+          <ServersPanel servers={servers} loading={serversLoading} isAdmin={me.role === 'admin'} onRefresh={() => void loadServers()} />
         )}
         {activeTab === 'templates' && (
           <TemplatesPanel servers={servers} />

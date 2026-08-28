@@ -25,6 +25,7 @@ from backend.app.services.auth_service import User
 from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services.email_service import send_email as platform_send_email
 from backend.app.services import ssh_connection_service
+from backend.app.services import ssh_server_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 logger = logging.getLogger(__name__)
@@ -241,6 +242,7 @@ def init_database(user_id: str) -> None:
             except Exception:
                 pass  # 字段已存在，忽略
     _initialized_dbs.add(user_id)
+    _migrate_legacy_servers(user_id)
 
 
 # ============================================================
@@ -284,6 +286,20 @@ register_tool_categories(TOOL_ID, [
 # Server Management (SSH Connections)
 # ============================================================
 
+def _migrate_legacy_servers(user_id: str) -> None:
+    """Move each old tool-local password into the caller's private global SSH record."""
+    owner = User(id=user_id, username="", display_name="", role="user", disabled=False)
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
+        rows = connection.execute("SELECT * FROM em_servers WHERE ssh_password_encrypted <> ''").fetchall()
+        for row in rows:
+            ssh_server_service.migrate_legacy_server(
+                server_id=row["id"], owner=owner, name=row["name"], host=row["host"], port=row["port"],
+                ssh_username=row["ssh_username"], ssh_password=decrypt_secret(row["ssh_password_encrypted"]),
+                source_tool=TOOL_ID,
+            )
+            connection.execute("UPDATE em_servers SET ssh_password_encrypted='' WHERE id=?", (row["id"],))
+        connection.commit()
+
 def list_servers(user: User) -> list[dict[str, Any]]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
@@ -291,10 +307,17 @@ def list_servers(user: User) -> list[dict[str, Any]]:
             "SELECT * FROM em_servers WHERE owner_user_id = ? AND enabled = 1 ORDER BY name",
             (user.id,),
         ).fetchall()
-    return [_public_server(row) for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            selected = ssh_server_service.get_server(row["id"], user)
+        except ToolboxError:
+            continue
+        result.append({**_public_server(row), **{key: selected[key] for key in ("name", "host", "port", "sshUsername")}})
+    return result
 
 
-def get_server(server_id: str, user: User) -> sqlite3.Row:
+def get_server(server_id: str, user: User) -> dict[str, Any]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
@@ -303,14 +326,22 @@ def get_server(server_id: str, user: User) -> sqlite3.Row:
         ).fetchone()
     if row is None:
         raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
-    return row
+    return ssh_server_service.merge_connection_credentials(row, user)
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id)
-    server_id = secrets.token_hex(12)
+    selected = ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
+    server_id = selected["id"]
     now = now_iso()
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        existing = connection.execute("SELECT * FROM em_servers WHERE id=?", (server_id,)).fetchone()
+        if existing is not None:
+            if bool(existing["enabled"]):
+                raise ToolboxError("SERVER_ALREADY_SELECTED", "该全局服务器已添加到此工具", status_code=409, tool_id=TOOL_ID)
+            connection.execute("UPDATE em_servers SET enabled=1,updated_at=? WHERE id=?", (now, server_id))
+            connection.commit()
+            return {**_public_server(connection.execute("SELECT * FROM em_servers WHERE id=?", (server_id,)).fetchone()), **{key: selected[key] for key in ("name", "host", "port", "sshUsername")}}
         connection.execute(
             """
             INSERT INTO em_servers (id, name, host, port, ssh_username, ssh_password_encrypted, owner_user_id, enabled, created_at, updated_at)
@@ -318,11 +349,7 @@ def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
             """,
             (
                 server_id,
-                _required(payload, "name"),
-                _required(payload, "host"),
-                int(payload.get("port") or 22),
-                _required(payload, "sshUsername"),
-                encrypt_secret(_required(payload, "sshPassword")),
+                selected["name"], selected["host"], int(selected["port"]), selected["sshUsername"], "",
                 user.id,
                 now,
                 now,
@@ -330,33 +357,14 @@ def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
         )
         connection.commit()
         row = connection.execute("SELECT * FROM em_servers WHERE id = ?", (server_id,)).fetchone()
-    return _public_server(row)
+    return {**_public_server(row), **{key: selected[key] for key in ("name", "host", "port", "sshUsername")}}
 
 
 def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-    row = get_server(server_id, user)
-    password = payload.get("sshPassword")
-    encrypted_password = encrypt_secret(password) if password else row["ssh_password_encrypted"]
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        connection.execute(
-            """
-            UPDATE em_servers SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                payload.get("name", row["name"]),
-                payload.get("host", row["host"]),
-                int(payload.get("port") or row["port"]),
-                payload.get("sshUsername", row["ssh_username"]),
-                encrypted_password,
-                now_iso(),
-                server_id,
-            ),
-        )
-        connection.commit()
-        updated = connection.execute("SELECT * FROM em_servers WHERE id = ?", (server_id,)).fetchone()
-    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
-    return _public_server(updated)
+    # SSH connection fields are platform-owned.  Updating a binding only
+    # verifies that the selected global id is still available to this user.
+    get_server(server_id, user)
+    return ssh_server_service.get_server(server_id, user)
 
 
 def delete_server(server_id: str, user: User) -> None:
@@ -1066,9 +1074,6 @@ def refresh_screen_sessions(group_id: str, user: User) -> list[dict[str, Any]]:
         task = connection.execute(
             "SELECT * FROM em_monitor_tasks WHERE id = ?", (action["task_id"],)
         ).fetchone()
-        server = connection.execute(
-            "SELECT * FROM em_servers WHERE id = ?", (task["server_id"],)
-        ).fetchone()
         sessions = connection.execute(
             "SELECT * FROM em_screen_sessions WHERE group_id = ? AND status = 'running' ORDER BY started_at DESC",
             (group_id,),
@@ -1076,6 +1081,8 @@ def refresh_screen_sessions(group_id: str, user: User) -> list[dict[str, Any]]:
 
     if not sessions:
         return []
+
+    server = get_server(task["server_id"], user)
 
     # Get alive screen session names from remote
     try:
@@ -1226,11 +1233,15 @@ def run_monitor_check(user_id: str, task_id: str) -> dict[str, Any]:
         return {"status": "skipped", "reason": "任务不存在或已禁用"}
 
     with user_tool_connection_context(user_id, TOOL_ID) as connection:
-        server = connection.execute("SELECT * FROM em_servers WHERE id = ?", (task["server_id"],)).fetchone()
         state = connection.execute("SELECT * FROM em_alert_states WHERE task_id = ?", (task_id,)).fetchone()
 
-    if server is None:
-        return {"status": "skipped", "reason": "关联服务器不存在"}
+    try:
+        server = get_server(
+            task["server_id"],
+            User(id=user_id, username="", display_name="", role="user", disabled=False),
+        )
+    except ToolboxError:
+        return {"status": "skipped", "reason": "关联的全局服务器不存在或不可访问"}
 
     error = None
     process_count = 0
@@ -1726,14 +1737,15 @@ def _ssh_spec(row: sqlite3.Row | Any, timeout: int = 20) -> SSHConnectionSpec:
         return getattr(row, key, "")
 
     encrypted_password = _get("ssh_password_encrypted")
+    plain_password = row.get("ssh_password", "") if isinstance(row, dict) else ""
     return SSHConnectionSpec(
         tool_id=TOOL_ID,
         server_id=_get("id"),
         host=_get("host"),
         port=int(_get("port")),
         username=_get("ssh_username"),
-        auth_fingerprint=ssh_connection_service.auth_fingerprint(encrypted_password),
-        password=decrypt_secret(encrypted_password),
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(plain_password or encrypted_password),
+        password=plain_password or decrypt_secret(encrypted_password),
         connect_timeout=timeout,
         connect_error_code="SSH_CONNECT_FAILED",
         missing_dependency_code="SSH_DEPENDENCY_MISSING",

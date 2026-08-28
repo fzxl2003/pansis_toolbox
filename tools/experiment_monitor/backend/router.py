@@ -45,15 +45,11 @@ router = APIRouter()
 # ============================================================
 
 class ServerPayload(BaseModel):
-    name: str
-    host: str
-    port: int = 22
-    sshUsername: str
-    sshPassword: str = ""
+    serverId: str
 
 
 class CreateServerPayload(ServerPayload):
-    sshPassword: str
+    pass
 
 
 @router.get("/servers")
@@ -320,4 +316,3 @@ def delete_history_route(request: Request, history_id: str) -> dict[str, bool]:
 def refresh_sessions_route(request: Request, group_id: str) -> dict:
     user = require_user(request)
     return {"sessions": refresh_screen_sessions(group_id, user)}
-

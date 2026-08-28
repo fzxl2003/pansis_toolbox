@@ -9,7 +9,6 @@ import {
   ChevronUp,
   ClipboardList,
   Clock,
-  Copy,
   Loader2,
   Monitor,
   Pencil,
@@ -37,10 +36,11 @@ import { EMPTY_SERVER_FORM, EMPTY_TASK_FORM, EMPTY_TEMPLATE_FORM } from './types
 export type ServersPanelProps = {
   servers: SshServer[];
   loading: boolean;
+  isAdmin: boolean;
   onRefresh: () => void;
 };
 
-export function ServersPanel({ servers, loading, onRefresh }: ServersPanelProps) {
+export function ServersPanel({ servers, loading, isAdmin: _isAdmin, onRefresh }: ServersPanelProps) {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -50,36 +50,6 @@ export function ServersPanel({ servers, loading, onRefresh }: ServersPanelProps)
   function handleAdd() {
     setEditingId(null);
     setShowForm(true);
-  }
-
-  function handleEdit(srv: SshServer) {
-    setEditingId(srv.id);
-    setShowForm(true);
-  }
-
-  function handleDelete(srv: SshServer) {
-    confirm({
-      title: '删除服务器',
-      message: `确认删除「${srv.name}」？关联的命令模板和定时任务将保留但不再可用。`,
-      onConfirm: async () => {
-        try {
-          await apiDelete(`${API}/servers/${srv.id}`);
-          if (expandedId === srv.id) setExpandedId(null);
-          onRefresh();
-        } catch (exc) {
-          setError(messageFromError(exc));
-        }
-      },
-    });
-  }
-
-  async function handleCopy(srv: SshServer) {
-    try {
-      await apiPost(`${API}/servers/${srv.id}/copy`, { name: `${srv.name} (副本)` });
-      onRefresh();
-    } catch (exc) {
-      setError(messageFromError(exc));
-    }
   }
 
   async function handleTest(srv: SshServer) {
@@ -96,7 +66,7 @@ export function ServersPanel({ servers, loading, onRefresh }: ServersPanelProps)
       <div className="sw-panel-head">
         <div>
           <h2 className="sw-panel-title"><Server size={18} /> 服务器管理</h2>
-          <p className="sw-panel-desc">添加和管理 SSH 服务器，命令模板与定时任务绑定到具体服务器</p>
+          <p className="sw-panel-desc">命令模板与定时任务绑定到具体服务器</p>
         </div>
         <button className="sw-btn sw-btn-primary" onClick={handleAdd} type="button">
           <Plus size={14} /> 添加服务器
@@ -111,7 +81,7 @@ export function ServersPanel({ servers, loading, onRefresh }: ServersPanelProps)
         <div className="sw-empty">
           <div className="sw-empty-icon"><Server size={32} /></div>
           <div className="sw-empty-title">暂无服务器</div>
-          <div className="sw-empty-hint">点击「添加服务器」开始</div>
+          <div className="sw-empty-hint">请由管理员在设置中配置并授权 SSH 服务器</div>
         </div>
       ) : (
         <div className="sw-server-list">
@@ -121,9 +91,6 @@ export function ServersPanel({ servers, loading, onRefresh }: ServersPanelProps)
               server={srv}
               expanded={expandedId === srv.id}
               onToggle={() => setExpandedId(expandedId === srv.id ? null : srv.id)}
-              onEdit={() => handleEdit(srv)}
-              onDelete={() => handleDelete(srv)}
-              onCopy={() => void handleCopy(srv)}
               onTest={() => void handleTest(srv)}
             />
           ))}
@@ -150,13 +117,10 @@ type ServerCardProps = {
   server: SshServer;
   expanded: boolean;
   onToggle: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  onCopy: () => void;
   onTest: () => void;
 };
 
-function ServerCard({ server, expanded, onToggle, onEdit, onDelete, onCopy, onTest }: ServerCardProps) {
+function ServerCard({ server, expanded, onToggle, onTest }: ServerCardProps) {
   const [testing, setTesting] = useState(false);
   const testStatusIcon = server.lastTestStatus === 'ok'
     ? <CheckCircle size={13} className="sw-text-green" />
@@ -187,10 +151,7 @@ function ServerCard({ server, expanded, onToggle, onEdit, onDelete, onCopy, onTe
         </div>
       </div>
       <div className="sw-server-card-actions">
-        <button className="sw-btn sw-btn-sm sw-btn-ghost" onClick={onEdit} type="button"><Pencil size={12} /> 编辑</button>
         <button className="sw-btn sw-btn-sm sw-btn-ghost" onClick={handleTest} type="button" disabled={testing}><Play size={12} /> 测试连接</button>
-        <button className="sw-btn sw-btn-sm sw-btn-ghost" onClick={onCopy} type="button"><Copy size={12} /> 复制</button>
-        <button className="sw-btn sw-btn-sm sw-btn-danger-ghost" onClick={onDelete} type="button"><Trash2 size={12} /> 删除</button>
       </div>
 
       {expanded && (
@@ -534,29 +495,15 @@ function ServerFormModal({
   const [form, setForm] = useState<ServerForm>({ ...EMPTY_SERVER_FORM });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(!!serverId);
+  const [loading, setLoading] = useState(true);
+  const [globalServers, setGlobalServers] = useState<SshServer[]>([]);
 
   useEffect(() => {
-    if (!serverId) return;
     void (async () => {
       try {
-        // We need the server's full details — but we don't expose password/key.
-        // The form will have empty password/key fields (only filled if user enters new).
-        // Get server from servers list via API
-        const r = await apiGet<{ servers: SshServer[] }>(`${API}/servers`);
-        const srv = r.servers.find((s) => s.id === serverId);
-        if (srv) {
-          setForm({
-            name: srv.name,
-            host: srv.host,
-            port: srv.port,
-            sshUsername: srv.sshUsername,
-            authType: srv.authType,
-            sshPassword: '',
-            privateKey: '',
-            privateKeyPassphrase: '',
-          });
-        }
+        const r = await apiGet<{ servers: SshServer[] }>('/api/settings/ssh-servers');
+        setGlobalServers(r.servers);
+        if (serverId) setForm({ serverId });
       } catch (exc) {
         setError(messageFromError(exc));
       } finally {
@@ -570,18 +517,7 @@ function ServerFormModal({
     setError('');
     try {
       if (serverId) {
-        // For update, only include password/key if filled
-        const payload: Record<string, unknown> = {
-          name: form.name,
-          host: form.host,
-          port: form.port,
-          sshUsername: form.sshUsername,
-          authType: form.authType,
-        };
-        if (form.sshPassword) payload.sshPassword = form.sshPassword;
-        if (form.privateKey) payload.privateKey = form.privateKey;
-        if (form.privateKeyPassphrase) payload.privateKeyPassphrase = form.privateKeyPassphrase;
-        await apiPut(`${API}/servers/${serverId}`, payload);
+        await apiPut(`${API}/servers/${serverId}`, { serverId });
       } else {
         await apiPost(`${API}/servers`, form);
       }
@@ -603,7 +539,7 @@ function ServerFormModal({
 
   return (
     <Modal
-      title={serverId ? '编辑服务器' : '添加服务器'}
+      title={serverId ? '查看服务器' : '添加服务器'}
       onClose={onClose}
       foot={
         <>
@@ -616,37 +552,16 @@ function ServerFormModal({
     >
       <div className="sw-form-grid">
         {error && <Alert type="error">{error}</Alert>}
-        <Field label="名称"><input className="sw-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="例如：开发服务器" /></Field>
-        <Field label="主机地址"><input className="sw-input" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="例如：192.168.1.100" /></Field>
-        <Field label="端口"><input className="sw-input" type="number" value={form.port} onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 22 })} /></Field>
-        <Field label="SSH 用户名"><input className="sw-input" value={form.sshUsername} onChange={(e) => setForm({ ...form, sshUsername: e.target.value })} /></Field>
-        <Field label="认证方式" full>
-          <div className="sw-radio-group">
-            <label className={`sw-radio${form.authType === 'password' ? ' active' : ''}`}>
-              <input type="radio" checked={form.authType === 'password'} onChange={() => setForm({ ...form, authType: 'password' })} />
-              密码
-            </label>
-            <label className={`sw-radio${form.authType === 'private_key' ? ' active' : ''}`}>
-              <input type="radio" checked={form.authType === 'private_key'} onChange={() => setForm({ ...form, authType: 'private_key' })} />
-              私钥
-            </label>
-          </div>
+        <Field label="选择服务器" full>
+          <select className="sw-input" value={form.serverId} disabled={!!serverId} onChange={(e) => {
+            if (e.target.value === '__add_server__') { window.location.assign('/settings'); return; }
+            setForm({ ...form, serverId: e.target.value });
+          }}>
+            <option value="">请选择服务器</option>
+            {globalServers.map((srv) => <option key={srv.id} value={srv.id}>{srv.name}（{srv.sshUsername}@{srv.host}:{srv.port}）</option>)}
+            {!serverId && <option value="__add_server__">＋ 添加服务器…</option>}
+          </select>
         </Field>
-        {form.authType === 'password' && (
-          <Field label={serverId ? 'SSH 密码（留空不修改）' : 'SSH 密码'} full>
-            <input className="sw-input" type="password" value={form.sshPassword} onChange={(e) => setForm({ ...form, sshPassword: e.target.value })} />
-          </Field>
-        )}
-        {form.authType === 'private_key' && (
-          <>
-            <Field label={serverId ? '私钥内容（留空不修改）' : '私钥内容'} full>
-              <textarea className="sw-textarea" rows={5} value={form.privateKey} onChange={(e) => setForm({ ...form, privateKey: e.target.value })} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
-            </Field>
-            <Field label="私钥 passphrase（可选）" full>
-              <input className="sw-input" type="password" value={form.privateKeyPassphrase} onChange={(e) => setForm({ ...form, privateKeyPassphrase: e.target.value })} />
-            </Field>
-          </>
-        )}
       </div>
     </Modal>
   );

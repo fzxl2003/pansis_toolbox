@@ -11,19 +11,11 @@ router = APIRouter()
 
 
 class ServerPayload(BaseModel):
-    name: str
-    host: str
-    port: int = 22
-    sshUsername: str
-    sshPassword: str = ""
+    serverId: str
     tbPythonMode: Literal["conda", "path"] = "conda"
     tbCondaBasePath: str = ""
     tbCondaEnv: str = ""
     tbPythonPath: str = ""
-
-
-class CreateServerPayload(ServerPayload):
-    sshPassword: str
 
 
 class TaskPayload(BaseModel):
@@ -58,7 +50,7 @@ def list_servers(request: Request) -> dict:
 
 
 @router.post("/servers")
-def create_server(request: Request, payload: CreateServerPayload) -> dict:
+def create_server(request: Request, payload: ServerPayload) -> dict:
     return {"server": service.create_server(payload.model_dump(), require_user(request))}
 
 

@@ -7,16 +7,17 @@ from .volumes import _calc_user_volume_usage
 # ==============================================================
 
 def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    """添加服务器（管理员）：验证 SSH + Docker 权限后保存"""
+    """Bind Docker management to an already-authorized global SSH server."""
     init_docker_database()
     if user.role != "admin":
         raise ToolboxError("ADMIN_REQUIRED", "只有管理员可以添加服务器", status_code=403, tool_id=TOOL_ID)
 
-    host = payload["host"].strip()
-    port = int(payload.get("port", 22))
-    ssh_username = payload["sshUsername"].strip()
-    ssh_password = payload["sshPassword"]
-    name = payload["name"].strip()
+    selected = ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
+    credentials = ssh_server_service.get_server_credentials(selected["id"], user)
+    host = credentials["host"]
+    port = int(credentials["port"])
+    ssh_username = credentials["ssh_username"]
+    name = selected["name"]
 
     # 验证 SSH 连接和 Docker 权限
     try:
@@ -27,7 +28,14 @@ def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(hostname=host, port=port, username=ssh_username, password=ssh_password, timeout=15)
+        if credentials["auth_type"] == "private_key":
+            client.connect(
+                hostname=host, port=port, username=ssh_username,
+                pkey=ssh_server_service.load_private_key(credentials["private_key"], credentials["private_key_passphrase"], paramiko),
+                timeout=15,
+            )
+        else:
+            client.connect(hostname=host, port=port, username=ssh_username, password=credentials["ssh_password"], timeout=15)
     except Exception as exc:
         raise ToolboxError("SSH_CONNECT_FAILED", f"SSH 连接失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
 
@@ -72,17 +80,18 @@ def add_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     finally:
         client.close()
 
-    server_id = _new_id()
-    encrypted_pw = _encrypt(ssh_password)
+    server_id = selected["id"]
     now = _now()
 
     with get_connection() as conn:
+        if conn.execute("SELECT 1 FROM docker_servers WHERE id=?", (server_id,)).fetchone() is not None:
+            raise ToolboxError("SERVER_ALREADY_SELECTED", "该全局服务器已添加到 Docker 管理", status_code=409, tool_id=TOOL_ID)
         conn.execute(
             """
             INSERT INTO docker_servers (id, name, host, port, ssh_username, ssh_password_encrypted, created_by, created_at, updated_at, cuda_available, gpu_count, gpu_info)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (server_id, name, host, port, ssh_username, encrypted_pw, user.id, now, now,
+            (server_id, name, host, port, ssh_username, "", user.id, now, now,
              1 if cuda_available else 0, gpu_count, json.dumps(gpu_info)),
         )
     _refresh_docker_df_cache_best_effort(server_id)
@@ -98,10 +107,15 @@ def list_servers(user: User) -> list[dict[str, Any]]:
         all_rows = conn.execute("SELECT * FROM docker_servers ORDER BY name").fetchall()
         result = []
         for row in all_rows:
+            try:
+                selected = ssh_server_service.get_server(row["id"], user)
+            except ToolboxError:
+                continue
             perms = _get_user_perms(conn, row["id"], user)
             if user.role != "admin" and not perms.get("server_visible"):
                 continue
             srv = _public_server(row)
+            srv.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
             srv["serverVisible"] = True
             srv["perms"] = perms
             result.append(srv)
@@ -119,6 +133,10 @@ def check_servers_status(user: User) -> dict[str, str]:
         all_rows = conn.execute("SELECT * FROM docker_servers ORDER BY name").fetchall()
         visible_rows = []
         for row in all_rows:
+            try:
+                ssh_server_service.get_server(row["id"], user)
+            except ToolboxError:
+                continue
             perms = _get_user_perms(conn, row["id"], user)
             if user.role == "admin" or perms.get("server_visible"):
                 visible_rows.append(row)
@@ -148,7 +166,9 @@ def get_server(server_id: str, user: User) -> dict[str, Any]:
     with get_connection() as conn:
         row = _get_server_row(conn, server_id)
         _require_server_visible(conn, server_id, user)
+        selected = ssh_server_service.get_server(server_id, user)
         srv = _public_server(row)
+        srv.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
         srv["perms"] = _get_user_perms(conn, server_id, user)
     return srv
 
@@ -316,4 +336,3 @@ def get_my_quota(server_id: str, user: User) -> dict[str, Any]:
         perms["volumeTotalGb"] = vol_usage["quotaGb"]
         perms["volumeRemainingGb"] = vol_usage["remainingGb"]
     return perms
-

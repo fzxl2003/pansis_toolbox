@@ -218,23 +218,19 @@ function ServerFormModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!serverId);
+  const [globalServers, setGlobalServers] = useState<TbServer[]>([]);
 
   useEffect(() => {
-    if (!serverId) return;
     void (async () => {
       try {
+        const global = await apiGet<{ servers: TbServer[] }>('/api/settings/ssh-servers');
+        setGlobalServers(global.servers);
+        if (!serverId) return;
         const r = await apiGet<{ servers: TbServer[] }>(`${API}/servers`);
         const srv = r.servers.find((s) => s.id === serverId);
         if (srv) {
           setForm({
-            name: srv.name,
-            host: srv.host,
-            port: srv.port,
-            sshUsername: srv.sshUsername,
-            authType: srv.authType,
-            sshPassword: '',
-            privateKey: '',
-            privateKeyPassphrase: '',
+            serverId: srv.id,
             condaBasePath: srv.condaBasePath || '',
           });
         }
@@ -251,18 +247,7 @@ function ServerFormModal({
     setError('');
     try {
       if (serverId) {
-        const payload: Record<string, unknown> = {
-          name: form.name,
-          host: form.host,
-          port: form.port,
-          sshUsername: form.sshUsername,
-          authType: form.authType,
-          condaBasePath: form.condaBasePath,
-        };
-        if (form.sshPassword) payload.sshPassword = form.sshPassword;
-        if (form.privateKey) payload.privateKey = form.privateKey;
-        if (form.privateKeyPassphrase) payload.privateKeyPassphrase = form.privateKeyPassphrase;
-        await apiPut(`${API}/servers/${serverId}`, payload);
+        await apiPut(`${API}/servers/${serverId}`, { condaBasePath: form.condaBasePath });
       } else {
         await apiPost(`${API}/servers`, form);
       }
@@ -297,40 +282,19 @@ function ServerFormModal({
     >
       <div className="tb-form-grid">
         {error && <Alert type="error">{error}</Alert>}
-        <Field label="名称"><input className="tb-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="例如：GPU 服务器" /></Field>
-        <Field label="主机地址"><input className="tb-input" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="例如：192.168.1.100" /></Field>
-        <Field label="端口"><input className="tb-input" type="number" value={form.port} onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 22 })} /></Field>
-        <Field label="SSH 用户名"><input className="tb-input" value={form.sshUsername} onChange={(e) => setForm({ ...form, sshUsername: e.target.value })} /></Field>
+        <Field label="选择服务器" full>
+          <select className="tb-input" value={form.serverId} disabled={!!serverId} onChange={(e) => {
+            if (e.target.value === '__add_server__') { window.location.assign('/settings'); return; }
+            setForm({ ...form, serverId: e.target.value });
+          }}>
+            <option value="">请选择服务器</option>
+            {globalServers.map((srv) => <option key={srv.id} value={srv.id}>{srv.name}（{srv.sshUsername}@{srv.host}:{srv.port}）</option>)}
+            {!serverId && <option value="__add_server__">＋ 添加服务器…</option>}
+          </select>
+        </Field>
         <Field label="Anaconda 安装路径（可选）" full>
           <input className="tb-input" value={form.condaBasePath} onChange={(e) => setForm({ ...form, condaBasePath: e.target.value })} placeholder="例如：/home/user/anaconda3 或 /opt/conda（不填则仅支持直接指定 Python 路径）" />
         </Field>
-        <Field label="认证方式" full>
-          <div className="tb-radio-group">
-            <label className="tb-radio-label">
-              <input type="radio" checked={form.authType === 'password'} onChange={() => setForm({ ...form, authType: 'password' })} />
-              密码
-            </label>
-            <label className="tb-radio-label">
-              <input type="radio" checked={form.authType === 'private_key'} onChange={() => setForm({ ...form, authType: 'private_key' })} />
-              私钥
-            </label>
-          </div>
-        </Field>
-        {form.authType === 'password' && (
-          <Field label={serverId ? 'SSH 密码（留空不修改）' : 'SSH 密码'} full>
-            <input className="tb-input" type="password" value={form.sshPassword} onChange={(e) => setForm({ ...form, sshPassword: e.target.value })} />
-          </Field>
-        )}
-        {form.authType === 'private_key' && (
-          <>
-            <Field label={serverId ? '私钥内容（留空不修改）' : '私钥内容'} full>
-              <textarea className="tb-textarea" rows={5} value={form.privateKey} onChange={(e) => setForm({ ...form, privateKey: e.target.value })} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
-            </Field>
-            <Field label="私钥 passphrase（可选）" full>
-              <input className="tb-input" type="password" value={form.privateKeyPassphrase} onChange={(e) => setForm({ ...form, privateKeyPassphrase: e.target.value })} />
-            </Field>
-          </>
-        )}
       </div>
     </Modal>
   );

@@ -205,7 +205,8 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError, clearError] = useErrorMsg();
   const [showAdd, setShowAdd] = useState(false);
-  const [addForm, setAddForm] = useState({ name: '', host: '', port: '22', sshUsername: '', sshPassword: '' });
+  const [addForm, setAddForm] = useState({ serverId: '' });
+  const [globalServers, setGlobalServers] = useState<Array<{ id: string; name: string; host: string; port: number; sshUsername: string }>>([]);
   const [adding, setAdding] = useState(false);
   const [addMsg, setAddMsg] = useState('');
 
@@ -413,17 +414,14 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
 
   useEffect(() => { void loadStatuses(); }, [loadStatuses]);
 
-  const af = (k: keyof typeof addForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setAddForm((p) => ({ ...p, [k]: e.target.value }));
-
   async function doAdd() {
     setAdding(true);
     setAddMsg('');
     clearError();
     try {
-      await apiPost(`${API}/servers`, { ...addForm, port: parseInt(addForm.port) || 22 });
+      await apiPost(`${API}/servers`, addForm);
       setAddMsg('服务器添加成功！');
-      setAddForm({ name: '', host: '', port: '22', sshUsername: '', sshPassword: '' });
+      setAddForm({ serverId: '' });
       void load();
       onRefresh();
       setTimeout(() => { setShowAdd(false); setAddMsg(''); }, 1200);
@@ -433,6 +431,13 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
       setAdding(false);
     }
   }
+
+  useEffect(() => {
+    if (!showAdd) return;
+    void apiGet<{ servers: Array<{ id: string; name: string; host: string; port: number; sshUsername: string }> }>('/api/settings/ssh-servers')
+      .then((result) => setGlobalServers(result.servers))
+      .catch((err) => setError(err));
+  }, [showAdd, setError]);
 
   async function doDelete(id: string, name: string) {
     if (!confirm(`确定删除服务器 ${name}？此操作将同时删除该服务器的权限和配额记录。`)) return;
@@ -1505,9 +1510,9 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
               <button
                 className="btn btn-primary"
                 onClick={doAdd}
-                disabled={adding || !addForm.host || !addForm.sshUsername || !addForm.sshPassword || !addForm.name}
+                disabled={adding || !addForm.serverId}
               >
-                {adding ? <Spin /> : <Plus size={14} />} 连接并添加
+                {adding ? <Spin /> : <Plus size={14} />} 验证并添加
               </button>
             </>
           }
@@ -1515,14 +1520,19 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
           {error && <Alert type="error">{error}</Alert>}
           {addMsg && <Alert type="success">{addMsg}</Alert>}
           <div className="dm-form-grid">
-            <Field label="显示名称"><input value={addForm.name} onChange={af('name')} placeholder="实验室服务器A" /></Field>
-            <Field label="主机地址"><input value={addForm.host} onChange={af('host')} placeholder="192.168.1.100" /></Field>
-            <Field label="SSH 端口"><input type="number" value={addForm.port} onChange={af('port')} /></Field>
-            <Field label="SSH 用户名"><input value={addForm.sshUsername} onChange={af('sshUsername')} placeholder="labuser" /></Field>
-            <Field label="SSH 密码" full><input type="password" value={addForm.sshPassword} onChange={af('sshPassword')} /></Field>
+            <Field label="选择服务器" full>
+              <select value={addForm.serverId} onChange={(e) => {
+                if (e.target.value === '__add_server__') { window.location.assign('/settings'); return; }
+                setAddForm({ serverId: e.target.value });
+              }}>
+                <option value="">请选择服务器</option>
+                {globalServers.map((server) => <option key={server.id} value={server.id}>{server.name}（{server.sshUsername}@{server.host}:{server.port}）</option>)}
+                <option value="__add_server__">＋ 添加服务器…</option>
+              </select>
+            </Field>
           </div>
           <div style={{ marginTop: 8, fontSize: 12, color: '#94a3b8' }}>
-            提交后将通过 SSH 自动验证 Docker 权限，请确保目标服务器已安装 Docker。
+            提交后将自动验证 Docker 权限，请确保目标服务器已安装 Docker。
           </div>
         </Modal>
       )}

@@ -12,6 +12,7 @@ import {
   Clock3,
   Copy,
   ExternalLink,
+  FileDown,
   Loader2,
   Pencil,
   Play,
@@ -43,23 +44,38 @@ import {
 } from "./components";
 
 const API = "/api/tools/tensorboard-progress-monitor";
-const DEFAULT_YAML = `tensorboard_root: /path/to/tensorboard/logs
-progress_tag: train/step
-progress_mode: event_step
-tail_bytes: 1048576
-report_interval_seconds: 60
-rate_report_count: 5
-stale_after_seconds: 180
-overall_concurrency: 1
-tb_custom_params: ""
-groups:
-  - name: all
-    pattern: "*"
-    target_step: 1000000
-    total_runs:
-    include_unmatched_children: false
-    children: []
+const EXAMPLE_YAML = `tensorboard_root: /data/experiments/tensorboard # 远程服务器上包含 event 文件的根目录
+progress_tag: train/step # 用于计算实验进度的 TensorBoard 标量 tag
+progress_mode: event_step # event_step 使用 tag 的 step；也可设为 scalar_value 使用标量值
+tail_bytes: 1048576 # 每个已更新 event 文件读取的末尾字节数
+report_interval_seconds: 60 # 自动生成报表的时间间隔（秒）
+rate_report_count: 5 # 使用最近几份报表估算单实验速度
+stale_after_seconds: 180 # event 文件超过该秒数未更新时标记为 stalled
+overall_concurrency: 2 # 估算全局 ETA 使用的并发实验槽位数
+tb_custom_params: "" # 可选：打开 TensorBoard 时附加的 URL 参数
+
+groups: # 实验分类列表；children 可继续嵌套，最深层匹配的分类归属该实验
+  - name: algorithm-a # 一级分类名称，例如算法
+    pattern: "algorithm-a/*" # 匹配该分类实验相对日志根目录的 glob 模式
+    target_step: 100000 # 此分类实验的完成目标进度
+    total_runs: 2 # 此分类预计的实验数量；留空则不校验总数
+    include_unmatched_children: false # 有子分类时，未命中子项的实验是否仍归入当前分类
+    children: # 二级分类列表，例如环境或数据集
+      - name: hopper # 二级分类名称
+        pattern: "algorithm-a/hopper/*" # 二级分类的完整 glob 匹配模式
+        target_step: 100000 # 二级分类的完成目标进度
+        total_runs: 2 # 二级分类预计的实验数量
+        include_unmatched_children: false # 有三级分类时，是否保留未命中三级分类的实验
+        children: # 三级分类列表，例如随机种子或实验子集
+          - name: seed-0 # 三级分类名称
+            pattern: "algorithm-a/hopper/seed-0" # 三级分类的完整 glob 匹配模式
+            target_step: 100000 # 三级分类的完成目标进度
+            total_runs: 1 # 三级分类预计的实验数量
+            include_unmatched_children: false # 叶子分类无需子分类，保留该字段以展示字段含义
+            children: [] # 叶子分类没有更深层子分类
 `;
+const DEFAULT_YAML = EXAMPLE_YAML;
+const EXAMPLE_YAML_DOWNLOAD_URL = `data:text/yaml;charset=utf-8,${encodeURIComponent(EXAMPLE_YAML)}`;
 
 type ServerItem = {
   id: string;
@@ -146,11 +162,7 @@ type Report = {
   runs: Run[];
 };
 type ServerForm = {
-  name: string;
-  host: string;
-  port: number;
-  sshUsername: string;
-  sshPassword: string;
+  serverId: string;
   tbPythonMode: "conda" | "path";
   tbCondaBasePath: string;
   tbCondaEnv: string;
@@ -191,11 +203,7 @@ type VisualConfig = {
 };
 
 const EMPTY_SERVER: ServerForm = {
-  name: "",
-  host: "",
-  port: 22,
-  sshUsername: "",
-  sshPassword: "",
+  serverId: "",
   tbPythonMode: "conda",
   tbCondaBasePath: "",
   tbCondaEnv: "",
@@ -1150,13 +1158,9 @@ function ServerModal({
   onSaved: (messageText: string) => void;
 }) {
   const [form, setForm] = useState<ServerForm>(
-    server
+        server
       ? {
-          name: server.name,
-          host: server.host,
-          port: server.port,
-          sshUsername: server.sshUsername,
-          sshPassword: "",
+          serverId: server.id,
           tbPythonMode: server.tbPythonMode,
           tbCondaBasePath: server.tbCondaBasePath,
           tbCondaEnv: server.tbCondaEnv,
@@ -1165,6 +1169,7 @@ function ServerModal({
       : EMPTY_SERVER,
   );
   const [saving, setSaving] = useState(false);
+  const [globalServers, setGlobalServers] = useState<Array<{ id: string; name: string; host: string; port: number; sshUsername: string }>>([]);
   const [error, setError] = useState("");
   const [condaEnvs, setCondaEnvs] = useState<string[]>([]);
   const [condaLoading, setCondaLoading] = useState(false);
@@ -1173,6 +1178,11 @@ function ServerModal({
     Boolean(server) &&
     form.tbCondaBasePath.trim() === server?.tbCondaBasePath.trim() &&
     Boolean(form.tbCondaBasePath.trim());
+  useEffect(() => {
+    void apiGet<{ servers: Array<{ id: string; name: string; host: string; port: number; sshUsername: string }> }>("/api/settings/ssh-servers")
+      .then((result) => setGlobalServers(result.servers))
+      .catch((caught) => setError(message(caught)));
+  }, []);
   useEffect(() => {
     if (!server || form.tbPythonMode !== "conda" || !condaPathSaved) {
       setCondaEnvs([]);
@@ -1238,55 +1248,16 @@ function ServerModal({
       >
         <div className="tb-form-grid">
           {error && <Alert type="error">{error}</Alert>}
-          <Field label="名称">
-            <input
-              className="tb-input"
-              value={form.name}
-              onChange={(event) =>
-                setForm({ ...form, name: event.target.value })
-              }
-              placeholder="例如：训练服务器"
-            />
-          </Field>
-          <Field label="主机地址">
-            <input
-              className="tb-input"
-              value={form.host}
-              onChange={(event) =>
-                setForm({ ...form, host: event.target.value })
-              }
-              placeholder="例如：192.168.1.100"
-            />
-          </Field>
-          <Field label="端口">
-            <input
-              className="tb-input"
-              type="number"
-              value={form.port}
-              onChange={(event) =>
-                setForm({ ...form, port: Number(event.target.value) || 22 })
-              }
-            />
-          </Field>
-          <Field label="SSH 用户名">
-            <input
-              className="tb-input"
-              value={form.sshUsername}
-              onChange={(event) =>
-                setForm({ ...form, sshUsername: event.target.value })
-              }
-            />
-          </Field>
-          <Field label={server ? "SSH 密码（留空不修改）" : "SSH 密码"} full>
-            <input
-              className="tb-input"
-              type="password"
-              value={form.sshPassword}
-              onChange={(event) =>
-                setForm({ ...form, sshPassword: event.target.value })
-              }
-            />
-          </Field>
+          {!server && <Field label="选择服务器" full>
+            <select className="tb-select" value={form.serverId} onChange={(event) => {
+              if (event.target.value === '__add_server__') { window.location.assign('/settings'); return; }
+              setForm({ ...form, serverId: event.target.value });
+            }}>
+              <option value="">请选择服务器</option>
+              {globalServers.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.sshUsername}@{item.host}:{item.port}</option>)}
+              <option value="__add_server__">＋ 添加服务器…</option>
+            </select>
+          </Field>}
           <Field label="TensorBoard Python 模式">
             <select
               className="tb-select"
@@ -1399,7 +1370,7 @@ function TaskFormModal({
       ? task.configSource === "remote_yaml"
         ? "remote_yaml"
         : "yaml"
-      : "form",
+      : "yaml",
   );
   const [visual, setVisual] = useState<VisualConfig>(EMPTY_VISUAL_CONFIG);
   const [saving, setSaving] = useState(false);
@@ -1629,14 +1600,6 @@ function TaskFormModal({
               <label className="tb-radio-label">
                 <input
                   type="radio"
-                  checked={mode === "form"}
-                  onChange={() => setMode("form")}
-                />{" "}
-                表单配置（保存时生成 YAML）
-              </label>
-              <label className="tb-radio-label">
-                <input
-                  type="radio"
                   checked={mode === "yaml"}
                   onChange={() => setMode("yaml")}
                 />{" "}
@@ -1649,6 +1612,14 @@ function TaskFormModal({
                   onChange={() => setMode("remote_yaml")}
                 />{" "}
                 远程 YAML 文件
+              </label>
+              <label className="tb-radio-label">
+                <input
+                  type="radio"
+                  checked={mode === "form"}
+                  onChange={() => setMode("form")}
+                />{" "}
+                表单配置 <span className="tpm-beta-badge">测试中</span>
               </label>
             </div>
           </Field>
@@ -1699,6 +1670,7 @@ function TaskFormModal({
             </>
           ) : mode === "yaml" ? (
             <Field label="YAML" full>
+              <YamlExampleDownload />
               <textarea
                 className="tb-textarea tpm-yaml"
                 rows={18}
@@ -1711,6 +1683,7 @@ function TaskFormModal({
             </Field>
           ) : (
             <Field label="远程 YAML 文件" full>
+              <YamlExampleDownload />
               <div className="tpm-remote-yaml-path">
                 <input
                   className="tb-input"
@@ -1842,6 +1815,14 @@ function TbUrlParameterGroups({
         </button>
       </div>
     </Field>
+  );
+}
+
+function YamlExampleDownload() {
+  return (
+    <a className="tpm-yaml-example-link" href={EXAMPLE_YAML_DOWNLOAD_URL} download="tensorboard-progress-example.yaml">
+      <FileDown size={14} />下载示例 YAML
+    </a>
   );
 }
 

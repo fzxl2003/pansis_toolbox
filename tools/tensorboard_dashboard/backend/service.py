@@ -21,6 +21,8 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import user_tool_connection_context
 from backend.app.services import ssh_connection_service
+from backend.app.services import ssh_server_service
+from backend.app.services.auth_service import User
 from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
@@ -109,6 +111,43 @@ def init_database(user_id: str) -> None:
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE tb_sessions ADD COLUMN extra_params TEXT NOT NULL DEFAULT ''")
     _initialized_dbs.add(user_id)
+    _migrate_legacy_servers(user_id)
+
+
+def _migrate_legacy_servers(user_id: str) -> None:
+    """Import one user's old tool-local credentials exactly once.
+
+    The tool binding retains its original ID, so existing TensorBoard sessions
+    continue to refer to the same server after the credentials move to the
+    platform-owned SSH store.
+    """
+    owner = User(id=user_id, username="", display_name="", role="user", disabled=False)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        rows = conn.execute(
+            """SELECT * FROM tb_servers
+               WHERE ssh_password_encrypted <> '' OR private_key_encrypted <> ''"""
+        ).fetchall()
+        for row in rows:
+            ssh_server_service.migrate_legacy_server(
+                server_id=row["id"],
+                owner=owner,
+                name=row["name"],
+                host=row["host"],
+                port=row["port"],
+                ssh_username=row["ssh_username"],
+                ssh_password=_decrypt(row["ssh_password_encrypted"]),
+                private_key=_decrypt(row["private_key_encrypted"]),
+                private_key_passphrase=_decrypt(row["private_key_passphrase_encrypted"]),
+                auth_type=row["auth_type"],
+                source_tool=TOOL_ID,
+            )
+            conn.execute(
+                """UPDATE tb_servers
+                   SET ssh_password_encrypted='', private_key_encrypted='', private_key_passphrase_encrypted=''
+                   WHERE id=?""",
+                (row["id"],),
+            )
+        conn.commit()
 
 
 register_tool_categories(TOOL_ID, [
@@ -374,16 +413,30 @@ def list_servers(user: Any) -> list[dict[str, Any]]:
             "SELECT * FROM tb_servers WHERE owner_user_id = ? AND enabled = 1 ORDER BY name ASC",
             (user.id,),
         ).fetchall()
-    return [_public_server(row) for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            selected = ssh_server_service.get_server(row["id"], user)
+        except ToolboxError:
+            continue
+        result.append({**_public_server(row), **{key: selected[key] for key in ("name", "host", "port", "sshUsername", "authType")}})
+    return result
 
 
 def create_server(payload: dict[str, Any], user: Any) -> dict[str, Any]:
     init_database(user.id)
-    auth_type = _clean_auth_type(payload.get("authType", "password"))
-    _validate_server_payload(payload, auth_type, creating=True)
+    selected = ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
     now = _now()
-    server_id = _new_id()
+    server_id = selected["id"]
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        existing = conn.execute("SELECT * FROM tb_servers WHERE id=?", (server_id,)).fetchone()
+        if existing is not None:
+            if bool(existing["enabled"]):
+                raise ToolboxError("SERVER_ALREADY_SELECTED", "该全局服务器已添加到此工具", status_code=409, tool_id=TOOL_ID)
+            conn.execute("UPDATE tb_servers SET enabled=1,conda_base_path=?,updated_at=? WHERE id=?", ((payload.get("condaBasePath") or "").strip(), now, server_id))
+            conn.commit()
+            restored = conn.execute("SELECT * FROM tb_servers WHERE id=?", (server_id,)).fetchone()
+            return {**_public_server(restored), **{key: selected[key] for key in ("name", "host", "port", "sshUsername", "authType")}}
         conn.execute(
             """
             INSERT INTO tb_servers (
@@ -394,45 +447,26 @@ def create_server(payload: dict[str, Any], user: Any) -> dict[str, Any]:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                server_id, user.id,
-                _required(payload, "name"), _required(payload, "host"),
-                int(payload.get("port") or 22), _required(payload, "sshUsername"),
-                auth_type,
-                _encrypt(payload.get("sshPassword") or "") if payload.get("sshPassword") else "",
-                _encrypt(payload.get("privateKey") or "") if payload.get("privateKey") else "",
-                _encrypt(payload.get("privateKeyPassphrase") or "") if payload.get("privateKeyPassphrase") else "",
+                server_id, user.id, selected["name"], selected["host"], int(selected["port"]), selected["sshUsername"], selected["authType"], "", "", "",
                 (payload.get("condaBasePath") or "").strip(),
                 now, now,
             ),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM tb_servers WHERE id = ?", (server_id,)).fetchone()
-    return _public_server(row)
+    return {**_public_server(row), **{key: selected[key] for key in ("name", "host", "port", "sshUsername", "authType")}}
 
 
 def update_server(server_id: str, payload: dict[str, Any], user: Any) -> dict[str, Any]:
     row = get_server(server_id, user)
-    auth_type = _clean_auth_type(payload.get("authType", row["auth_type"]))
-    _validate_server_payload(payload, auth_type, creating=False)
-    password = payload.get("sshPassword")
-    private_key = payload.get("privateKey")
-    passphrase = payload.get("privateKeyPassphrase")
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         conn.execute(
             """
             UPDATE tb_servers
-            SET name = ?, host = ?, port = ?, ssh_username = ?, auth_type = ?,
-                ssh_password_encrypted = ?, private_key_encrypted = ?,
-                private_key_passphrase_encrypted = ?, conda_base_path = ?, updated_at = ?
+            SET conda_base_path = ?, updated_at = ?
             WHERE id = ?
             """,
             (
-                payload.get("name", row["name"]), payload.get("host", row["host"]),
-                int(payload.get("port") or row["port"]),
-                payload.get("sshUsername", row["ssh_username"]), auth_type,
-                _encrypt(password) if password is not None and password != "" else row["ssh_password_encrypted"],
-                _encrypt(private_key) if private_key is not None and private_key != "" else row["private_key_encrypted"],
-                _encrypt(passphrase) if passphrase is not None and passphrase != "" else row["private_key_passphrase_encrypted"],
                 (payload.get("condaBasePath") or "").strip() if "condaBasePath" in payload else (row["conda_base_path"] if "conda_base_path" in row.keys() else ""),
                 _now(), server_id,
             ),
@@ -440,7 +474,8 @@ def update_server(server_id: str, payload: dict[str, Any], user: Any) -> dict[st
         conn.commit()
         updated = conn.execute("SELECT * FROM tb_servers WHERE id = ?", (server_id,)).fetchone()
     ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
-    return _public_server(updated)
+    selected = ssh_server_service.get_server(server_id, user)
+    return {**_public_server(updated), **{key: selected[key] for key in ("name", "host", "port", "sshUsername", "authType")}}
 
 
 def delete_server(server_id: str, user: Any) -> None:
@@ -463,7 +498,7 @@ def delete_server(server_id: str, user: Any) -> None:
     ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
 
-def get_server(server_id: str, user: Any) -> sqlite3.Row:
+def get_server(server_id: str, user: Any) -> dict[str, Any]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         row = conn.execute(
@@ -472,7 +507,7 @@ def get_server(server_id: str, user: Any) -> sqlite3.Row:
         ).fetchone()
     if row is None:
         raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
-    return row
+    return ssh_server_service.merge_connection_credentials(row, user)
 
 
 def test_server(server_id: str, user: Any) -> dict[str, Any]:
@@ -1096,9 +1131,11 @@ def _ssh_exec(client: Any, command: str, timeout: int = 30) -> tuple[str, str, i
         raise
 
 
-def _load_private_key(row: sqlite3.Row, paramiko: Any) -> Any:
-    key_text = _decrypt(row["private_key_encrypted"])
-    passphrase = _decrypt(row["private_key_passphrase_encrypted"]) if row["private_key_passphrase_encrypted"] else None
+def _load_private_key(row: sqlite3.Row | dict[str, Any], paramiko: Any) -> Any:
+    key_text = row.get("private_key") if isinstance(row, dict) else ""
+    passphrase = row.get("private_key_passphrase") if isinstance(row, dict) else ""
+    key_text = key_text or _decrypt(row["private_key_encrypted"])
+    passphrase = passphrase or (_decrypt(row["private_key_passphrase_encrypted"]) if row["private_key_passphrase_encrypted"] else None)
     key_errors: list[str] = []
     for key_cls_name in ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey"):
         key_cls = getattr(paramiko, key_cls_name, None)
@@ -1111,7 +1148,7 @@ def _load_private_key(row: sqlite3.Row, paramiko: Any) -> Any:
     raise ToolboxError("PRIVATE_KEY_INVALID", "私钥无法解析或 passphrase 不正确", status_code=400, tool_id=TOOL_ID, extra={"details": key_errors[-2:]})
 
 
-def _ssh_spec(row: sqlite3.Row, timeout: int = 20) -> SSHConnectionSpec:
+def _ssh_spec(row: sqlite3.Row | dict[str, Any], timeout: int = 20) -> SSHConnectionSpec:
     try:
         import paramiko
     except ImportError as exc:
@@ -1127,8 +1164,8 @@ def _ssh_spec(row: sqlite3.Row, timeout: int = 20) -> SSHConnectionSpec:
             username=row["ssh_username"],
             auth_fingerprint=ssh_connection_service.auth_fingerprint(
                 auth_type,
-                row["private_key_encrypted"],
-                row["private_key_passphrase_encrypted"],
+                row.get("private_key") if isinstance(row, dict) else row["private_key_encrypted"],
+                row.get("private_key_passphrase") if isinstance(row, dict) else row["private_key_passphrase_encrypted"],
             ),
             pkey=_load_private_key(row, paramiko),
             connect_timeout=timeout,
@@ -1139,8 +1176,8 @@ def _ssh_spec(row: sqlite3.Row, timeout: int = 20) -> SSHConnectionSpec:
         host=row["host"],
         port=int(row["port"]),
         username=row["ssh_username"],
-        auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, row["ssh_password_encrypted"]),
-        password=_decrypt(row["ssh_password_encrypted"]),
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, row.get("ssh_password") if isinstance(row, dict) else row["ssh_password_encrypted"]),
+        password=(row.get("ssh_password") if isinstance(row, dict) else "") or _decrypt(row["ssh_password_encrypted"]),
         connect_timeout=timeout,
     )
 

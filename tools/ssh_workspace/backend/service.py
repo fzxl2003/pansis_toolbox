@@ -247,14 +247,27 @@ register_tool_categories(TOOL_ID, [
 
 
 def list_servers(user: User) -> list[dict[str, Any]]:
-    # Server credentials and availability are platform-wide.  This tool keeps
-    # only terminal/templates/tasks that reference the global server id.
+    """List only global servers explicitly added to this workspace.
+
+    The per-tool row is a binding plus runtime state (not a credential copy).
+    Credentials always come from the global SSH server table.
+    """
     init_database(user.id)
-    return [
-        {**item, "hasScreen": False, "lastTestStatus": "unknown", "lastTestError": "", "lastTestedAt": None,
-         "createdAt": "", "updatedAt": ""}
-        for item in ssh_server_service.list_servers(user)
-    ]
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        bindings = connection.execute(
+            "SELECT * FROM ssh_servers WHERE owner_user_id=? AND enabled=1 ORDER BY updated_at DESC, name COLLATE NOCASE",
+            (user.id,),
+        ).fetchall()
+    servers: list[dict[str, Any]] = []
+    for binding in bindings:
+        try:
+            global_server = ssh_server_service.get_server(binding["id"], user)
+        except ToolboxError:
+            # A deleted, disabled, or revoked global server must not remain
+            # usable through a stale workspace binding.
+            continue
+        servers.append(_public_bound_server(binding, global_server))
+    return servers
 
 
 def _migrate_legacy_servers(user_id: str) -> None:
@@ -284,17 +297,49 @@ def _migrate_legacy_servers(user_id: str) -> None:
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     """Select an already-authorized global server; never create credentials here."""
-    return ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
+    init_database(user.id)
+    global_server = ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
+    now = _now()
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        existing = connection.execute(
+            "SELECT * FROM ssh_servers WHERE id=? AND owner_user_id=?", (global_server["id"], user.id)
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """INSERT INTO ssh_servers
+                   (id,owner_user_id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,enabled,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (global_server["id"], user.id, global_server["name"], global_server["host"], global_server["port"],
+                 global_server["sshUsername"], global_server["authType"], "", "", "", 1, now, now),
+            )
+        else:
+            connection.execute(
+                """UPDATE ssh_servers SET name=?,host=?,port=?,ssh_username=?,auth_type=?,enabled=1,updated_at=?
+                   WHERE id=? AND owner_user_id=?""",
+                (global_server["name"], global_server["host"], global_server["port"], global_server["sshUsername"],
+                 global_server["authType"], now, global_server["id"], user.id),
+            )
+        binding = connection.execute(
+            "SELECT * FROM ssh_servers WHERE id=? AND owner_user_id=?", (global_server["id"], user.id)
+        ).fetchone()
+    return _public_bound_server(binding, global_server)
 
 
 def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-    return ssh_server_service.get_server(server_id, user)
+    # Server details live in Settings. Keep this endpoint for older clients,
+    # while ensuring it can only address a workspace-bound server.
+    return _public_bound_server(_get_server_binding(server_id, user), ssh_server_service.get_server(server_id, user))
 
 
 def delete_server(server_id: str, user: User) -> None:
-    # Global configurations are managed only in Settings.  Keeping this
-    # compatibility endpoint non-destructive avoids deleting a shared server.
-    ssh_server_service.get_server(server_id, user)
+    # Removing a server only hides it from this workspace.  It never deletes
+    # the global credential or its existing terminal/history records.
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        connection.execute(
+            "UPDATE ssh_servers SET enabled=0,updated_at=? WHERE id=? AND owner_user_id=?",
+            (_now(), server_id, user.id),
+        )
 
 
 def copy_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
@@ -302,7 +347,19 @@ def copy_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str
 
 
 def get_server(server_id: str, user: User) -> dict[str, Any]:
-    return ssh_server_service.get_legacy_connection_row(server_id, user)
+    binding = _get_server_binding(server_id, user)
+    credentials = ssh_server_service.get_legacy_connection_row(server_id, user)
+    # Runtime state is deliberately local to the SSH workspace: another tool
+    # has no reason to inherit whether this tool has checked `screen`.
+    return {
+        **credentials,
+        "has_screen": binding["has_screen"],
+        "last_test_status": binding["last_test_status"],
+        "last_test_error": binding["last_test_error"],
+        "last_tested_at": binding["last_tested_at"],
+        "created_at": binding["created_at"],
+        "updated_at": binding["updated_at"],
+    }
 
 
 def test_server(server_id: str, user: User) -> dict[str, Any]:
@@ -327,8 +384,10 @@ def test_server(server_id: str, user: User) -> dict[str, Any]:
         result = {"connected": False, "error": error, "hasScreen": False}
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
         connection.execute(
-            "UPDATE ssh_servers SET has_screen = ?, last_test_status = ?, last_test_error = ?, last_tested_at = ?, updated_at = ? WHERE id = ?",
-            (1 if has_screen else 0, status, error[:500], now, now, server_id),
+            """UPDATE ssh_servers
+               SET has_screen=?, last_test_status=?, last_test_error=?, last_tested_at=?, updated_at=?
+               WHERE id=? AND owner_user_id=?""",
+            (1 if has_screen else 0, status, error[:500], now, now, server_id, user.id),
         )
         connection.commit()
     return result
@@ -1018,6 +1077,19 @@ def _get_task(task_id: str, user: User) -> sqlite3.Row:
     return row
 
 
+def _get_server_binding(server_id: str, user: User) -> sqlite3.Row:
+    """Return the caller's active SSH-workspace binding for a global ID."""
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        row = connection.execute(
+            "SELECT * FROM ssh_servers WHERE id=? AND owner_user_id=? AND enabled=1",
+            (server_id, user.id),
+        ).fetchone()
+    if row is None:
+        raise ToolboxError("SERVER_NOT_FOUND", "服务器未添加到 SSH 工作台", status_code=404, tool_id=TOOL_ID)
+    return row
+
+
 # ============================================================
 # Public serializers
 # ============================================================
@@ -1030,6 +1102,18 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
         "hasScreen": bool(row["has_screen"]),
         "lastTestStatus": row["last_test_status"], "lastTestError": row["last_test_error"],
         "lastTestedAt": row["last_tested_at"], "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+    }
+
+
+def _public_bound_server(binding: sqlite3.Row, global_server: dict[str, Any]) -> dict[str, Any]:
+    """Combine global display data with workspace-local runtime state."""
+    return {
+        "id": global_server["id"], "name": global_server["name"], "host": global_server["host"],
+        "port": global_server["port"], "sshUsername": global_server["sshUsername"],
+        "authType": global_server["authType"], "hasScreen": bool(binding["has_screen"]),
+        "lastTestStatus": binding["last_test_status"], "lastTestError": binding["last_test_error"],
+        "lastTestedAt": binding["last_tested_at"], "createdAt": binding["created_at"],
+        "updatedAt": binding["updated_at"],
     }
 
 

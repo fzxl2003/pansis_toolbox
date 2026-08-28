@@ -66,7 +66,7 @@ export function ServersPanel({ servers, loading, isAdmin: _isAdmin, onRefresh }:
       <div className="sw-panel-head">
         <div>
           <h2 className="sw-panel-title"><Server size={18} /> 服务器管理</h2>
-          <p className="sw-panel-desc">命令模板与定时任务绑定到具体服务器</p>
+          <p className="sw-panel-desc">仅显示已添加到工作台的服务器；命令模板与定时任务绑定到具体服务器</p>
         </div>
         <button className="sw-btn sw-btn-primary" onClick={handleAdd} type="button">
           <Plus size={14} /> 添加服务器
@@ -81,7 +81,7 @@ export function ServersPanel({ servers, loading, isAdmin: _isAdmin, onRefresh }:
         <div className="sw-empty">
           <div className="sw-empty-icon"><Server size={32} /></div>
           <div className="sw-empty-title">暂无服务器</div>
-          <div className="sw-empty-hint">请由管理员在设置中配置并授权 SSH 服务器</div>
+          <div className="sw-empty-hint">请添加一个已授权的 SSH 服务器</div>
         </div>
       ) : (
         <div className="sw-server-list">

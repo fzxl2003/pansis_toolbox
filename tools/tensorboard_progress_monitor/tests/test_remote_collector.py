@@ -11,7 +11,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from tools.tensorboard_progress_monitor.backend.service import REMOTE_COLLECTOR_SOURCE, _child_color_group_param, _color_key_regex, _find_group, _find_group_path, _glob_regex, _group_path_color_regex, _group_path_regex, _group_patterns, _invalidate_task_history, _layer_tb_url_params, _make_report, _match_group, _merge_tb_url_params, _parse_config, _previous_file_states, _regex_param, _remote_collector_command, _same_collection_config, _serialize_extra_params, _tb_environment_configured, _trim_report_history, _validate_remote_yaml_path, _validate_tb_environment, _yaml_hash
+from tools.tensorboard_progress_monitor.backend.service import REMOTE_COLLECTOR_SOURCE, _child_color_group_param, _color_key_regex, _conda_python_runner, _find_group, _find_group_path, _glob_regex, _group_path_color_regex, _group_path_regex, _group_patterns, _invalidate_task_history, _layer_tb_url_params, _make_report, _match_group, _merge_tb_url_params, _parse_config, _previous_file_states, _regex_param, _remote_collector_command, _same_collection_config, _serialize_extra_params, _tb_environment_configured, _trim_report_history, _validate_remote_yaml_path, _validate_tb_environment, _yaml_hash
 
 
 def _varint(value: int) -> bytes:
@@ -172,9 +172,14 @@ def test_remote_yaml_path_rejects_empty_or_nul_paths() -> None:
 def test_tb_environment_is_optional_for_collection_but_must_be_complete_for_tb() -> None:
     assert _validate_tb_environment({"tbPythonMode": "conda", "tbCondaBasePath": "", "tbCondaEnv": "", "tbPythonPath": ""}) == ("conda", "", "", "")
     assert _validate_tb_environment({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "", "tbPythonPath": ""}) == ("conda", "/opt/conda", "", "")
-    assert not _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "", "tbPythonPath": ""})
+    assert _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "", "tbPythonPath": ""})
     assert _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "tb", "tbPythonPath": ""})
     assert _tb_environment_configured({"tbPythonMode": "path", "tbCondaBasePath": "", "tbCondaEnv": "", "tbPythonPath": "/venv/bin/python"})
+
+
+def test_empty_conda_environment_activates_the_conda_base() -> None:
+    assert "conda activate /opt/conda" in _conda_python_runner({"tb_conda_base_path": "/opt/conda", "tb_conda_env": ""})
+    assert "conda activate tb" in _conda_python_runner({"tb_conda_base_path": "/opt/conda", "tb_conda_env": "tb"})
 
 
 def test_tb_group_filters_cover_descendants_and_group_children_for_color() -> None:

@@ -921,6 +921,14 @@ function ServersPanel({
                       <button
                         className="tb-btn tb-btn-sm tb-btn-ghost"
                         type="button"
+                        title="检查 TensorBoard 环境"
+                        onClick={() => void testTb(server)}
+                      >
+                        TB
+                      </button>
+                      <button
+                        className="tb-btn tb-btn-sm tb-btn-ghost"
+                        type="button"
                         title="编辑"
                         onClick={() => onEdit(server)}
                       >
@@ -1291,29 +1299,24 @@ function ServerModal({
                 />
               </Field>
               <Field label="TensorBoard Conda 环境">
-                <select
-                  className="tb-select"
+                <input
+                  className="tb-input"
+                  list="tpm-conda-environments"
                   value={form.tbCondaEnv}
-                  disabled={
-                    !condaPathSaved || condaLoading || Boolean(condaError)
-                  }
                   onChange={(event) =>
                     setForm({ ...form, tbCondaEnv: event.target.value })
                   }
-                >
-                  <option value="">
-                    {condaLoading
-                      ? "正在读取 Conda 环境…"
-                      : condaPathSaved
-                        ? "请选择 TensorBoard Conda 环境"
-                        : "请先保存 Anaconda 路径后再选择"}
-                  </option>
+                  placeholder="例如：pansis_toolbox"
+                />
+                <datalist id="tpm-conda-environments">
                   {condaEnvs.map((env) => (
                     <option key={env} value={env}>
-                      {env}
                     </option>
                   ))}
-                </select>
+                </datalist>
+                <small className="tpm-muted">
+                  可直接输入环境名称；留空则使用 Conda base 环境。保存过 Anaconda 路径后会自动提供远程环境候选项。
+                </small>
                 {condaError && (
                   <small className="tpm-warning">{condaError}</small>
                 )}

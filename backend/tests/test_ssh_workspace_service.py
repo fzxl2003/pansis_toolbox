@@ -8,8 +8,9 @@ from starlette.websockets import WebSocketDisconnect
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.db.database import get_connection, init_database
+from backend.app.db.database import get_connection, init_database, user_tool_connection_context
 from backend.app.services.auth_service import User, login
+from backend.app.services import ssh_server_service
 from tools.ssh_workspace.backend import service
 
 
@@ -18,66 +19,85 @@ USER_B = User(id="ssh_ws_user_b", username="ssh_b", display_name="SSH B")
 
 
 @pytest.fixture(autouse=True)
-def ssh_workspace_data() -> None:
+def ssh_workspace_data(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "platform_db_path", tmp_path / "platform.db")
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    service._initialized_dbs.clear()
     init_database()
-    service.init_database()
-    _cleanup()
+    service.init_database(USER_A.id)
+    service.init_database(USER_B.id)
     yield
-    _cleanup()
+    service._initialized_dbs.clear()
 
 
-def _cleanup() -> None:
-    with get_connection() as conn:
-        for table in (
-            "ssh_task_runs",
-            "ssh_scheduled_tasks",
-            "ssh_screen_sessions",
-            "ssh_command_templates",
-            "ssh_command_history",
-            "ssh_servers",
-        ):
-            conn.execute("DELETE FROM " + table + " WHERE owner_user_id IN (?, ?)", (USER_A.id, USER_B.id))
-        conn.execute("DELETE FROM ssh_servers WHERE name LIKE 'WS Auth Test%'")
-        conn.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username = 'admin')")
-
-
-def test_server_credentials_are_encrypted_and_user_scoped() -> None:
-    created_a = service.create_server(
+def add_workspace_server(user: User, *, name: str = "Server") -> dict[str, Any]:
+    global_server = ssh_server_service.create_server(
         {
-            "name": "A",
-            "host": "127.0.0.1",
-            "port": 22,
-            "sshUsername": "alice",
-            "authType": "password",
-            "sshPassword": "secret-a",
+            "name": name, "host": "127.0.0.1", "port": 22, "sshUsername": "alice",
+            "authType": "password", "sshPassword": "secret", "privateKey": "",
+            "privateKeyPassphrase": "", "isPublic": False, "allowedUserIds": [],
+        },
+        user,
+    )
+    return service.create_server({"serverId": global_server["id"]}, user)
+
+
+def test_workspace_lists_only_explicitly_added_global_servers() -> None:
+    selected_a = add_workspace_server(USER_A, name="A")
+    global_b = ssh_server_service.create_server(
+        {
+            "name": "B", "host": "127.0.0.2", "port": 22, "sshUsername": "bob",
+            "authType": "password", "sshPassword": "secret-b", "privateKey": "",
+            "privateKeyPassphrase": "", "isPublic": False, "allowedUserIds": [],
         },
         USER_A,
     )
-    created_b = service.create_server(
-        {
-            "name": "B",
-            "host": "127.0.0.2",
-            "port": 22,
-            "sshUsername": "bob",
-            "authType": "private_key",
-            "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----",
-            "privateKeyPassphrase": "key-pass",
-        },
-        USER_B,
-    )
 
-    assert "sshPassword" not in created_a
-    assert "privateKey" not in created_b
-    assert [server["id"] for server in service.list_servers(USER_A)] == [created_a["id"]]
+    assert [server["id"] for server in service.list_servers(USER_A)] == [selected_a["id"]]
+    assert global_b["id"] not in [server["id"] for server in service.list_servers(USER_A)]
 
     with pytest.raises(ToolboxError) as exc:
-        service.get_server(created_b["id"], USER_A)
+        service.get_server(global_b["id"], USER_A)
     assert exc.value.status_code == 404
 
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM ssh_servers WHERE id = ?", (created_a["id"],)).fetchone()
-    assert row["ssh_password_encrypted"] != "secret-a"
-    assert service._decrypt(row["ssh_password_encrypted"]) == "secret-a"
+    with user_tool_connection_context(USER_A.id, service.TOOL_ID) as conn:
+        binding = conn.execute("SELECT * FROM ssh_servers WHERE id = ?", (selected_a["id"],)).fetchone()
+    assert binding["ssh_password_encrypted"] == ""
+    assert service.get_server(selected_a["id"], USER_A)["ssh_password"] == "secret"
+
+
+def test_connection_test_persists_screen_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = add_workspace_server(USER_A, name="Screen capable")
+
+    class Stream:
+        class Channel:
+            def recv_exit_status(self) -> int:
+                return 0
+
+        def __init__(self, output: str) -> None:
+            self.output = output
+            self.channel = self.Channel()
+
+        def read(self) -> bytes:
+            return self.output.encode()
+
+    class TestClient:
+        def exec_command(self, command: str, timeout: int = 30):
+            output = "HAS_SCREEN\n" if "command -v screen" in command else "alice\n"
+            return None, Stream(output), Stream("")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(service, "_ssh_connect", lambda row, timeout=20: TestClient())
+    result = service.test_server(server["id"], USER_A)
+
+    assert result == {"connected": True, "hasScreen": True}
+    listed = service.list_servers(USER_A)
+    assert listed[0]["hasScreen"] is True
+    assert listed[0]["lastTestStatus"] == "ok"
+    assert service.get_server(server["id"], USER_A)["has_screen"] == 1
 
 
 def test_screen_parser_and_gate() -> None:
@@ -95,32 +115,14 @@ def test_screen_parser_and_gate() -> None:
     ]
     assert service.parse_screen_ls("No Sockets found in /run/screen/S-user.\n") == []
 
-    server = service.create_server(
-        {
-            "name": "No Screen",
-            "host": "127.0.0.1",
-            "sshUsername": "alice",
-            "authType": "password",
-            "sshPassword": "secret",
-        },
-        USER_A,
-    )
+    server = add_workspace_server(USER_A, name="No Screen")
     with pytest.raises(ToolboxError) as exc:
         service.create_screen_session(server["id"], {"name": "job"}, USER_A)
     assert exc.value.code == "SCREEN_UNAVAILABLE"
 
 
 def test_templates_and_history_are_user_scoped() -> None:
-    server = service.create_server(
-        {
-            "name": "History Server",
-            "host": "127.0.0.1",
-            "sshUsername": "alice",
-            "authType": "password",
-            "sshPassword": "secret",
-        },
-        USER_A,
-    )
+    server = add_workspace_server(USER_A, name="History Server")
     template = service.create_template(
         {"serverId": server["id"], "name": "Train", "command": "python train.py --lr {{lr}}"},
         USER_A,
@@ -136,19 +138,9 @@ def test_templates_and_history_are_user_scoped() -> None:
 
 
 def test_due_scheduler_launches_remote_screen(monkeypatch: pytest.MonkeyPatch) -> None:
-    server = service.create_server(
-        {
-            "name": "Screen Server",
-            "host": "127.0.0.1",
-            "sshUsername": "alice",
-            "authType": "password",
-            "sshPassword": "secret",
-        },
-        USER_A,
-    )
-    with get_connection() as conn:
+    server = add_workspace_server(USER_A, name="Screen Server")
+    with user_tool_connection_context(USER_A.id, service.TOOL_ID) as conn:
         conn.execute("UPDATE ssh_servers SET has_screen = 1 WHERE id = ?", (server["id"],))
-        conn.commit()
     task = service.create_scheduled_task(
         {
             "serverId": server["id"],
@@ -160,9 +152,8 @@ def test_due_scheduler_launches_remote_screen(monkeypatch: pytest.MonkeyPatch) -
         },
         USER_A,
     )
-    with get_connection() as conn:
+    with user_tool_connection_context(USER_A.id, service.TOOL_ID) as conn:
         conn.execute("UPDATE ssh_scheduled_tasks SET next_run_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (task["id"],))
-        conn.commit()
 
     commands: list[str] = []
     monkeypatch.setattr(service, "_run_ssh", lambda row, command, timeout=30: commands.append(command) or "")
@@ -256,16 +247,7 @@ def test_terminal_websocket_rejects_anonymous() -> None:
 
 def test_terminal_websocket_opens_shell_and_resizes(monkeypatch: pytest.MonkeyPatch) -> None:
     user, token = login("admin", "admin123")
-    server = service.create_server(
-        {
-            "name": "WS Auth Test",
-            "host": "127.0.0.1",
-            "sshUsername": "admin",
-            "authType": "password",
-            "sshPassword": "secret",
-        },
-        user,
-    )
+    server = add_workspace_server(user, name="WS Auth Test")
     channel = FakeChannel()
     client = FakeClient(channel)
     monkeypatch.setattr(service, "_ssh_connect", lambda row, timeout=20: client)

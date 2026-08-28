@@ -2,7 +2,7 @@
   "title": "Pansis Toolbox",
   "description": "实验监控与工具管理平台 —— 集成多种实用工具的统一工作台。",
   "items": [
-    { "label": "版本", "value": "1.1.1", "type": "text" },
+    { "label": "版本", "value": "1.2.0", "type": "text" },
     { "label": "许可证", "value": "MIT", "type": "text" }
   ]
 }

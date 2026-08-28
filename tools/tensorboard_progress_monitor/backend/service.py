@@ -409,13 +409,21 @@ def _validate_tb_environment(data: dict[str, Any]) -> tuple[str, str, str, str]:
 
 
 def _tb_environment_configured(server: sqlite3.Row | dict[str, Any]) -> bool:
-    mode = str(server["tb_python_mode"] if isinstance(server, sqlite3.Row) else server.get("tbPythonMode", "conda"))
+    # Internal server objects are dictionaries made from SQLite rows and use
+    # snake_case; API payloads use camelCase.  Accept both so merging global
+    # SSH credentials does not make a saved TB environment look empty.
+    def value(snake_case: str, camel_case: str, default: str = "") -> str:
+        if isinstance(server, sqlite3.Row):
+            return str(server[snake_case])
+        return str(server.get(snake_case, server.get(camel_case, default)))
+
+    mode = value("tb_python_mode", "tbPythonMode", "conda").strip()
     if mode == "conda":
-        base = str(server["tb_conda_base_path"] if isinstance(server, sqlite3.Row) else server.get("tbCondaBasePath", "")).strip()
+        base = value("tb_conda_base_path", "tbCondaBasePath").strip()
         # TensorBoard may be installed in Conda's base environment.  An
         # explicit environment is optional; when omitted we activate `base`.
         return bool(base)
-    path = str(server["tb_python_path"] if isinstance(server, sqlite3.Row) else server.get("tbPythonPath", "")).strip()
+    path = value("tb_python_path", "tbPythonPath").strip()
     return bool(path)
 
 

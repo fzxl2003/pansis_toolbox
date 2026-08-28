@@ -73,6 +73,216 @@
   font-size: 14px;
 }
 
+.web-proxy-exit-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  color: #4a5568;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.web-proxy-exit {
+  min-width: 220px;
+  max-width: 100%;
+  border: 1px solid #c7cfdd;
+  border-radius: 6px;
+  padding: 7px 10px;
+  background: #fff;
+  color: #172033;
+  font: inherit;
+}
+
+.web-proxy-hint {
+  margin: 11px 0 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.web-proxy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.web-proxy-secondary,
+.web-proxy-test,
+.web-proxy-site-add button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid #c7cfdd;
+  border-radius: 7px;
+  padding: 7px 11px;
+  background: #fff;
+  color: #344054;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.web-proxy-test {
+  border-color: #1f7a5b;
+  background: #1f7a5b;
+  color: #fff;
+}
+
+.web-proxy-test:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.web-proxy-results {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.web-proxy-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #dce2eb;
+  border-radius: 7px;
+  padding: 9px 11px;
+  background: #fff;
+  color: #475467;
+  font-size: 13px;
+}
+
+.web-proxy-result-url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #344054;
+}
+
+.web-proxy-result-ok,
+.web-proxy-result-failed {
+  font-weight: 700;
+}
+
+.web-proxy-result-ok { color: #087443; }
+.web-proxy-result-failed,
+.web-proxy-result-error { color: #b42318; }
+
+.web-proxy-result-error {
+  grid-column: 2 / -1;
+  overflow-wrap: anywhere;
+}
+
+.web-proxy-spin { animation: web-proxy-spin 0.8s linear infinite; }
+
+@keyframes web-proxy-spin { to { transform: rotate(360deg); } }
+
+.web-proxy-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(16, 24, 40, 0.45);
+}
+
+.web-proxy-modal {
+  width: min(600px, 100%);
+  border-radius: 10px;
+  padding: 20px;
+  background: #fff;
+  box-shadow: 0 24px 64px rgba(16, 24, 40, 0.26);
+  color: #344054;
+}
+
+.web-proxy-modal-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.web-proxy-modal h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.web-proxy-modal p {
+  margin: 9px 0 16px;
+  color: #667085;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.web-proxy-icon-button,
+.web-proxy-site button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+}
+
+.web-proxy-site-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px;
+}
+
+.web-proxy-site-add input {
+  min-width: 0;
+  border: 1px solid #c7cfdd;
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: #172033;
+  font: inherit;
+}
+
+.web-proxy-site-add button {
+  border-color: #1f7a5b;
+  background: #1f7a5b;
+  color: #fff;
+}
+
+.web-proxy-site-list {
+  display: grid;
+  gap: 7px;
+  max-height: 260px;
+  margin-top: 15px;
+  overflow-y: auto;
+}
+
+.web-proxy-site,
+.web-proxy-empty-sites {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: #475467;
+  font-size: 13px;
+}
+
+.web-proxy-site code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-proxy-site button { color: #b42318; }
+
+
 .web-proxy-status {
   color: #4a5568;
 }
@@ -91,4 +301,13 @@
     padding: 0 12px;
     font-size: 16px;
   }
+
+  .web-proxy-result {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .web-proxy-result > span:last-of-type:not(.web-proxy-result-error) {
+    grid-column: 3;
+  }
+
 }

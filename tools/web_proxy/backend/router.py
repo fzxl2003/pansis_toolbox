@@ -13,22 +13,28 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.error import URLError
-from urllib.parse import urlencode
-from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.request import ProxyHandler, Request as UrlRequest, build_opener
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.core.security import get_optional_user, require_user
+from backend.app.services import ssh_server_service
 from tools.web_proxy.backend.service import (
     clear_session as clear_session_db,
+    add_test_site as add_test_site_db,
+    delete_test_site as delete_test_site_db,
     get_session as get_session_db,
+    list_test_sites as list_test_sites_db,
     save_session as save_session_db,
+    set_session_exit as set_session_exit_db,
 )
+from tools.web_proxy.backend.ssh_tunnel import tunnel_registry
 
 router = APIRouter()
 
@@ -45,11 +51,19 @@ _sidecar_process: subprocess.Popen | None = None
 _sidecar_lock = threading.Lock()
 _sidecar_log_handle = None
 _sidecar_public_info: tuple[str, int, str] | None = None
+# The process may run with HTTP(S)_PROXY configured for outbound web access.
+# Sidecar management is strictly loopback traffic and must never leave the
+# host through that proxy.
+_sidecar_http = build_opener(ProxyHandler({}))
+
+
+class TestSitePayload(BaseModel):
+    url: str
 
 
 @router.get("", response_model=None)
 @router.get("/", response_model=None)
-def open_proxy(request: Request, url: str | None = None) -> HTMLResponse | RedirectResponse:
+def open_proxy(request: Request, url: str | None = None, serverId: str | None = None) -> HTMLResponse | RedirectResponse:
     user = get_optional_user(request)
     if user is None:
         return _login_page(request, url)
@@ -58,7 +72,17 @@ def open_proxy(request: Request, url: str | None = None) -> HTMLResponse | Redir
 
     target_url = _normalize_target_url(url)
     session_id = _get_or_create_session(user.id, request)
-    _edit_session(session_id, enable_shuffling=False)
+    session = get_session_db(user.id)
+    exit_server_id = session["exitServerId"] if session else None
+    if serverId is not None:
+        exit_server_id = None if serverId == "direct" else _get_exit_server(user, serverId)["id"]
+        # Do not persist a newly selected exit until its tunnel and sidecar
+        # configuration both succeeded; otherwise a failed SSH test would
+        # leave a healthy existing session pointing at an unusable exit.
+        _configure_session_exit(user, session_id, exit_server_id)
+        set_session_exit_db(user.id, exit_server_id)
+    else:
+        _configure_session_exit(user, session_id, exit_server_id)
     return RedirectResponse(f"{_external_origin(request)}/{session_id}/{target_url}", status_code=302)
 
 
@@ -70,6 +94,7 @@ def session_status(request: Request) -> dict[str, str | bool | None]:
     return {
         "active": bool(session_id and _sidecar_session_exists(session_id, request)),
         "sessionId": session_id,
+        "exitServerId": session["exitServerId"] if session else None,
         "sidecarUrl": SIDECAR_BASE_URL,
     }
 
@@ -80,8 +105,55 @@ def clear_session(request: Request) -> dict[str, bool]:
     session = get_session_db(user.id)
     if session:
         _delete_sidecar_session(session["sessionId"])
+        if session["exitServerId"]:
+            tunnel_registry.stop(user.id, session["exitServerId"])
     clear_session_db(user.id)
     return {"cleared": True}
+
+
+@router.get("/servers")
+def list_servers(request: Request) -> dict[str, list[dict[str, Any]]]:
+    user = require_user(request)
+    return {"servers": ssh_server_service.list_servers(user)}
+
+
+@router.get("/test-sites")
+def list_test_sites(request: Request) -> dict[str, list[dict[str, Any]]]:
+    user = require_user(request)
+    return {"sites": list_test_sites_db(user.id)}
+
+
+@router.post("/test-sites")
+def add_test_site(request: Request, payload: TestSitePayload) -> dict[str, dict[str, Any]]:
+    user = require_user(request)
+    return {"site": add_test_site_db(user.id, _normalize_test_site_url(payload.url))}
+
+
+@router.delete("/test-sites/{site_id}")
+def delete_test_site(request: Request, site_id: str) -> dict[str, bool]:
+    user = require_user(request)
+    return {"deleted": delete_test_site_db(user.id, site_id)}
+
+
+@router.post("/servers/{server_id}/test")
+def test_server_exit(request: Request, server_id: str) -> dict[str, Any]:
+    """Probe every configured test site through the selected SSH exit."""
+    user = require_user(request)
+    sites = list_test_sites_db(user.id)
+    if not sites:
+        raise ToolboxError("WEB_PROXY_TEST_SITES_EMPTY", "请先在设置中添加至少一个测试网站", status_code=400, tool_id=TOOL_ID)
+
+    # Re-authorize the global SSH record and use the exact same loopback proxy
+    # implementation as the browsing session.  A temporary tunnel is released
+    # after testing unless that server is already the active session's exit.
+    tunnel = tunnel_registry.ensure(user.id, _get_exit_server(user, server_id))
+    try:
+        results = [_probe_site_through_tunnel(tunnel.proxy_url, site["url"]) for site in sites]
+    finally:
+        session = get_session_db(user.id)
+        if not session or session["exitServerId"] != server_id:
+            tunnel_registry.stop(user.id, server_id)
+    return {"serverId": server_id, "results": results}
 
 
 def _get_or_create_session(user_id: str, request: Request | None = None) -> str:
@@ -91,8 +163,29 @@ def _get_or_create_session(user_id: str, request: Request | None = None) -> str:
         return session_id
 
     session_id = _create_sidecar_session(request)
-    save_session_db(user_id, session_id)
+    save_session_db(user_id, session_id, session["exitServerId"] if session else None)
     return session_id
+
+
+def _get_exit_server(user: Any, server_id: str) -> dict[str, Any]:
+    """Adapt the platform-owned SSH credential record for the tunnel only."""
+    credentials = ssh_server_service.get_server_credentials(server_id, user)
+    return {
+        "id": credentials["id"], "name": credentials["name"], "host": credentials["host"], "port": credentials["port"],
+        "sshUsername": credentials["ssh_username"], "authType": credentials["auth_type"],
+        "sshPassword": credentials["ssh_password"], "privateKey": credentials["private_key"],
+        "privateKeyPassphrase": credentials["private_key_passphrase"],
+    }
+
+
+def _configure_session_exit(user: Any, session_id: str, exit_server_id: str | None) -> None:
+    if exit_server_id is None:
+        _edit_session(session_id, enable_shuffling=False, http_proxy=None)
+        return
+    # Re-authorize against the global server registry before every sidecar
+    # configuration; the local session stores only the selected server id.
+    tunnel = tunnel_registry.ensure(user.id, _get_exit_server(user, exit_server_id))
+    _edit_session(session_id, enable_shuffling=False, http_proxy=tunnel.proxy_url)
 
 
 def _create_sidecar_session(request: Request | None = None) -> str:
@@ -105,9 +198,12 @@ def _create_sidecar_session(request: Request | None = None) -> str:
     return session_id
 
 
-def _edit_session(session_id: str, enable_shuffling: bool) -> None:
+def _edit_session(session_id: str, enable_shuffling: bool, http_proxy: str | None = None) -> None:
     password = _sidecar_password()
-    query = urlencode({"id": session_id, "enableShuffling": "1" if enable_shuffling else "0", "pwd": password})
+    params = {"id": session_id, "enableShuffling": "1" if enable_shuffling else "0", "pwd": password}
+    if http_proxy:
+        params["httpProxy"] = http_proxy
+    query = urlencode(params)
     response = _sidecar_get(f"/editsession?{query}").strip()
     if response != "Success":
         raise ToolboxError("WEB_PROXY_SESSION_FAILED", "代理会话配置失败", status_code=502, tool_id=TOOL_ID)
@@ -131,6 +227,14 @@ def _ensure_sidecar(request: Request | None = None) -> None:
     global _sidecar_public_info
     with _sidecar_lock:
         public_info = _public_server_info(request)
+        # Uvicorn's reload worker is replaced without owning the child Node
+        # process that the previous worker started.  If that loopback-only
+        # sidecar is already healthy, adopt it instead of spawning another
+        # instance on :8787 (which would fail with EADDRINUSE and turn every
+        # asset request into a 502).
+        if _sidecar_process is None and _sidecar_ready():
+            _sidecar_public_info = public_info
+            return
         if (
             _sidecar_process is not None
             and _sidecar_process.poll() is None
@@ -239,9 +343,9 @@ def _sidecar_ready() -> bool:
 def _sidecar_get(path: str, timeout: int = 10) -> str:
     request = UrlRequest(f"{SIDECAR_BASE_URL}{path}", headers={"User-Agent": "pansis-toolbox-web-proxy"})
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _sidecar_http.open(request, timeout=timeout) as response:
             return response.read().decode("utf-8", errors="replace")
-    except URLError as exc:
+    except (URLError, OSError) as exc:
         raise ToolboxError("WEB_PROXY_UNAVAILABLE", "网页代理进程不可用", status_code=502, tool_id=TOOL_ID) from exc
 
 
@@ -270,6 +374,67 @@ def _normalize_target_url(url: str) -> str:
     return f"https://{value}"
 
 
+def _normalize_test_site_url(url: str) -> str:
+    """Validate and canonicalize a user-configured exit-test URL."""
+    value = _normalize_target_url(url)
+    if len(value) > 2048:
+        raise ToolboxError("WEB_PROXY_TEST_SITE_INVALID", "测试网址过长", status_code=400, tool_id=TOOL_ID)
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ToolboxError("WEB_PROXY_TEST_SITE_INVALID", "测试网址必须是有效的 HTTP 或 HTTPS 地址", status_code=400, tool_id=TOOL_ID)
+    # Fragments are browser-only and never participate in an HTTP connectivity
+    # check, so avoid storing multiple equivalent entries.
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+
+def _probe_site_through_tunnel(proxy_url: str, url: str) -> dict[str, Any]:
+    """Request response headers through an SSH-backed loopback HTTP proxy."""
+    started = time.monotonic()
+    request = UrlRequest(
+        url,
+        headers={
+            "User-Agent": "pansis-toolbox-web-proxy-connectivity-check/1.0",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Range": "bytes=0-0",
+        },
+    )
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    try:
+        with opener.open(request, timeout=15) as response:
+            status_code = int(getattr(response, "status", response.getcode()))
+            final_url = response.geturl()
+        return {
+            "url": url,
+            "reachable": True,
+            "statusCode": status_code,
+            "latencyMs": round((time.monotonic() - started) * 1000),
+            "finalUrl": final_url,
+            "error": None,
+        }
+    except HTTPError as exc:
+        # A response such as 401/403/404 still proves that this exit reached
+        # the target host; surface the status rather than calling it a tunnel
+        # failure.
+        return {
+            "url": url,
+            "reachable": True,
+            "statusCode": exc.code,
+            "latencyMs": round((time.monotonic() - started) * 1000),
+            "finalUrl": exc.geturl(),
+            "error": None,
+        }
+    except (URLError, OSError, TimeoutError) as exc:
+        return {
+            "url": url,
+            "reachable": False,
+            "statusCode": None,
+            "latencyMs": round((time.monotonic() - started) * 1000),
+            "finalUrl": None,
+            "error": str(getattr(exc, "reason", exc))[:300],
+        }
+
+
 def _external_origin(request: Request) -> str:
     proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
     if proto in ("ws", "ws:"):
@@ -278,6 +443,24 @@ def _external_origin(request: Request) -> str:
         proto = "https"
     host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
     return f"{proto}://{host}"
+
+
+def _forwarded_public_headers(scope: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return the client-visible origin for sidecar URL rewriting.
+
+    The reverse proxy replaces ``Host`` with its loopback address before it
+    reaches Rammerhead.  Explicit forwarded headers must therefore be present
+    even for direct Uvicorn deployments where no upstream reverse proxy adds
+    them.
+    """
+    request = Request(scope)
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    if proto in ("ws", "ws:"):
+        proto = "http"
+    elif proto in ("wss", "wss:"):
+        proto = "https"
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+    return [("X-Forwarded-Proto", proto), ("X-Forwarded-Host", host)]
 
 
 def _public_server_info(request: Request | None) -> tuple[str, int, str]:
@@ -360,7 +543,11 @@ def _direct_entry_page() -> HTMLResponse:
 # ---------------------------------------------------------------------------
 
 # UUID v4 without dashes – 32 hex characters (matches rammerhead getSessionId).
-_SESSION_ID_RE = re.compile(r"^/[0-9a-f]{32}(/|$)", re.IGNORECASE)
+# Rammerhead also appends ``!s!utf-8`` style processing directives directly to
+# the id for cross-origin scripts and styles, and ``*<window-id>`` for links
+# opened in a new window.  Treat both forms as session traffic; otherwise the
+# public Vite server serves its SPA index and React Router displays its 404.
+_SESSION_ID_RE = re.compile(r"^/[0-9a-f]{32}(?:/|!|\*|$)", re.IGNORECASE)
 
 # Hammerhead / rammerhead reserved root-level routes that the browser loads
 # directly (not under a session id prefix).
@@ -393,7 +580,11 @@ _HOP_BY_HOP_HEADERS = frozenset(
 )
 
 # Extra request headers to strip before forwarding to the sidecar.
-_STRIP_REQUEST_HEADERS = _HOP_BY_HOP_HEADERS | {"host", "expect"}
+# ``_proxy_http`` buffers the ASGI body and writes one authoritative
+# Content-Length below.  Keeping the browser's original header would emit two
+# Content-Length values for POST requests, which Node/Rammerhead correctly
+# rejects with HTTP 400 (notably its /syncLocalStorage endpoint).
+_STRIP_REQUEST_HEADERS = _HOP_BY_HOP_HEADERS | {"host", "expect", "content-length"}
 
 
 def _is_rammerhead_path(path: str) -> bool:
@@ -438,11 +629,17 @@ async def _proxy_http(scope: dict[str, Any], receive: Callable[[], Awaitable[dic
 
     # Collect request headers, stripping hop-by-hop / host headers.
     req_headers: list[tuple[str, str]] = []
+    forwarded_header_names: set[str] = set()
     for raw_key, raw_value in scope["headers"]:
         key = raw_key.decode("ascii")
         if key.lower() in _STRIP_REQUEST_HEADERS:
             continue
+        if key.lower() in {"x-forwarded-proto", "x-forwarded-host"}:
+            forwarded_header_names.add(key.lower())
         req_headers.append((key, raw_value.decode("latin-1")))
+    for key, value in _forwarded_public_headers(scope):
+        if key.lower() not in forwarded_header_names:
+            req_headers.append((key, value))
     req_headers.append(("Host", f"{SIDECAR_HOST}:{SIDECAR_PORT}"))
     req_headers.append(("Connection", "close"))
 
@@ -640,6 +837,10 @@ async def _proxy_websocket(
         ):
             continue
         handshake_lines.append(f"{key}: {raw_value.decode('latin-1')}")
+    existing_headers = {raw_key.decode("ascii").lower() for raw_key, _ in scope["headers"]}
+    for key, value in _forwarded_public_headers(scope):
+        if key.lower() not in existing_headers:
+            handshake_lines.append(f"{key}: {value}")
     handshake = "\r\n".join(handshake_lines) + "\r\n\r\n"
 
     writer.write(handshake.encode("latin-1"))

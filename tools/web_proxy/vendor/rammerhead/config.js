@@ -67,11 +67,22 @@ module.exports = {
     restrictSessionToIP: true,
     jsCache: new RammerheadJSFileCache(path.join(dataDir, 'cache-js'), 256 * 1024 * 1024, 10000, false),
     disableHttp2: false,
-    stripClientHeaders: [],
+    // These headers describe the toolbox/reverse-proxy path, not the user's
+    // browser request.  They are consumed by getServerInfo for URL rewriting
+    // and then removed by Rammerhead before it connects to the destination.
+    stripClientHeaders: [
+        'forwarded', 'via', 'x-forwarded-for', 'x-forwarded-host',
+        'x-forwarded-proto', 'x-real-ip', 'cf-connecting-ip', 'cf-ipcountry',
+        'cf-ray', 'cf-visitor', 'cdn-loop'
+    ],
     rewriteServerHeaders: {
         'x-frame-options': null,
         'content-security-policy': null,
-        'content-security-policy-report-only': null
+        'content-security-policy-report-only': null,
+        // Some upstream gateways add this to otherwise normal HTML pages.
+        // Hammerhead then treats the page as a download and skips URL/script
+        // rewriting, so follow-up links leave the proxy session.
+        'content-disposition': null
     },
     fileCacheSessionConfig: {
         saveDirectory: path.join(dataDir, 'sessions'),

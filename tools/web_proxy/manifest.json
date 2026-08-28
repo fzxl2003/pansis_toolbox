@@ -1,8 +1,8 @@
 {
   "id": "web_proxy",
   "name": "网页代理",
-  "description": "基于 Rammerhead 的用户隔离完整 Web Proxy，支持登录网站的独立会话。（大部分网页显示不正常）",
-  "version": "0.1.0",
+  "description": "支持 SSH 出口二次代理、用户隔离会话与公网反向代理访问的网页代理。",
+  "version": "0.2.0",
   "enabled": true,
   "category": "network",
   "icon": {

@@ -58,6 +58,7 @@ export type SshServer = {
   ownerUserId: string;
   allowedUserIds: string[];
   canManage: boolean;
+  canShare: boolean;
 };
 
 export type SshServerPayload = {

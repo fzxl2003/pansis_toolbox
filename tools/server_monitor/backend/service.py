@@ -22,9 +22,10 @@ from backend.app.db.database import (
     list_user_tool_dbs,
     user_tool_connection_context,
 )
-from backend.app.services.auth_service import User
+from backend.app.services.auth_service import User, list_users
 from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services import ssh_connection_service
+from backend.app.services import ssh_server_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,8 @@ def init_monitor_database(user_id: str) -> None:
             """
         )
     _initialized_dbs.add(user_id)
+    _migrate_legacy_default_servers()
+    _migrate_legacy_servers(user_id)
 
 
 # ============================================================
@@ -189,6 +192,40 @@ def _sync_default_servers_to_user(user_id: str) -> None:
         connection.commit()
 
 
+def _migrate_legacy_default_servers() -> None:
+    """Import the retired platform default list as shared global SSH servers."""
+    _init_platform_default_servers_table()
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM {_DEFAULT_SERVERS_TABLE} WHERE ssh_password_encrypted <> ''"
+        ).fetchall()
+        users = connection.execute(
+            "SELECT id,username,display_name,role,disabled FROM users WHERE disabled=0 ORDER BY role='admin' DESC, created_at"
+        ).fetchall()
+    if not rows or not users:
+        return
+    owner_row = users[0]
+    owner = User(
+        id=owner_row["id"], username=owner_row["username"], display_name=owner_row["display_name"],
+        role=owner_row["role"], disabled=bool(owner_row["disabled"]),
+    )
+    allowed = [item["id"] for item in users]
+    migrated_ids: list[str] = []
+    for row in rows:
+        ssh_server_service.migrate_legacy_server(
+            server_id=row["id"], owner=owner, name=row["name"], host=row["host"], port=row["port"],
+            ssh_username=row["ssh_username"], ssh_password=decrypt_secret(row["ssh_password_encrypted"]),
+            source_tool=TOOL_ID, is_public=True, allowed_user_ids=allowed,
+        )
+        migrated_ids.append(row["id"])
+    with get_connection() as connection:
+        connection.executemany(
+            f"UPDATE {_DEFAULT_SERVERS_TABLE} SET ssh_password_encrypted='' WHERE id=?",
+            [(server_id,) for server_id in migrated_ids],
+        )
+        connection.commit()
+
+
 # ============================================================
 # Data category registration
 # ============================================================
@@ -222,110 +259,94 @@ register_tool_categories(TOOL_ID, [
 # Server Management
 # ============================================================
 
+def _migrate_legacy_servers(user_id: str) -> None:
+    """Move tool-local credentials into global SSH records, preserving IDs."""
+    owner = User(id=user_id, username="", display_name="", role="user", disabled=False)
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
+        rows = connection.execute("SELECT * FROM monitor_servers WHERE ssh_password_encrypted <> ''").fetchall()
+        for row in rows:
+            shared = bool(row["is_default"])
+            allowed = []
+            if shared:
+                with get_connection() as platform_connection:
+                    allowed = [item["id"] for item in platform_connection.execute("SELECT id FROM users WHERE disabled=0").fetchall()]
+            ssh_server_service.migrate_legacy_server(
+                server_id=row["id"], owner=owner, name=row["name"], host=row["host"], port=row["port"],
+                ssh_username=row["ssh_username"], ssh_password=decrypt_secret(row["ssh_password_encrypted"]),
+                source_tool=TOOL_ID, is_public=shared, allowed_user_ids=allowed,
+            )
+            connection.execute("UPDATE monitor_servers SET ssh_password_encrypted='' WHERE id=?", (row["id"],))
+        connection.commit()
+
 def list_servers(user: User | None) -> list[dict[str, Any]]:
     if user is None:
         return []
-    _sync_default_servers_to_user(user.id)
+    init_monitor_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
         rows = connection.execute(
-            "SELECT * FROM monitor_servers WHERE enabled = 1 ORDER BY is_default DESC, name"
+            "SELECT * FROM monitor_servers WHERE enabled = 1 ORDER BY name"
         ).fetchall()
-    return [_public_server(row) for row in rows]
+    result = []
+    for row in rows:
+        try:
+            selected = ssh_server_service.get_server(row["id"], user)
+        except ToolboxError:
+            continue
+        item = _public_server(row)
+        item.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
+        item["isDefault"] = bool(selected["isPublic"])
+        result.append(item)
+    return result
 
 
-def get_server(server_id: str, user: User | None) -> sqlite3.Row:
+def get_server(server_id: str, user: User | None) -> dict[str, Any]:
     if user is None:
         raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
-    _sync_default_servers_to_user(user.id)
+    init_monitor_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
         row = connection.execute(
             "SELECT * FROM monitor_servers WHERE id = ? AND enabled = 1", (server_id,)
         ).fetchone()
     if row is None:
         raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
-    return row
+    return ssh_server_service.merge_connection_credentials(row, user)
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    is_default = bool(payload.get("isDefault")) and user.role == "admin"
-    if bool(payload.get("isDefault")) and user.role != "admin":
-        raise ToolboxError("ADMIN_REQUIRED", "只有管理员可以创建默认服务器", status_code=403, tool_id=TOOL_ID)
-
-    server_id = secrets.token_hex(12)
+    selected = ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
+    server_id = selected["id"]
     now = now_iso()
     directory_whitelist = json.dumps(_clean_paths(payload.get("directoryWhitelist") or []), ensure_ascii=False)
     refresh_seconds = int(payload.get("directoryRefreshSeconds") or DEFAULT_DIRECTORY_REFRESH_SECONDS)
 
-    if is_default:
-        # Store in platform DB
-        _init_platform_default_servers_table()
-        with get_connection() as connection:
+    init_monitor_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        existing = connection.execute("SELECT * FROM monitor_servers WHERE id=?", (server_id,)).fetchone()
+        if existing is not None and bool(existing["enabled"]):
+            raise ToolboxError("SERVER_ALREADY_SELECTED", "该全局服务器已添加到监控看板", status_code=409, tool_id=TOOL_ID)
+        if existing is not None:
             connection.execute(
-                f"""
-                INSERT INTO {_DEFAULT_SERVERS_TABLE} (
-                    id, name, host, port, ssh_username, ssh_password_encrypted,
-                    directory_whitelist, directory_refresh_seconds, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    server_id,
-                    _required(payload, "name"),
-                    _required(payload, "host"),
-                    int(payload.get("port") or 22),
-                    _required(payload, "sshUsername"),
-                    encrypt_secret(_required(payload, "sshPassword")),
-                    directory_whitelist,
-                    refresh_seconds,
-                    now,
-                    now,
-                ),
+                """UPDATE monitor_servers SET enabled=1, directory_whitelist=?, directory_refresh_seconds=?, updated_at=? WHERE id=?""",
+                (directory_whitelist, refresh_seconds, now, server_id),
             )
-            connection.commit()
-        # Sync to this user's DB
-        _sync_default_servers_to_user(user.id)
-        with user_tool_connection_context(user.id, TOOL_ID) as connection:
-            row = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
-    else:
-        # Store in user's DB only
-        init_monitor_database(user.id)
-        with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        else:
             connection.execute(
-                """
-                INSERT INTO monitor_servers (
-                    id, name, host, port, ssh_username, ssh_password_encrypted, is_default, owner_user_id,
-                    directory_whitelist, directory_refresh_seconds, enabled, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    server_id,
-                    _required(payload, "name"),
-                    _required(payload, "host"),
-                    int(payload.get("port") or 22),
-                    _required(payload, "sshUsername"),
-                    encrypt_secret(_required(payload, "sshPassword")),
-                    user.id,
-                    directory_whitelist,
-                    refresh_seconds,
-                    now,
-                    now,
-                ),
+                """INSERT INTO monitor_servers
+                   (id,name,host,port,ssh_username,ssh_password_encrypted,is_default,owner_user_id,directory_whitelist,directory_refresh_seconds,enabled,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?)""",
+                (server_id, selected["name"], selected["host"], int(selected["port"]), selected["sshUsername"], "", user.id,
+                 directory_whitelist, refresh_seconds, 1, now, now),
             )
-            connection.commit()
-            row = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
-    return _public_server(row)
+        connection.commit()
+        row = connection.execute("SELECT * FROM monitor_servers WHERE id=?", (server_id,)).fetchone()
+    item = _public_server(row)
+    item.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
+    item["isDefault"] = bool(selected["isPublic"])
+    return item
 
 
 def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
     row = get_server(server_id, user)
-    _require_edit(row, user)
-    next_default = bool(payload.get("isDefault", bool(row["is_default"])))
-    if next_default and user.role != "admin":
-        raise ToolboxError("ADMIN_REQUIRED", "只有管理员可以配置默认服务器", status_code=403, tool_id=TOOL_ID)
-
-    password = payload.get("sshPassword")
-    encrypted_password = encrypt_secret(password) if password else row["ssh_password_encrypted"]
     directory_whitelist = json.dumps(
         _clean_paths(payload.get("directoryWhitelist", _json_list(row["directory_whitelist"]))),
         ensure_ascii=False,
@@ -333,84 +354,32 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
     refresh_seconds = int(payload.get("directoryRefreshSeconds") or row["directory_refresh_seconds"])
     now = now_iso()
 
-    if row["is_default"]:
-        # Update in platform DB
-        _init_platform_default_servers_table()
-        with get_connection() as connection:
-            connection.execute(
-                f"""
-                UPDATE {_DEFAULT_SERVERS_TABLE}
-                SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?,
-                    directory_whitelist = ?, directory_refresh_seconds = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    payload.get("name", row["name"]),
-                    payload.get("host", row["host"]),
-                    int(payload.get("port") or row["port"]),
-                    payload.get("sshUsername", row["ssh_username"]),
-                    encrypted_password,
-                    directory_whitelist,
-                    refresh_seconds,
-                    now,
-                    server_id,
-                ),
-            )
-            connection.commit()
-        # Sync to this user's DB
-        _sync_default_servers_to_user(user.id)
-    else:
-        owner_user_id = row["owner_user_id"] or user.id
-        with user_tool_connection_context(user.id, TOOL_ID) as connection:
-            connection.execute(
-                """
-                UPDATE monitor_servers
-                SET name = ?, host = ?, port = ?, ssh_username = ?, ssh_password_encrypted = ?,
-                    is_default = 0, owner_user_id = ?, directory_whitelist = ?,
-                    directory_refresh_seconds = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    payload.get("name", row["name"]),
-                    payload.get("host", row["host"]),
-                    int(payload.get("port") or row["port"]),
-                    payload.get("sshUsername", row["ssh_username"]),
-                    encrypted_password,
-                    owner_user_id,
-                    directory_whitelist,
-                    refresh_seconds,
-                    now,
-                    server_id,
-                ),
-            )
-            connection.commit()
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        connection.execute(
+            """UPDATE monitor_servers SET directory_whitelist=?, directory_refresh_seconds=?, updated_at=? WHERE id=?""",
+            (directory_whitelist, refresh_seconds, now, server_id),
+        )
+        connection.commit()
 
     ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
         updated = connection.execute("SELECT * FROM monitor_servers WHERE id = ?", (server_id,)).fetchone()
-    return _public_server(updated)
+    selected = ssh_server_service.get_server(server_id, user)
+    result = _public_server(updated)
+    result.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
+    result["isDefault"] = bool(selected["isPublic"])
+    return result
 
 
 def delete_server(server_id: str, user: User) -> None:
     row = get_server(server_id, user)
-    _require_edit(row, user)
-
-    if row["is_default"]:
-        # Delete from platform DB
-        _init_platform_default_servers_table()
-        with get_connection() as connection:
-            connection.execute(f"DELETE FROM {_DEFAULT_SERVERS_TABLE} WHERE id = ?", (server_id,))
-            connection.commit()
-        # Sync to this user's DB (will remove the deleted default)
-        _sync_default_servers_to_user(user.id)
-    else:
-        with user_tool_connection_context(user.id, TOOL_ID) as connection:
-            connection.execute(
-                "UPDATE monitor_servers SET enabled = 0, updated_at = ? WHERE id = ?",
-                (now_iso(), server_id),
-            )
-            connection.commit()
+    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+        connection.execute(
+            "UPDATE monitor_servers SET enabled = 0, updated_at = ? WHERE id = ?",
+            (now_iso(), server_id),
+        )
+        connection.commit()
 
     ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
 
@@ -532,13 +501,6 @@ def collect_due_servers() -> None:
     """
     for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
         init_monitor_database(user_id)
-        # Sync default servers (in case admin added/removed defaults)
-        try:
-            _sync_default_servers_to_user(user_id)
-        except Exception:
-            logger.exception("Failed to sync default servers for user %s", user_id)
-            continue
-
         try:
             with user_tool_connection_context(user_id, TOOL_ID) as connection:
                 rows = connection.execute(
@@ -548,8 +510,12 @@ def collect_due_servers() -> None:
             logger.exception("Failed to read servers for user %s", user_id)
             continue
 
-        for row in rows:
+        scheduler_user = next((item for item in list_users() if item.id == user_id), None)
+        if scheduler_user is None:
+            continue
+        for binding in rows:
             try:
+                row = get_server(binding["id"], scheduler_user)
                 latest = _latest_sample(user_id, row["id"])
                 if latest is None or _age_seconds(latest["collected_at"]) >= SAMPLE_SECONDS:
                     _collect_and_store(user_id, row)
@@ -729,16 +695,17 @@ def _run_ssh_cached(row: sqlite3.Row, command: str) -> str:
     return output
 
 
-def _ssh_spec(row: sqlite3.Row, timeout: int = 20) -> SSHConnectionSpec:
+def _ssh_spec(row: sqlite3.Row | dict[str, Any], timeout: int = 20) -> SSHConnectionSpec:
     encrypted_password = row["ssh_password_encrypted"]
+    plain_password = row.get("ssh_password", "") if isinstance(row, dict) else ""
     return SSHConnectionSpec(
         tool_id=TOOL_ID,
         server_id=row["id"],
         host=row["host"],
         port=int(row["port"]),
         username=row["ssh_username"],
-        auth_fingerprint=ssh_connection_service.auth_fingerprint(encrypted_password),
-        password=decrypt_secret(encrypted_password),
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(plain_password or encrypted_password),
+        password=plain_password or decrypt_secret(encrypted_password),
         connect_timeout=timeout,
         connect_error_code="SSH_CONNECT_FAILED",
         missing_dependency_code="SSH_DEPENDENCY_MISSING",

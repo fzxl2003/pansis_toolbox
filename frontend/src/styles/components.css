@@ -1097,6 +1097,372 @@
   gap: 22px;
 }
 
+/* ============================================================
+   Settings — management surfaces
+   Mirrors the focused, compact management UI used by the TensorBoard
+   progress monitor while keeping the platform's blue accent.
+   ============================================================ */
+
+.settings-page {
+  max-width: 1180px;
+  margin: 0 auto;
+  gap: 16px;
+}
+
+.settings-page .page-header {
+  padding: 22px 24px;
+  border: 1px solid #dbe3ee;
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at top right, rgba(79, 70, 229, .14), transparent 36%),
+    linear-gradient(135deg, #fff 0%, #f8fbff 100%);
+}
+
+.settings-page .page-header .eyebrow {
+  color: #4f46e5;
+  letter-spacing: .08em;
+}
+
+.settings-page .page-header h1 {
+  color: #172554;
+  font-size: 28px;
+}
+
+.settings-page .settings-tabs {
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding: 4px;
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #f8fafc;
+  scrollbar-width: thin;
+}
+
+.settings-page .settings-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  color: #526071;
+  background: transparent;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+
+.settings-page .settings-tab:hover {
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.settings-page .settings-tab.active {
+  color: #3730a3;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .13);
+  font-weight: 650;
+}
+
+.settings-page .settings-tab-content {
+  gap: 14px;
+}
+
+.settings-page .panel {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-color: #dbe3ee;
+  border-radius: 12px;
+  box-shadow: 0 2px 5px rgba(15, 23, 42, .035);
+}
+
+.settings-page .result-header {
+  min-height: 24px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid #e7edf5;
+  color: #1e293b;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.settings-page .result-header > span {
+  gap: 8px;
+}
+
+.settings-page .result-header svg {
+  color: #4f46e5;
+}
+
+.settings-page .settings-header-action {
+  min-height: 32px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+.settings-page .result-header .settings-header-action svg {
+  color: #ffffff;
+}
+
+.settings-page .settings-password-submit {
+  align-self: end;
+  min-height: 36px;
+  padding: 0 13px;
+  font-size: 12px;
+}
+
+.settings-page .monitor-form.settings-email-form {
+  max-width: none;
+  gap: 14px;
+}
+
+.settings-page .settings-email-host-port {
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 180px);
+  gap: 12px;
+}
+
+.settings-page .settings-email-port .text-input { width: 100%; }
+
+.settings-page .settings-email-actions {
+  margin-top: 2px;
+  padding-top: 14px;
+  border-top: 1px solid #e7edf5;
+}
+
+.settings-page .monitor-form {
+  display: grid;
+  gap: 12px;
+  max-width: 900px;
+}
+
+.settings-page .monitor-form.user-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  max-width: none;
+}
+
+.settings-page .settings-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-page .settings-field > span { line-height: 1.2; }
+.settings-page .settings-field em { color: #dc2626; font-style: normal; }
+
+.settings-page .text-input,
+.settings-page textarea.text-input {
+  border-color: #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: inset 0 1px 1px rgba(15, 23, 42, .02);
+}
+
+.settings-page .text-input:focus,
+.settings-page textarea.text-input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .13);
+}
+
+.settings-page .primary-button {
+  min-height: 38px;
+  border-radius: 7px;
+  background: #4f46e5;
+  border-color: #4f46e5;
+  box-shadow: 0 4px 10px rgba(79, 70, 229, .18);
+}
+
+.settings-page .primary-button:hover:not(:disabled) {
+  background: #4338ca;
+  border-color: #4338ca;
+}
+
+.settings-page .chip {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 7px;
+  color: #475569;
+  background: #fff;
+  border-color: #d5deea;
+  font-size: 12px;
+}
+
+.settings-page .chip:hover:not(:disabled) {
+  color: #1d4ed8;
+  border-color: #93c5fd;
+  background: #f8fbff;
+}
+
+.settings-page .compact-list {
+  gap: 7px;
+}
+
+.settings-page .user-row,
+.settings-page .storage-row {
+  min-height: 58px;
+  padding: 11px 13px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #fff;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+
+.settings-page .user-row:hover,
+.settings-page .storage-row:hover {
+  border-color: #bfdbfe;
+  box-shadow: 0 2px 7px rgba(30, 64, 175, .06);
+}
+
+.settings-page .user-row strong {
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.settings-page .user-row small,
+.settings-page .muted {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-page .admin-notice {
+  padding: 10px 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  color: #3730a3;
+  background: #eef2ff;
+  font-size: 12px;
+}
+
+.settings-page .storage-summary { gap: 10px; }
+
+.settings-page .storage-summary-item {
+  min-width: 150px;
+  padding: 13px 15px;
+  border-color: #dbe3ee;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.settings-page .storage-summary-item strong { color: #312e81; font-size: 22px; }
+
+.settings-page .badge { border-radius: 999px; font-size: 11px; line-height: 1; }
+
+.settings-page .date-range-popover {
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, .16);
+}
+
+.settings-page .date-range-field span { color: #64748b; font-size: 11px; font-weight: 600; }
+
+.settings-page .success-box,
+.settings-page .error-box {
+  border-radius: 9px;
+}
+
+.settings-modal-backdrop { z-index: 1100; }
+
+.settings-page .modal-panel.settings-server-modal {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(800px, calc(100dvh - 32px));
+  overflow: auto;
+  padding: 0;
+  border: 1px solid #dbe3ee;
+  border-radius: 13px;
+  background: var(--surface-solid);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, .25);
+}
+
+.settings-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 15px;
+  border-bottom: 1px solid #e7edf5;
+  background: linear-gradient(135deg, #f8fbff, #fff);
+}
+
+.settings-modal-head .eyebrow { margin-bottom: 4px; color: #4f46e5; letter-spacing: .08em; }
+.settings-modal-head h2 { margin: 0; color: #172554; font-size: 19px; }
+.settings-modal-head p { margin: 5px 0 0; color: #64748b; font-size: 12px; }
+.settings-page .settings-modal-close {
+  flex: 0 0 34px;
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  color: #64748b;
+}
+
+.settings-page .settings-modal-close:hover:not(:disabled) { color: #334155; background: #f1f5f9; }
+
+.settings-server-modal .monitor-form { max-width: none; padding: 18px 20px 20px; }
+.settings-server-modal .settings-server-form { gap: 14px; }
+.settings-server-form .responsive-grid { gap: 12px; }
+.settings-server-form .settings-field { gap: 5px; }
+.settings-server-form .text-input { min-height: 38px; padding: 0 11px; font-size: 13px; }
+.settings-server-form textarea.text-input { min-height: 116px; padding: 10px 11px; line-height: 1.45; }
+
+.settings-auth-options,
+.settings-public-audience {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-page .settings-auth-option,
+.settings-page .settings-audience-option {
+  min-height: 34px;
+  gap: 7px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+.settings-page .settings-auth-option input,
+.settings-page .settings-audience-option input,
+.settings-public-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #4f46e5;
+}
+
+.settings-page .settings-server-sharing {
+  display: grid;
+  gap: 9px;
+  padding: 11px 12px;
+}
+
+.settings-public-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: #3730a3;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-modal-actions { padding-top: 14px; border-top: 1px solid #e7edf5; }
+.settings-page .settings-server-actions { gap: 8px; }
+.settings-page .settings-server-actions .primary-button { min-height: 38px; padding: 0 14px; font-size: 13px; }
+.settings-server-modal .settings-modal-actions { grid-column: 1 / -1; }
+
+@media (max-width: 760px) {
+  .settings-page .page-header { padding: 18px; }
+  .settings-page .panel { padding: 15px; }
+  .settings-page .monitor-form.user-form { grid-template-columns: 1fr; }
+  .settings-page .settings-tab { padding: 0 10px; }
+  .settings-page .settings-email-host-port { grid-template-columns: 1fr; }
+}
+
 /* ── Storage Summary ── */
 
 .storage-summary {

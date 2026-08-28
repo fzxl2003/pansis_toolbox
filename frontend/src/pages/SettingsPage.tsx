@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Calendar,
   Clock,
@@ -9,11 +10,14 @@ import {
   KeyRound,
   Lock,
   Mail,
+  Plus,
+  Server,
   Shield,
   ShieldCheck,
   Trash2,
   UserPlus,
   Users,
+  X,
 } from 'lucide-react';
 
 import { apiGet, apiPost } from '../api/client';
@@ -26,7 +30,7 @@ import {
   updateUserRole,
   type AuthUser,
 } from '../api/auth';
-import { fetchEmailConfig, saveEmailConfig, testEmailConfig, type EmailConfig, type EmailConfigPayload, fetchAbout, type AboutInfo } from '../api/settings';
+import { createSshServer, deleteSshServer, fetchEmailConfig, fetchSshServers, saveEmailConfig, testEmailConfig, testSshServer, updateSshServer, type EmailConfig, type EmailConfigPayload, type SshServer, type SshServerPayload, fetchAbout, type AboutInfo } from '../api/settings';
 import {
   fetchMyStorage,
   fetchStorageUsage,
@@ -50,7 +54,16 @@ import { LoginPanel } from '../components/LoginPanel';
 
 type ManagedUser = AuthUser & { disabled: boolean };
 
-type TabId = 'personal' | 'users' | 'data' | 'access' | 'email' | 'about';
+type TabId = 'personal' | 'ssh' | 'users' | 'data' | 'access' | 'email' | 'about';
+
+const emptySshServer: SshServerPayload = {
+  name: '', host: '', port: 22, sshUsername: '', authType: 'password', sshPassword: '',
+  privateKey: '', privateKeyPassphrase: '', isPublic: false, allowedUserIds: [],
+};
+
+function SettingField({ label, required = false, className = '', children }: { label: string; required?: boolean; className?: string; children: ReactNode }) {
+  return <label className={`settings-field ${className}`}><span>{label}{required && <em> *</em>}</span>{children}</label>;
+}
 
 const emptyEmailConfigForm: EmailConfigPayload = {
   smtpHost: '',
@@ -84,7 +97,7 @@ export function SettingsPage() {
 
   // If non-admin tries to access an admin tab, redirect to personal.
   useEffect(() => {
-    if (me && !isAdmin && activeTab !== 'personal') {
+    if (me && !isAdmin && !['personal', 'ssh', 'about'].includes(activeTab)) {
       setActiveTab('personal');
     }
   }, [me, isAdmin, activeTab]);
@@ -100,7 +113,7 @@ export function SettingsPage() {
 
   if (!me) {
     return (
-      <div className="page-stack">
+      <div className="page-stack settings-page">
         <header className="page-header">
           <div>
             <p className="eyebrow">Platform</p>
@@ -114,6 +127,7 @@ export function SettingsPage() {
 
   const tabs: { id: TabId; label: string; icon: typeof Users; adminOnly: boolean }[] = [
     { id: 'personal', label: '个人', icon: KeyRound, adminOnly: false },
+    { id: 'ssh', label: 'SSH 服务器', icon: Server, adminOnly: false },
     { id: 'users', label: '用户管理', icon: Users, adminOnly: true },
     { id: 'data', label: '工具数据清理', icon: Database, adminOnly: true },
     { id: 'access', label: '工具可见性', icon: Eye, adminOnly: true },
@@ -124,7 +138,7 @@ export function SettingsPage() {
   const visibleTabs = tabs.filter((tab) => !tab.adminOnly || isAdmin);
 
   return (
-    <div className="page-stack">
+    <div className="page-stack settings-page">
       <header className="page-header">
         <div>
           <p className="eyebrow">Platform</p>
@@ -155,6 +169,9 @@ export function SettingsPage() {
       <div className="settings-tab-content">
         {activeTab === 'personal' && (
           <PersonalTab me={me} onError={handleError} onSuccess={showSuccess} />
+        )}
+        {activeTab === 'ssh' && (
+          <SshServersTab isAdmin={isAdmin} onError={handleError} onSuccess={showSuccess} />
         )}
         {activeTab === 'users' && isAdmin && (
           <UserManagementTab me={me} onError={handleError} onSuccess={showSuccess} />
@@ -227,21 +244,9 @@ function PersonalTab({
           <span><KeyRound size={17} />修改密码</span>
         </div>
         <form className="monitor-form user-form" onSubmit={(e) => void handleChangePassword(e)}>
-          <input
-            className="text-input"
-            type="password"
-            placeholder="当前密码"
-            value={passwordForm.currentPassword}
-            onChange={(e) => setPasswordForm({ ...passwordForm, currentPassword: e.target.value })}
-          />
-          <input
-            className="text-input"
-            type="password"
-            placeholder="新密码"
-            value={passwordForm.newPassword}
-            onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })}
-          />
-          <button className="primary-button" type="submit"><Lock size={16} />更新密码</button>
+          <SettingField label="当前密码" required><input className="text-input" type="password" placeholder="请输入当前密码" value={passwordForm.currentPassword} onChange={(e) => setPasswordForm({ ...passwordForm, currentPassword: e.target.value })} /></SettingField>
+          <SettingField label="新密码" required><input className="text-input" type="password" placeholder="请输入新密码" value={passwordForm.newPassword} onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })} /></SettingField>
+          <button className="primary-button settings-password-submit" type="submit"><Lock size={15} />更新密码</button>
         </form>
       </section>
 
@@ -259,6 +264,141 @@ function PersonalTab({
 
 // ── User Management Tab ───────────────────────────────────────────────────
 
+function SshServersTab({
+  isAdmin,
+  onError,
+  onSuccess,
+}: {
+  isAdmin: boolean;
+  onError: (err: unknown, fallback: string) => void;
+  onSuccess: (msg: string) => void;
+}) {
+  const [servers, setServers] = useState<SshServer[]>([]);
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [form, setForm] = useState<SshServerPayload>(emptySshServer);
+  const [editing, setEditing] = useState<SshServer | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function load() {
+    try {
+      const [serverResult, userResult] = await Promise.all([
+        fetchSshServers(),
+        isAdmin ? apiGet<{ users: ManagedUser[] }>('/api/auth/users') : Promise.resolve({ users: [] as ManagedUser[] }),
+      ]);
+      setServers(serverResult.servers);
+      setUsers(userResult.users);
+    } catch (err) {
+      onError(err, '加载 SSH 服务器失败');
+    }
+  }
+  useEffect(() => { void load(); }, [isAdmin]);
+
+  function startAdd() { setEditing(null); setForm(emptySshServer); setFormOpen(true); }
+  function startEdit(server: SshServer) {
+    setEditing(server);
+    setForm({
+      name: server.name, host: server.host, port: server.port, sshUsername: server.sshUsername,
+      authType: server.authType, sshPassword: '', privateKey: '', privateKeyPassphrase: '',
+      isPublic: server.isPublic, allowedUserIds: server.allowedUserIds,
+    });
+    setFormOpen(true);
+  }
+  async function save(event: FormEvent) {
+    event.preventDefault(); setSaving(true);
+    try {
+      if (editing) await updateSshServer(editing.id, form);
+      else await createSshServer(form);
+      const wasEditing = Boolean(editing);
+      setFormOpen(false); setEditing(null); setForm(emptySshServer); await load(); onSuccess(wasEditing ? 'SSH 服务器已更新' : 'SSH 服务器已添加，可在所有工具中选择');
+    } catch (err) { onError(err, '保存 SSH 服务器失败'); } finally { setSaving(false); }
+  }
+  async function remove(server: SshServer) {
+    if (!window.confirm(`确认删除 SSH 服务器「${server.name}」？`)) return;
+    try { await deleteSshServer(server.id); await load(); onSuccess('SSH 服务器已删除'); }
+    catch (err) { onError(err, '删除 SSH 服务器失败'); }
+  }
+  async function test(server: SshServer) {
+    try { const result = await testSshServer(server.id); onSuccess(`${server.name}：${result.message}`); }
+    catch (err) { onError(err, 'SSH 连接测试失败'); }
+  }
+  function toggleAudience(userId: string, checked: boolean) {
+    setForm((previous) => ({ ...previous, allowedUserIds: checked
+      ? [...new Set([...previous.allowedUserIds, userId])]
+      : previous.allowedUserIds.filter((id) => id !== userId) }));
+  }
+
+  return (
+    <>
+      {isAdmin ? <section className="panel">
+        <div className="result-header"><span><Server size={17} />SSH 服务器</span>{isAdmin && <button className="primary-button settings-header-action" type="button" onClick={startAdd}><Plus size={15} />添加服务器</button>}</div>
+        <p className="muted" style={{ marginTop: 0 }}>
+          所有 SSH 工具均从这里选择服务器。密码和私钥均加密保存，且不会返回到浏览器。
+        </p>
+        <div className="compact-list">
+          {servers.length === 0 && <span className="muted">尚无可用服务器，请在下方添加。</span>}
+          {servers.map((server) => (
+            <div className="user-row storage-row" key={server.id}>
+              <span>
+                <strong>{server.name} {server.isPublic && <span className="badge info">公开</span>}</strong>
+                <small>{server.sshUsername}@{server.host}:{server.port} · {server.authType === 'password' ? '密码认证' : '私钥认证'}</small>
+              </span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button className="chip" type="button" onClick={() => void test(server)}>测试连接</button>
+                {server.canManage && <button className="chip" type="button" onClick={() => startEdit(server)}>编辑</button>}
+                {server.canManage && <button className="chip" type="button" style={{ color: 'var(--danger)' }} onClick={() => void remove(server)}>删除</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section> : <section className="panel"><div className="admin-notice"><Shield size={14} />SSH 服务器由管理员统一维护；你只能在已授权的工具中选择和使用。</div></section>}
+      {isAdmin && formOpen && <div className="modal-backdrop settings-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setFormOpen(false); }}>
+        <section className="modal-panel settings-server-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑 SSH 服务器' : '添加 SSH 服务器'}>
+          <div className="settings-modal-head"><div><span className="eyebrow">Global SSH</span><h2>{editing ? '编辑服务器' : '添加服务器'}</h2><p>保存后可在已授权的工具中直接选择。</p></div><button className="chip settings-modal-close" type="button" aria-label="关闭弹窗" title="关闭" disabled={saving} onClick={() => setFormOpen(false)}><X size={16} /></button></div>
+          <form className="monitor-form settings-server-form" onSubmit={(event) => void save(event)}>
+          <div className="responsive-grid two">
+            <SettingField label="服务器名称" required><input className="text-input" placeholder="例如：训练服务器" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></SettingField>
+            <SettingField label="服务器地址" required><input className="text-input" placeholder="域名或 IP 地址" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} /></SettingField>
+          </div>
+          <div className="responsive-grid two">
+            <SettingField label="SSH 端口" required><input className="text-input" type="number" min="1" max="65535" placeholder="默认 22" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) || 22 })} /></SettingField>
+            <SettingField label="SSH 用户名" required><input className="text-input" placeholder="例如：ubuntu 或 root" value={form.sshUsername} onChange={(e) => setForm({ ...form, sshUsername: e.target.value })} /></SettingField>
+          </div>
+          <SettingField label="认证方式"><div className="settings-auth-options">
+            <label className="chip settings-auth-option"><input type="radio" checked={form.authType === 'password'} onChange={() => setForm({ ...form, authType: 'password' })} /> 密码认证</label>
+            <label className="chip settings-auth-option"><input type="radio" checked={form.authType === 'private_key'} onChange={() => setForm({ ...form, authType: 'private_key' })} /> 私钥认证</label>
+          </div></SettingField>
+          {form.authType === 'password' ? (
+            <SettingField label="SSH 密码" required={!editing}><input className="text-input" type="password" placeholder={editing ? '留空则不修改' : '请输入 SSH 密码'} value={form.sshPassword} onChange={(e) => setForm({ ...form, sshPassword: e.target.value })} /></SettingField>
+          ) : (
+            <>
+              <SettingField label="私钥内容" required={!editing}><textarea className="text-input" rows={5} placeholder={editing ? '留空则不修改' : '粘贴 OpenSSH 或 PEM 私钥'} value={form.privateKey} onChange={(e) => setForm({ ...form, privateKey: e.target.value })} /></SettingField>
+              <SettingField label="私钥口令"><input className="text-input" type="password" placeholder="如有；编辑时留空不修改" value={form.privateKeyPassphrase} onChange={(e) => setForm({ ...form, privateKeyPassphrase: e.target.value })} /></SettingField>
+            </>
+          )}
+          {isAdmin && (
+            <div className="admin-notice settings-server-sharing">
+              <label className="settings-public-toggle"><input type="checkbox" checked={form.isPublic} onChange={(e) => setForm({ ...form, isPublic: e.target.checked, allowedUserIds: e.target.checked ? form.allowedUserIds : [] })} /> 作为公开服务器提供给指定用户</label>
+              {form.isPublic && <div className="settings-public-audience">
+                {users.filter((user) => !user.disabled).map((user) => <label className="chip settings-audience-option" key={user.id}>
+                  <input type="checkbox" checked={form.allowedUserIds.includes(user.id)} onChange={(e) => toggleAudience(user.id, e.target.checked)} />{user.displayName}
+                </label>)}
+              </div>}
+            </div>
+          )}
+          <div className="responsive-actions settings-modal-actions settings-server-actions">
+            <button className="primary-button" disabled={saving} type="submit">{editing ? '保存修改' : '添加到全局服务器'}</button>
+            <button className="chip" disabled={saving} type="button" onClick={() => setFormOpen(false)}>取消</button>
+          </div>
+          </form>
+        </section>
+      </div>}
+    </>
+  );
+}
+
+// ── User Management Tab ───────────────────────────────────────────────────
+
 function UserManagementTab({
   me,
   onError,
@@ -270,6 +410,7 @@ function UserManagementTab({
 }) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [form, setForm] = useState({ username: '', displayName: '', password: '', role: 'user' });
+  const [createOpen, setCreateOpen] = useState(false);
   const [resetPasswords, setResetPasswords] = useState<Record<string, string>>({});
 
   const isSuperAdmin = me.isSuperAdmin;
@@ -292,6 +433,7 @@ function UserManagementTab({
     try {
       await apiPost('/api/auth/users', form);
       setForm({ username: '', displayName: '', password: '', role: 'user' });
+      setCreateOpen(false);
       await loadUsers();
       onSuccess('用户创建成功');
     } catch (err) {
@@ -346,7 +488,8 @@ function UserManagementTab({
     <>
       <section className="panel">
         <div className="result-header">
-          <span><UserPlus size={17} />添加用户</span>
+          <span><Users size={17} />用户列表</span>
+          <button className="primary-button settings-header-action" type="button" onClick={() => setCreateOpen(true)}><UserPlus size={15} />添加用户</button>
         </div>
         {isSuperAdmin && (
           <div className="admin-notice" style={{ marginBottom: '12px' }}>
@@ -354,22 +497,6 @@ function UserManagementTab({
             <span>您是超级管理员，可以创建管理员账号并调整角色。</span>
           </div>
         )}
-        <form className="monitor-form user-form" onSubmit={(e) => void createUser(e)}>
-          <input className="text-input" placeholder="用户名" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-          <input className="text-input" placeholder="显示名" value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} />
-          <input className="text-input" type="password" placeholder="密码" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-          <select className="text-input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} disabled={!isSuperAdmin && form.role === 'admin'}>
-            <option value="user">普通用户</option>
-            {isSuperAdmin && <option value="admin">管理员</option>}
-          </select>
-          <button className="primary-button" type="submit"><UserPlus size={16} />创建</button>
-        </form>
-      </section>
-
-      <section className="panel">
-        <div className="result-header">
-          <span><Users size={17} />用户列表</span>
-        </div>
         <div className="compact-list">
           {users.map((user) => {
             const canManage = !user.isSuperAdmin && (isSuperAdmin || user.role !== 'admin');
@@ -430,6 +557,18 @@ function UserManagementTab({
           })}
         </div>
       </section>
+      {createOpen && <div className="modal-backdrop settings-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}>
+        <section className="modal-panel settings-server-modal" role="dialog" aria-modal="true" aria-label="添加用户">
+          <div className="settings-modal-head"><div><span className="eyebrow">User management</span><h2>添加用户</h2><p>创建后可在用户列表中继续调整权限与状态。</p></div><button className="chip settings-modal-close" type="button" aria-label="关闭弹窗" title="关闭" onClick={() => setCreateOpen(false)}><X size={16} /></button></div>
+          <form className="monitor-form user-form" onSubmit={(event) => void createUser(event)}>
+            <SettingField label="用户名" required><input className="text-input" placeholder="用于登录" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></SettingField>
+            <SettingField label="显示名称" required><input className="text-input" placeholder="页面展示名称" value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} /></SettingField>
+            <SettingField label="初始密码" required><input className="text-input" type="password" placeholder="为用户设置初始密码" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></SettingField>
+            <SettingField label="角色"><select className="text-input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} disabled={!isSuperAdmin && form.role === 'admin'}><option value="user">普通用户</option>{isSuperAdmin && <option value="admin">管理员</option>}</select></SettingField>
+            <div className="responsive-actions settings-modal-actions"><button className="primary-button" type="submit"><UserPlus size={15} />创建用户</button><button className="chip" type="button" onClick={() => setCreateOpen(false)}>取消</button></div>
+          </form>
+        </section>
+      </div>}
     </>
   );
 }
@@ -685,48 +824,35 @@ function EmailTab({
         </span>
       </div>
       {emailConfigLoaded && (
-        <form className="monitor-form" onSubmit={(e) => void handleSaveEmailConfig(e)}>
-          <div className="responsive-grid host-port">
-            <div className="form-group" style={{ margin: 0 }}>
-              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
-                SMTP 服务器地址 *
-              </label>
+        <form className="monitor-form settings-email-form" onSubmit={(e) => void handleSaveEmailConfig(e)}>
+          <div className="responsive-grid settings-email-host-port">
+            <SettingField label="SMTP 服务器地址" required>
               <input
                 className="text-input"
                 placeholder="smtp.example.com"
                 value={emailForm.smtpHost}
                 onChange={(e) => setEmailForm({ ...emailForm, smtpHost: e.target.value })}
               />
-            </div>
-            <div className="form-group" style={{ margin: 0 }}>
-              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
-                端口（SSL 465）
-              </label>
+            </SettingField>
+            <SettingField label="端口（SSL 465）" className="settings-email-port">
               <input
                 className="text-input"
                 type="number"
-                style={{ width: '90px' }}
                 value={emailForm.smtpPort}
                 onChange={(e) => setEmailForm({ ...emailForm, smtpPort: Number(e.target.value) })}
               />
-            </div>
+            </SettingField>
           </div>
           <div className="responsive-grid two">
-            <div className="form-group" style={{ margin: 0 }}>
-              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
-                SMTP 用户名
-              </label>
+            <SettingField label="SMTP 用户名">
               <input
                 className="text-input"
                 placeholder="用户名"
                 value={emailForm.smtpUsername}
                 onChange={(e) => setEmailForm({ ...emailForm, smtpUsername: e.target.value })}
               />
-            </div>
-            <div className="form-group" style={{ margin: 0 }}>
-              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
-                SMTP 密码
-              </label>
+            </SettingField>
+            <SettingField label="SMTP 密码">
               <input
                 className="text-input"
                 type="password"
@@ -734,33 +860,27 @@ function EmailTab({
                 value={emailForm.smtpPassword}
                 onChange={(e) => setEmailForm({ ...emailForm, smtpPassword: e.target.value })}
               />
-            </div>
+            </SettingField>
           </div>
           <div className="responsive-grid two">
-            <div className="form-group" style={{ margin: 0 }}>
-              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
-                发件人地址
-              </label>
+            <SettingField label="发件人地址">
               <input
                 className="text-input"
                 placeholder="noreply@example.com"
                 value={emailForm.smtpFromAddress}
                 onChange={(e) => setEmailForm({ ...emailForm, smtpFromAddress: e.target.value })}
               />
-            </div>
-            <div className="form-group" style={{ margin: 0 }}>
-              <label style={{ fontSize: '12px', color: 'var(--color-muted)', display: 'block', marginBottom: '4px' }}>
-                发件人名称
-              </label>
+            </SettingField>
+            <SettingField label="发件人名称">
               <input
                 className="text-input"
                 placeholder="实验监控系统"
                 value={emailForm.smtpFromName}
                 onChange={(e) => setEmailForm({ ...emailForm, smtpFromName: e.target.value })}
               />
-            </div>
+            </SettingField>
           </div>
-          <div className="responsive-actions" style={{ marginTop: '4px' }}>
+          <div className="responsive-actions settings-email-actions">
             <button className="primary-button" type="submit" disabled={emailLoading}>
               <Globe size={16} />保存邮件配置
             </button>

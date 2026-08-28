@@ -85,12 +85,7 @@ type DirectoryUsage = {
 };
 
 type ServerFormState = {
-  name: string;
-  host: string;
-  port: number;
-  sshUsername: string;
-  sshPassword: string;
-  isDefault: boolean;
+  serverId: string;
   directoryWhitelist: string;
   directoryRefreshSeconds: number;
   trackedDirectory: string;
@@ -100,12 +95,7 @@ type ModuleId = 'summary' | 'trends' | 'disks' | 'directories' | 'gpu';
 type ModulePreference = { id: ModuleId; label: string; visible: boolean };
 
 const emptyServer: ServerFormState = {
-  name: '',
-  host: '',
-  port: 22,
-  sshUsername: '',
-  sshPassword: '',
-  isDefault: false,
+  serverId: '',
   directoryWhitelist: '/data',
   directoryRefreshSeconds: 300,
   trackedDirectory: '',
@@ -143,7 +133,7 @@ export default function ServerMonitorTool() {
 
   const selected = servers.find((serverItem) => serverItem.id === selectedId) ?? servers[0];
   const isAdmin = me?.role === 'admin';
-  const canEditSelected = Boolean(me && selected && (!selected.isDefault || isAdmin) && (!selected.ownerUserId || selected.ownerUserId === me.id || isAdmin));
+  const canEditSelected = Boolean(me && selected && (!selected.ownerUserId || selected.ownerUserId === me.id || isAdmin));
   const visibleDiskKeys = selected ? visibleMounts[selected.id] : undefined;
   const displayedDisks = sample?.disks.filter((disk) => !visibleDiskKeys || visibleDiskKeys.includes(disk.mountPath)) ?? [];
   const activeGpu = sample?.gpus.find((gpu) => gpu.index === activeGpuIndex) ?? null;
@@ -248,12 +238,7 @@ export default function ServerMonitorTool() {
   function openEdit() {
     if (!selected) return;
     setForm({
-      name: selected.name,
-      host: selected.host,
-      port: selected.port,
-      sshUsername: selected.sshUsername,
-      sshPassword: '',
-      isDefault: selected.isDefault,
+      serverId: selected.id,
       directoryWhitelist: selected.directoryWhitelist.join('\n'),
       directoryRefreshSeconds: selected.directoryRefreshSeconds,
       trackedDirectory: '',
@@ -271,12 +256,7 @@ export default function ServerMonitorTool() {
     setIsLoading(true);
     setError(null);
     const payload = {
-      name: form.name,
-      host: form.host,
-      port: form.port,
-      sshUsername: form.sshUsername,
-      sshPassword: form.sshPassword || undefined,
-      isDefault: form.isDefault,
+      ...(modal === 'edit' ? {} : { serverId: form.serverId }),
       directoryWhitelist: splitLines(form.directoryWhitelist),
       directoryRefreshSeconds: form.directoryRefreshSeconds,
     };
@@ -284,7 +264,7 @@ export default function ServerMonitorTool() {
       if (modal === 'edit' && selected) {
         await apiPut(`/api/tools/server-monitor/servers/${selected.id}`, payload);
       } else {
-        await apiPost('/api/tools/server-monitor/servers', { ...payload, sshPassword: form.sshPassword });
+        await apiPost('/api/tools/server-monitor/servers', payload);
       }
       setModal(null);
       await loadServers();
@@ -456,7 +436,7 @@ export default function ServerMonitorTool() {
 
       {modal && (
         <Modal title={modal === 'edit' ? '编辑服务器' : '添加服务器'} onClose={() => setModal(null)}>
-          <ServerForm form={form} isAdmin={isAdmin} isEdit={modal === 'edit'} isLoading={isLoading} onChange={setForm} onSubmit={saveServer} />
+          <ServerForm form={form} isEdit={modal === 'edit'} isLoading={isLoading} onChange={setForm} onSubmit={saveServer} />
           {modal === 'edit' && selected && (
             <section className="modal-subsection">
               <div className="result-header">
@@ -809,43 +789,34 @@ function ProgressLine({ label, value }: { label: string; value: number | null })
 
 function ServerForm(props: {
   form: ServerFormState;
-  isAdmin: boolean;
   isEdit: boolean;
   isLoading: boolean;
   onChange: (form: ServerFormState) => void;
   onSubmit: (event: FormEvent) => void;
 }) {
-  const { form, isAdmin, isEdit, isLoading, onChange, onSubmit } = props;
+  const { form, isEdit, isLoading, onChange, onSubmit } = props;
+  const [globalServers, setGlobalServers] = useState<Array<{ id: string; name: string; host: string; port: number; sshUsername: string }>>([]);
+
+  useEffect(() => {
+    if (isEdit) return;
+    void apiGet<{ servers: Array<{ id: string; name: string; host: string; port: number; sshUsername: string }> }>('/api/settings/ssh-servers')
+      .then((result) => setGlobalServers(result.servers))
+      .catch(() => setGlobalServers([]));
+  }, [isEdit]);
+
   return (
     <form className="em-form" onSubmit={onSubmit}>
       <div className="form-group">
-        <label>服务器名称 *</label>
-        <input className="text-input" placeholder="如：实验服务器 A" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} />
+        <label>选择服务器 *</label>
+        <select className="text-input" value={form.serverId} disabled={isEdit} onChange={(event) => {
+          if (event.target.value === '__add_server__') { window.location.assign('/settings'); return; }
+          onChange({ ...form, serverId: event.target.value });
+        }}>
+          <option value="">请选择服务器</option>
+          {globalServers.map((server) => <option key={server.id} value={server.id}>{server.name}（{server.sshUsername}@{server.host}:{server.port}）</option>)}
+          {!isEdit && <option value="__add_server__">＋ 添加服务器…</option>}
+        </select>
       </div>
-
-      <fieldset className="em-fieldset">
-        <legend>SSH 连接信息</legend>
-        <div className="em-form-grid2">
-          <div className="form-group">
-            <label>主机 / IP 地址 *</label>
-            <input className="text-input" placeholder="192.168.1.100 或 example.com" value={form.host} onChange={(event) => onChange({ ...form, host: event.target.value })} />
-          </div>
-          <div className="form-group">
-            <label>SSH 端口</label>
-            <input className="text-input" type="number" min="1" max="65535" placeholder="22" value={form.port} onChange={(event) => onChange({ ...form, port: Number(event.target.value) })} />
-          </div>
-        </div>
-        <div className="em-form-grid2">
-          <div className="form-group">
-            <label>SSH 用户名 *</label>
-            <input className="text-input" placeholder="root 或 ubuntu" value={form.sshUsername} onChange={(event) => onChange({ ...form, sshUsername: event.target.value })} />
-          </div>
-          <div className="form-group">
-            <label>SSH 密码{isEdit ? '（留空则不修改）' : ' *'}</label>
-            <input className="text-input" type="password" placeholder={isEdit ? '留空则不修改' : '••••••••'} value={form.sshPassword} onChange={(event) => onChange({ ...form, sshPassword: event.target.value })} />
-          </div>
-        </div>
-      </fieldset>
 
       <fieldset className="em-fieldset">
         <legend>目录监控配置</legend>
@@ -860,13 +831,6 @@ function ServerForm(props: {
           <small className="form-hint">后台定期重新统计固定文件夹占用空间的频率，建议 60～600 秒</small>
         </div>
       </fieldset>
-
-      {isAdmin && (
-        <label className="check-row">
-          <input type="checkbox" checked={form.isDefault} onChange={(event) => onChange({ ...form, isDefault: event.target.checked })} />
-          设为默认服务器（所有用户均可查看）
-        </label>
-      )}
 
       <button className="primary-button" type="submit" disabled={isLoading}>
         <Server size={16} />{isEdit ? '保存服务器' : '添加服务器'}

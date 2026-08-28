@@ -18,6 +18,7 @@ from backend.app.services.data_management import (
     get_tool_categories,
 )
 from backend.app.services.email_service import get_email_config, save_email_config, send_email
+from backend.app.services import ssh_server_service
 
 # Project-root relative file that holds the "About" information shown in the
 # settings page.  Edit this file to update version / developer / contact info
@@ -34,6 +35,19 @@ class EmailConfigPayload(BaseModel):
     smtpPassword: str = ""
     smtpFromAddress: str = ""
     smtpFromName: str = "实验监控系统"
+
+
+class SshServerPayload(BaseModel):
+    name: str
+    host: str
+    port: int = 22
+    sshUsername: str
+    authType: str = "password"
+    sshPassword: str = ""
+    privateKey: str = ""
+    privateKeyPassphrase: str = ""
+    isPublic: bool = False
+    allowedUserIds: list[str] = []
 
 
 @router.get("/settings/email-config")
@@ -69,6 +83,37 @@ def test_email_config_route(request: Request, payload: EmailConfigPayload) -> di
         raise ToolboxError("EMAIL_SEND_FAILED", f"邮件发送失败: {exc}", status_code=500) from exc
 
     return {"success": True, "testTo": test_to}
+
+
+# ============================================================
+# Platform SSH servers
+# ============================================================
+
+@router.get("/settings/ssh-servers")
+def list_ssh_servers_route(request: Request) -> dict:
+    """All servers usable by the caller; credentials are never serialized."""
+    return {"servers": ssh_server_service.list_servers(require_user(request), include_disabled=False)}
+
+
+@router.post("/settings/ssh-servers")
+def create_ssh_server_route(request: Request, payload: SshServerPayload) -> dict:
+    return {"server": ssh_server_service.create_server(payload.model_dump(), require_user(request))}
+
+
+@router.put("/settings/ssh-servers/{server_id}")
+def update_ssh_server_route(request: Request, server_id: str, payload: SshServerPayload) -> dict:
+    return {"server": ssh_server_service.update_server(server_id, payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.delete("/settings/ssh-servers/{server_id}")
+def delete_ssh_server_route(request: Request, server_id: str) -> dict:
+    ssh_server_service.delete_server(server_id, require_user(request))
+    return {"deleted": True}
+
+
+@router.post("/settings/ssh-servers/{server_id}/test")
+def test_ssh_server_route(request: Request, server_id: str) -> dict:
+    return ssh_server_service.test_connection(server_id, require_user(request))
 
 
 # ============================================================

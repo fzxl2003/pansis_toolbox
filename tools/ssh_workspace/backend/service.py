@@ -25,6 +25,7 @@ from backend.app.db.database import (
 from backend.app.services.auth_service import User, get_user_by_session_token
 from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services import ssh_connection_service
+from backend.app.services import ssh_server_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
 import logging
@@ -201,6 +202,7 @@ def init_database(user_id: str) -> None:
         except sqlite3.OperationalError:
             connection.execute("ALTER TABLE ssh_screen_sessions ADD COLUMN pid TEXT NOT NULL DEFAULT ''")
     _initialized_dbs.add(user_id)
+    _migrate_legacy_servers(user_id)
 
 
 # ============================================================
@@ -245,159 +247,62 @@ register_tool_categories(TOOL_ID, [
 
 
 def list_servers(user: User) -> list[dict[str, Any]]:
+    # Server credentials and availability are platform-wide.  This tool keeps
+    # only terminal/templates/tasks that reference the global server id.
     init_database(user.id)
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
+    return [
+        {**item, "hasScreen": False, "lastTestStatus": "unknown", "lastTestError": "", "lastTestedAt": None,
+         "createdAt": "", "updatedAt": ""}
+        for item in ssh_server_service.list_servers(user)
+    ]
+
+
+def _migrate_legacy_servers(user_id: str) -> None:
+    """Import legacy SSH workspace credentials while preserving their IDs."""
+    owner = User(id=user_id, username="", display_name="", role="user", disabled=False)
+    with user_tool_connection_context(user_id, TOOL_ID) as connection:
         rows = connection.execute(
-            "SELECT * FROM ssh_servers WHERE owner_user_id = ? AND enabled = 1 ORDER BY name ASC",
-            (user.id,),
+            """SELECT * FROM ssh_servers
+               WHERE ssh_password_encrypted <> '' OR private_key_encrypted <> ''"""
         ).fetchall()
-    return [_public_server(row) for row in rows]
+        for row in rows:
+            ssh_server_service.migrate_legacy_server(
+                server_id=row["id"], owner=owner, name=row["name"], host=row["host"], port=row["port"],
+                ssh_username=row["ssh_username"], ssh_password=_decrypt(row["ssh_password_encrypted"]),
+                private_key=_decrypt(row["private_key_encrypted"]),
+                private_key_passphrase=_decrypt(row["private_key_passphrase_encrypted"]),
+                auth_type=row["auth_type"], source_tool=TOOL_ID,
+            )
+            connection.execute(
+                """UPDATE ssh_servers
+                   SET ssh_password_encrypted='', private_key_encrypted='', private_key_passphrase_encrypted=''
+                   WHERE id=?""",
+                (row["id"],),
+            )
+        connection.commit()
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    init_database(user.id)
-    auth_type = _clean_auth_type(payload.get("authType", "password"))
-    _validate_server_payload(payload, auth_type, creating=True)
-    now = _now()
-    server_id = _new_id()
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        connection.execute(
-            """
-            INSERT INTO ssh_servers (
-                id, owner_user_id, name, host, port, ssh_username, auth_type,
-                ssh_password_encrypted, private_key_encrypted, private_key_passphrase_encrypted,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                server_id, user.id,
-                _required(payload, "name"), _required(payload, "host"),
-                int(payload.get("port") or 22), _required(payload, "sshUsername"),
-                auth_type,
-                _encrypt(payload.get("sshPassword") or "") if payload.get("sshPassword") else "",
-                _encrypt(payload.get("privateKey") or "") if payload.get("privateKey") else "",
-                _encrypt(payload.get("privateKeyPassphrase") or "") if payload.get("privateKeyPassphrase") else "",
-                now, now,
-            ),
-        )
-        connection.commit()
-        row = connection.execute("SELECT * FROM ssh_servers WHERE id = ?", (server_id,)).fetchone()
-    return _public_server(row)
+    """Select an already-authorized global server; never create credentials here."""
+    return ssh_server_service.get_server(str(payload.get("serverId") or ""), user)
 
 
 def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-    row = get_server(server_id, user)
-    auth_type = _clean_auth_type(payload.get("authType", row["auth_type"]))
-    _validate_server_payload(payload, auth_type, creating=False)
-    password = payload.get("sshPassword")
-    private_key = payload.get("privateKey")
-    passphrase = payload.get("privateKeyPassphrase")
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        connection.execute(
-            """
-            UPDATE ssh_servers
-            SET name = ?, host = ?, port = ?, ssh_username = ?, auth_type = ?,
-                ssh_password_encrypted = ?, private_key_encrypted = ?,
-                private_key_passphrase_encrypted = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                payload.get("name", row["name"]), payload.get("host", row["host"]),
-                int(payload.get("port") or row["port"]),
-                payload.get("sshUsername", row["ssh_username"]), auth_type,
-                _encrypt(password) if password is not None and password != "" else row["ssh_password_encrypted"],
-                _encrypt(private_key) if private_key is not None and private_key != "" else row["private_key_encrypted"],
-                _encrypt(passphrase) if passphrase is not None and passphrase != "" else row["private_key_passphrase_encrypted"],
-                _now(), server_id,
-            ),
-        )
-        connection.commit()
-        updated = connection.execute("SELECT * FROM ssh_servers WHERE id = ?", (server_id,)).fetchone()
-    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
-    return _public_server(updated)
+    return ssh_server_service.get_server(server_id, user)
 
 
 def delete_server(server_id: str, user: User) -> None:
-    get_server(server_id, user)
-    now = _now()
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        connection.execute("UPDATE ssh_servers SET enabled = 0, updated_at = ? WHERE id = ?", (now, server_id))
-        connection.execute("UPDATE ssh_scheduled_tasks SET enabled = 0, updated_at = ? WHERE server_id = ? AND owner_user_id = ?", (now, server_id, user.id))
-        connection.execute("DELETE FROM ssh_terminal_tabs WHERE server_id = ? AND owner_user_id = ?", (server_id, user.id))
-        connection.commit()
-    ssh_connection_service.invalidate(tool_id=TOOL_ID, server_id=server_id)
+    # Global configurations are managed only in Settings.  Keeping this
+    # compatibility endpoint non-destructive avoids deleting a shared server.
+    ssh_server_service.get_server(server_id, user)
 
 
 def copy_server(server_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-    """Copy a server and all its templates + scheduled tasks."""
-    row = get_server(server_id, user)
-    now = _now()
-    new_id = _new_id()
-    new_name = (payload.get("name") or f"{row['name']} (副本)").strip()
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        # Copy server record
-        connection.execute(
-            """
-            INSERT INTO ssh_servers (
-                id, owner_user_id, name, host, port, ssh_username, auth_type,
-                ssh_password_encrypted, private_key_encrypted, private_key_passphrase_encrypted,
-                has_screen, last_test_status, last_test_error, last_tested_at,
-                enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', '', NULL, 1, ?, ?)
-            """,
-            (
-                new_id, user.id, new_name,
-                row["host"], row["port"], row["ssh_username"], row["auth_type"],
-                row["ssh_password_encrypted"], row["private_key_encrypted"], row["private_key_passphrase_encrypted"],
-                row["has_screen"],
-                now, now,
-            ),
-        )
-        # Copy templates
-        templates = connection.execute(
-            "SELECT * FROM ssh_command_templates WHERE server_id = ? AND owner_user_id = ?",
-            (server_id, user.id),
-        ).fetchall()
-        for t in templates:
-            connection.execute(
-                """
-                INSERT INTO ssh_command_templates (id, owner_user_id, server_id, name, command, description, variables_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (_new_id(), user.id, new_id, t["name"], t["command"], t["description"], t["variables_json"], now, now),
-            )
-        # Copy scheduled tasks (disabled by default)
-        tasks = connection.execute(
-            "SELECT * FROM ssh_scheduled_tasks WHERE server_id = ? AND owner_user_id = ?",
-            (server_id, user.id),
-        ).fetchall()
-        for t in tasks:
-            connection.execute(
-                """
-                INSERT INTO ssh_scheduled_tasks (id, owner_user_id, server_id, name, command, interval_seconds, screen_name_prefix, enabled, next_run_at, last_run_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)
-                """,
-                (
-                    _new_id(), user.id, new_id, t["name"], t["command"], t["interval_seconds"], t["screen_name_prefix"],
-                    (datetime.now(timezone.utc) + timedelta(seconds=t["interval_seconds"])).isoformat(),
-                    now, now,
-                ),
-            )
-        connection.commit()
-        new_row = connection.execute("SELECT * FROM ssh_servers WHERE id = ?", (new_id,)).fetchone()
-    return _public_server(new_row)
+    raise ToolboxError("GLOBAL_SERVER_ONLY", "请在设置的 SSH 服务器中复制配置", status_code=400, tool_id=TOOL_ID)
 
 
-def get_server(server_id: str, user: User) -> sqlite3.Row:
-    init_database(user.id)
-    with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        row = connection.execute(
-            "SELECT * FROM ssh_servers WHERE id = ? AND owner_user_id = ? AND enabled = 1",
-            (server_id, user.id),
-        ).fetchone()
-    if row is None:
-        raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
-    return row
+def get_server(server_id: str, user: User) -> dict[str, Any]:
+    return ssh_server_service.get_legacy_connection_row(server_id, user)
 
 
 def test_server(server_id: str, user: User) -> dict[str, Any]:
@@ -726,12 +631,9 @@ def save_terminal_tabs(tabs: list[dict[str, Any]], user: User) -> list[dict[str,
             server_id = tab.get("serverId", "")
             if not server_id:
                 continue
-            # Verify server belongs to user
-            srv = connection.execute(
-                "SELECT id FROM ssh_servers WHERE id = ? AND owner_user_id = ? AND enabled = 1",
-                (server_id, user.id),
-            ).fetchone()
-            if srv is None:
+            try:
+                ssh_server_service.get_server(server_id, user)
+            except ToolboxError:
                 continue
             tab_id = tab.get("id") or _new_id()
             connection.execute(
@@ -910,13 +812,10 @@ def _run_due_task(task: sqlite3.Row) -> None:
     screen_session = _safe_session_name(f"{task['screen_name_prefix'] or 'ssh_task'}_{int(time.time())}_{task['id'][:6]}")
     server = None
     try:
-        with user_tool_connection_context(user_id, TOOL_ID) as connection:
-            server = connection.execute(
-                "SELECT * FROM ssh_servers WHERE id = ? AND owner_user_id = ? AND enabled = 1",
-                (task["server_id"], task["owner_user_id"]),
-            ).fetchone()
-        if server is None:
-            raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或不可访问", status_code=404, tool_id=TOOL_ID)
+        server = get_server(
+            task["server_id"],
+            User(id=user_id, username="", display_name="", role="user", disabled=False),
+        )
         _require_screen(server)
         remote_cmd = f"screen -dmS {shlex.quote(screen_session)} bash -lc {shlex.quote(task['command'])}"
         _run_ssh(server, remote_cmd, timeout=20)
@@ -1014,8 +913,10 @@ def _ssh_connect(row: sqlite3.Row | Any, timeout: int = 20):
 
 
 def _load_private_key(row: sqlite3.Row, paramiko: Any) -> Any:
-    key_text = _decrypt(row["private_key_encrypted"])
-    passphrase = _decrypt(row["private_key_passphrase_encrypted"]) if row["private_key_passphrase_encrypted"] else None
+    key_text = row.get("private_key") if isinstance(row, dict) else None
+    passphrase = row.get("private_key_passphrase") if isinstance(row, dict) else None
+    key_text = key_text or _decrypt(row["private_key_encrypted"])
+    passphrase = passphrase or (_decrypt(row["private_key_passphrase_encrypted"]) if row["private_key_passphrase_encrypted"] else None)
     key_errors: list[str] = []
     for key_cls_name in ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey"):
         key_cls = getattr(paramiko, key_cls_name, None)
@@ -1064,8 +965,8 @@ def _ssh_spec(row: sqlite3.Row | Any, timeout: int = 20) -> SSHConnectionSpec:
             username=row["ssh_username"],
             auth_fingerprint=ssh_connection_service.auth_fingerprint(
                 auth_type,
-                row["private_key_encrypted"],
-                row["private_key_passphrase_encrypted"],
+                row.get("private_key") if isinstance(row, dict) else row["private_key_encrypted"],
+                row.get("private_key_passphrase") if isinstance(row, dict) else row["private_key_passphrase_encrypted"],
             ),
             pkey=_load_private_key(row, paramiko),
             connect_timeout=timeout,
@@ -1079,8 +980,8 @@ def _ssh_spec(row: sqlite3.Row | Any, timeout: int = 20) -> SSHConnectionSpec:
         host=row["host"],
         port=int(row["port"]),
         username=row["ssh_username"],
-        auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, row["ssh_password_encrypted"]),
-        password=_decrypt(row["ssh_password_encrypted"]),
+        auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, row.get("ssh_password") if isinstance(row, dict) else row["ssh_password_encrypted"]),
+        password=(row.get("ssh_password") if isinstance(row, dict) else None) or _decrypt(row["ssh_password_encrypted"]),
         connect_timeout=timeout,
         connect_error_code="SSH_CONNECT_FAILED",
         missing_dependency_code="SSH_DEPENDENCY_MISSING",

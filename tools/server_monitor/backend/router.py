@@ -22,18 +22,13 @@ router = APIRouter()
 
 
 class ServerPayload(BaseModel):
-    name: str
-    host: str
-    port: int = 22
-    sshUsername: str
-    sshPassword: str | None = None
-    isDefault: bool = False
+    serverId: str | None = None
     directoryWhitelist: list[str] = Field(default_factory=list)
     directoryRefreshSeconds: int = 300
 
 
 class CreateServerPayload(ServerPayload):
-    sshPassword: str
+    serverId: str
 
 
 class DirectoryPayload(BaseModel):

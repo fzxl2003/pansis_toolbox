@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import struct
 import subprocess
 import sys
+import re
 import sqlite3
 import time
 from pathlib import Path
 
-from tools.tensorboard_progress_monitor.backend.service import REMOTE_COLLECTOR_SOURCE, _invalidate_task_history, _make_report, _parse_config, _same_collection_config, _trim_report_history, _yaml_hash
+from tools.tensorboard_progress_monitor.backend.service import REMOTE_COLLECTOR_SOURCE, _child_color_group_param, _color_key_regex, _find_group, _find_group_path, _glob_regex, _group_path_color_regex, _group_path_regex, _group_patterns, _invalidate_task_history, _layer_tb_url_params, _make_report, _match_group, _merge_tb_url_params, _parse_config, _previous_file_states, _regex_param, _remote_collector_command, _same_collection_config, _serialize_extra_params, _tb_environment_configured, _trim_report_history, _validate_remote_yaml_path, _validate_tb_environment, _yaml_hash
 
 
 def _varint(value: int) -> bytes:
@@ -60,10 +62,46 @@ def _tensor_scalar_event(step: int, scalar: float, wall_time: float) -> bytes:
 
 def _collect(root: Path, mode: str, previous_files: dict[str, dict[str, int]] | None = None) -> dict:
     request = base64.b64encode(json.dumps({"root": str(root), "progress_tag": "train/step", "progress_mode": mode, "tail_bytes": 4096, "previous_files": previous_files or {}}).encode()).decode()
-    completed = subprocess.run([sys.executable, "-", "--request-base64", request], input=REMOTE_COLLECTOR_SOURCE, text=True, capture_output=True, check=False)
+    script = root / "tpm_remote_collector.py"
+    script.write_text(REMOTE_COLLECTOR_SOURCE, encoding="utf-8")
+    completed = subprocess.run(shlex.split(_remote_collector_command(sys.executable, str(script))), input=request, text=True, capture_output=True, check=False)
     assert completed.stderr == ""
     assert completed.returncode == 0
     return json.loads(completed.stdout)
+
+
+def test_remote_collector_command_uses_a_short_script_invocation() -> None:
+    command = _remote_collector_command("python3", "/tmp/collector.py")
+    assert command == "python3 /tmp/collector.py --request-stdin-base64"
+
+
+def test_remote_collector_large_file_cache_is_streamed_not_put_in_argv(tmp_path: Path) -> None:
+    # This request is intentionally larger than the conservative 128 KiB
+    # command-line limit found on some remote shells.
+    previous = {
+        f"very/deep/run_{index:05d}/events.out.tfevents.1700000000.host": {"size": index, "mtime_ns": index}
+        for index in range(5000)
+    }
+    assert len(json.dumps(previous)) > 128 * 1024
+    assert _collect(tmp_path, "event_step", previous)["runs"] == []
+
+
+def test_file_cache_retries_runs_that_have_never_produced_progress() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+      CREATE TABLE tpm_event_files (task_id TEXT, path TEXT, size INTEGER, mtime_ns INTEGER, last_seen_at TEXT);
+      CREATE TABLE tpm_reports (id TEXT, task_id TEXT, success INTEGER);
+      CREATE TABLE tpm_run_samples (report_id TEXT, task_id TEXT, relative_path TEXT, progress REAL);
+    """)
+    conn.executemany(
+        "INSERT INTO tpm_event_files VALUES ('task',?,?,?, '')",
+        [("known/events.out.tfevents.1", 10, 1), ("missing/events.out.tfevents.1", 10, 1)],
+    )
+    conn.execute("INSERT INTO tpm_reports VALUES ('report', 'task', 1)")
+    conn.execute("INSERT INTO tpm_run_samples VALUES ('report', 'task', 'known', 12)")
+    conn.execute("INSERT INTO tpm_run_samples VALUES ('report', 'task', 'missing', NULL)")
+    assert _previous_file_states(conn, "task") == {"known/events.out.tfevents.1": {"size": 10, "mtime_ns": 1}}
 
 
 def test_remote_collector_recovers_from_partial_tail_and_uses_event_step(tmp_path: Path) -> None:
@@ -110,6 +148,107 @@ def test_parse_config_rejects_invalid_progress_mode() -> None:
         assert "progress_mode" in str(exc)
     else:
         raise AssertionError("expected invalid configuration")
+
+
+def test_tb_group_star_wildcards_use_tensorboard_compatible_regex() -> None:
+    patterns = ["policy_random_rebalanced*config_new_813", "*td3_bc*"]
+    assert _glob_regex(patterns[0]) == "policy_random_rebalanced.*config_new_813"
+    assert _glob_regex(patterns[1]) == ".*td3_bc.*"
+    assert _glob_regex(".*td3_bc.*") == ".*td3_bc.*"
+    assert _regex_param(patterns) == "policy_random_rebalanced.*config_new_813|.*td3_bc.*"
+
+
+def test_remote_yaml_path_rejects_empty_or_nul_paths() -> None:
+    assert _validate_remote_yaml_path(" /data/monitor.yaml ") == "/data/monitor.yaml"
+    for invalid in ("", "\x00bad.yaml"):
+        try:
+            _validate_remote_yaml_path(invalid)
+        except Exception as exc:
+            assert "路径" in str(exc)
+        else:
+            raise AssertionError("expected invalid remote YAML path")
+
+
+def test_tb_environment_is_optional_for_collection_but_must_be_complete_for_tb() -> None:
+    assert _validate_tb_environment({"tbPythonMode": "conda", "tbCondaBasePath": "", "tbCondaEnv": "", "tbPythonPath": ""}) == ("conda", "", "", "")
+    assert _validate_tb_environment({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "", "tbPythonPath": ""}) == ("conda", "/opt/conda", "", "")
+    assert not _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "", "tbPythonPath": ""})
+    assert _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "tb", "tbPythonPath": ""})
+    assert _tb_environment_configured({"tbPythonMode": "path", "tbCondaBasePath": "", "tbCondaEnv": "", "tbPythonPath": "/venv/bin/python"})
+
+
+def test_tb_group_filters_cover_descendants_and_group_children_for_color() -> None:
+    config = _parse_config("""
+tensorboard_root: /logs
+progress_tag: train/step
+groups:
+  - name: parent
+    pattern: parent/*
+    target_step: 1
+    children:
+      - name: first
+        pattern: parent/first/*
+        target_step: 1
+        children: []
+      - name: second
+        pattern: parent/second/*
+        target_step: 1
+        children: []
+""")
+    parent_path = _find_group_path(config["groups"], "parent")
+    first_path = _find_group_path(config["groups"], "parent/first")
+    assert parent_path is not None and first_path is not None
+    assert _group_path_regex(parent_path) == "(?=.*parent/.*).*"
+    assert _group_path_regex(first_path) == "(?=.*parent/.*)(?=.*parent/first/.*).*"
+    assert _color_key_regex("*/first/*") == ".*(/first/).*"
+    assert _group_path_color_regex([parent_path[0], {**first_path[1], "pattern": "*/first/*"}]) == "(?=.*parent/.*)(?=.*(/first/).*).*"
+    color_regex = _child_color_group_param(parent_path)
+    assert color_regex == "regex:(?=.*parent/.*)(?=(parent/first/).*).*|(?=.*parent/.*)(?=(parent/second/).*).*"
+    # TensorBoard groups by capture contents.  Both first runs have the same
+    # key even though their remaining run names differ.
+    compiled = re.compile(color_regex.removeprefix("regex:"))
+    first_iql = compiled.match("parent/first/iql/seed_1")
+    first_bc = compiled.match("parent/first/bc/seed_2")
+    second = compiled.match("parent/second/iql/seed_1")
+    assert first_iql is not None and first_bc is not None and second is not None
+    assert first_iql.groups() == first_bc.groups() == ("parent/first/", None)
+    assert second.groups() == (None, "parent/second/")
+    assert _child_color_group_param(first_path) is None
+
+
+def test_tb_extra_params_require_named_url_groups() -> None:
+    assert json.loads(_serialize_extra_params([{"label": "平滑", "params": "?tagFilter=d4rl&smoothing=0.79#timeseries"}]))[0]["label"] == "平滑"
+    try:
+        _serialize_extra_params([{"label": "", "params": "?tagFilter=d4rl"}])
+    except Exception as exc:
+        assert "名称" in str(exc)
+    else:
+        raise AssertionError("expected named parameter validation")
+
+
+def test_tb_url_params_preserve_user_settings_but_enforce_group_controls() -> None:
+    query, fragment = _merge_tb_url_params(
+        "?tagFilter=d4rl&smoothing=0.79&runFilter=old&runColorGroup=old#timeseries",
+        "selected", "child_a|child_b",
+    )
+    values = dict(__import__("urllib.parse").parse.parse_qsl(query))
+    assert values == {"tagFilter": "d4rl", "smoothing": "0.79", "runFilter": "selected", "runColorGroup": "child_a|child_b"}
+    assert fragment == "timeseries"
+
+
+def test_tb_color_group_uses_tensorboard_regex_selector_but_filter_is_raw_regex() -> None:
+    query, _ = _merge_tb_url_params("", "(?=.*parent/.*).*", "regex:((?=.*parent/.*)(?=.*child/.*).*)")
+    values = dict(__import__("urllib.parse").parse.parse_qsl(query))
+    assert values["runFilter"] == "(?=.*parent/.*).*"
+    assert values["runColorGroup"] == "regex:((?=.*parent/.*)(?=.*child/.*).*)"
+
+
+def test_yaml_tb_custom_params_override_report_defaults() -> None:
+    layered = _layer_tb_url_params("?tagFilter=default&smoothing=0.6#scalars", "?tagFilter=d4rl#timeseries")
+    parsed = __import__("urllib.parse").parse.urlsplit(layered)
+    assert dict(__import__("urllib.parse").parse.parse_qsl(parsed.query)) == {"smoothing": "0.6", "tagFilter": "d4rl"}
+    assert parsed.fragment == "timeseries"
+    assert _parse_config("tensorboard_root: /logs\nprogress_tag: step\ntb_custom_params: '?smoothing=0.79'\ngroups: []\n")["tb_custom_params"] == "?smoothing=0.79"
 
 
 def test_report_uses_recent_progress_median_duration_and_concurrency_eta() -> None:
@@ -359,6 +498,7 @@ groups:
     pattern: "abc-*"
     target_step: 100
     total_runs: 1
+    include_unmatched_children: true
     children:
       - name: cde
         pattern: "*cde*"
@@ -384,6 +524,28 @@ groups:
     parent = next(group for group in summary["groups"] if group["name"] == "abc")
     assert parent["effectiveTotalRuns"] == 2
     assert "小于子群总数" in parent["reason"]
+
+
+def test_parent_only_runs_are_excluded_by_default_but_can_be_included() -> None:
+    raw = """
+tensorboard_root: /logs
+progress_tag: step
+groups:
+  - name: parent
+    pattern: "parent-*"
+    target_step: 100
+    children:
+      - name: child
+        pattern: "*child*"
+        target_step: 100
+        children: []
+"""
+    config = _parse_config(raw)
+    assert _match_group("parent-other", config["groups"]) is None
+    assert _match_group("parent-child", config["groups"])["key"] == "parent/child"
+
+    enabled = _parse_config(raw.replace("    children:\n", "    include_unmatched_children: true\n    children:\n", 1))
+    assert _match_group("parent-other", enabled["groups"])["key"] == "parent"
 
 
 def _time_iso(value: float) -> str:

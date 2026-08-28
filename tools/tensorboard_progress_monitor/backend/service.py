@@ -13,12 +13,15 @@ import json
 import logging
 import re
 import secrets
+import shlex
+import socket
 import sqlite3
 import statistics
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -27,6 +30,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import list_user_tool_dbs, user_tool_connection_context
 from backend.app.services import ssh_connection_service
+from backend.app.services import ssh_server_service
 from backend.app.services.auth_service import User
 from backend.app.services.data_management import DataCategory, register_tool_categories
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
@@ -40,11 +44,16 @@ report_interval_seconds: 60
 rate_report_count: 5
 stale_after_seconds: 180
 overall_concurrency: 1
+# 可选：用于覆盖下方“TB 默认 URL 参数”的参数，例如
+# tb_custom_params: "?tagFilter=d4rl&smoothing=0.79#timeseries"
+tb_custom_params: ""
 groups:
   - name: all
     pattern: "*"
     target_step: 1000000
     total_runs:
+    # 有子群时，未命中任何子群的运行默认不归入此父群。
+    include_unmatched_children: false
     children: []
 """
 MAX_YAML_BYTES = 1_048_576
@@ -52,6 +61,14 @@ _initialized_dbs: set[str] = set()
 _task_locks: dict[tuple[str, str], threading.Lock] = {}
 _task_locks_guard = threading.Lock()
 logger = logging.getLogger(__name__)
+
+# These tunnels belong exclusively to the progress-monitor tool.  They are not
+# shared with the standalone TensorBoard dashboard, even when both point at
+# the same SSH server.
+_tb_tunnels: dict[str, "TBProxyTunnel"] = {}
+_tb_tunnels_guard = threading.Lock()
+TB_REMOTE_PORT_START = 7006
+TB_REMOTE_PORT_END = 8005
 
 
 # This source deliberately relies only on the remote Python standard library.
@@ -171,7 +188,12 @@ def _tail_events(path, tail_bytes, tag, mode):
     return latest
 
 def main():
-    encoded = sys.argv[sys.argv.index('--request-base64') + 1]
+    if '--request-base64' in sys.argv:
+        encoded = sys.argv[sys.argv.index('--request-base64') + 1]
+    elif '--request-stdin-base64' in sys.argv:
+        encoded = sys.stdin.buffer.read().decode('ascii')
+    else:
+        raise RuntimeError('missing collector request')
     request = json.loads(base64.b64decode(encoded).decode('utf-8'))
     root = request['root']; tail = int(request['tail_bytes']); tag = request['progress_tag']; mode = request['progress_mode']
     previous = request.get('previous_files', {})
@@ -212,6 +234,8 @@ if __name__ == '__main__':
         print(json.dumps({'error': str(exc)[:500]}))
         sys.exit(2)
 '''
+REMOTE_COLLECTOR_DIGEST = hashlib.sha256(REMOTE_COLLECTOR_SOURCE.encode("utf-8")).hexdigest()[:20]
+REMOTE_COLLECTOR_PATH = f"/tmp/tpm_progress_collector_{REMOTE_COLLECTOR_DIGEST}.py"
 
 
 def init_database(user_id: str) -> None:
@@ -223,6 +247,8 @@ def init_database(user_id: str) -> None:
           id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, name TEXT NOT NULL,
           host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22, ssh_username TEXT NOT NULL,
           ssh_password_encrypted TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+          tb_python_mode TEXT NOT NULL DEFAULT 'conda', tb_conda_base_path TEXT NOT NULL DEFAULT '',
+          tb_conda_env TEXT NOT NULL DEFAULT '', tb_python_path TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS tpm_tasks (
           id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, server_id TEXT NOT NULL,
@@ -230,6 +256,7 @@ def init_database(user_id: str) -> None:
           remote_yaml_path TEXT NOT NULL DEFAULT '', python_command TEXT NOT NULL DEFAULT 'python3',
           report_interval_seconds INTEGER NOT NULL DEFAULT 60, enabled INTEGER NOT NULL DEFAULT 1,
           show_in_tabs INTEGER NOT NULL DEFAULT 1, display_order INTEGER NOT NULL DEFAULT 0,
+          tb_extra_params TEXT NOT NULL DEFAULT '[]', tb_default_params TEXT NOT NULL DEFAULT '',
           last_report_at TEXT, last_config_json TEXT NOT NULL DEFAULT '', last_yaml_hash TEXT NOT NULL DEFAULT '', last_config_error TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS tpm_reports (
@@ -245,6 +272,13 @@ def init_database(user_id: str) -> None:
         CREATE TABLE IF NOT EXISTS tpm_event_files (
           task_id TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
           last_seen_at TEXT NOT NULL, PRIMARY KEY(task_id, path));
+        CREATE TABLE IF NOT EXISTS tpm_tb_sessions (
+          id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
+          server_id TEXT NOT NULL, logdir TEXT NOT NULL, remote_port INTEGER NOT NULL DEFAULT 0,
+          local_port INTEGER NOT NULL DEFAULT 0, remote_pid TEXT NOT NULL DEFAULT '',
+          proxy_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'stopped', error TEXT NOT NULL DEFAULT '',
+          started_at TEXT, stopped_at TEXT, updated_at TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES tpm_tasks(id));
         CREATE INDEX IF NOT EXISTS idx_tpm_tasks_due ON tpm_tasks(enabled, last_report_at);
         CREATE INDEX IF NOT EXISTS idx_tpm_reports_task_time ON tpm_reports(task_id, reported_at);
         CREATE INDEX IF NOT EXISTS idx_tpm_samples_task_run ON tpm_run_samples(task_id, run_key, report_id);
@@ -272,7 +306,20 @@ def init_database(user_id: str) -> None:
             conn.execute("SELECT last_yaml_hash FROM tpm_tasks LIMIT 1")
         except sqlite3.OperationalError:
             conn.execute("ALTER TABLE tpm_tasks ADD COLUMN last_yaml_hash TEXT NOT NULL DEFAULT ''")
+        for column, definition in (
+            ("tb_python_mode", "TEXT NOT NULL DEFAULT 'conda'"),
+            ("tb_conda_base_path", "TEXT NOT NULL DEFAULT ''"),
+            ("tb_conda_env", "TEXT NOT NULL DEFAULT ''"),
+            ("tb_python_path", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try: conn.execute(f"SELECT {column} FROM tpm_servers LIMIT 1")
+            except sqlite3.OperationalError: conn.execute(f"ALTER TABLE tpm_servers ADD COLUMN {column} {definition}")
+        try: conn.execute("SELECT tb_extra_params FROM tpm_tasks LIMIT 1")
+        except sqlite3.OperationalError: conn.execute("ALTER TABLE tpm_tasks ADD COLUMN tb_extra_params TEXT NOT NULL DEFAULT '[]'")
+        try: conn.execute("SELECT tb_default_params FROM tpm_tasks LIMIT 1")
+        except sqlite3.OperationalError: conn.execute("ALTER TABLE tpm_tasks ADD COLUMN tb_default_params TEXT NOT NULL DEFAULT ''")
     _initialized_dbs.add(user_id)
+    _migrate_legacy_servers(user_id)
 
 
 register_tool_categories(TOOL_ID, [
@@ -284,6 +331,20 @@ register_tool_categories(TOOL_ID, [
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _migrate_legacy_servers(user_id: str) -> None:
+    """Import old per-tool passwords once, then remove their local copies."""
+    user = User(id=user_id, username="", display_name="", role="user", disabled=False)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        rows = conn.execute("SELECT * FROM tpm_servers WHERE ssh_password_encrypted <> ''").fetchall()
+        for row in rows:
+            ssh_server_service.migrate_legacy_server(
+                server_id=row["id"], owner=user, name=row["name"], host=row["host"], port=row["port"],
+                ssh_username=row["ssh_username"], ssh_password=decrypt_secret(row["ssh_password_encrypted"]),
+                source_tool=TOOL_ID,
+            )
+            conn.execute("UPDATE tpm_servers SET ssh_password_encrypted='' WHERE id=?", (row["id"],))
 
 
 def _fernet() -> Fernet:
@@ -303,11 +364,58 @@ def decrypt_secret(value: str) -> str:
 
 
 def _server_public(row: sqlite3.Row) -> dict[str, Any]:
-    return {"id": row["id"], "name": row["name"], "host": row["host"], "port": row["port"], "sshUsername": row["ssh_username"], "enabled": bool(row["enabled"]), "updatedAt": row["updated_at"]}
+    return {"id": row["id"], "name": row["name"], "host": row["host"], "port": row["port"], "sshUsername": row["ssh_username"], "enabled": bool(row["enabled"]), "tbPythonMode": row["tb_python_mode"], "tbCondaBasePath": row["tb_conda_base_path"], "tbCondaEnv": row["tb_conda_env"], "tbPythonPath": row["tb_python_path"], "updatedAt": row["updated_at"]}
 
 
 def _task_public(row: sqlite3.Row) -> dict[str, Any]:
-    return {"id": row["id"], "name": row["name"], "serverId": row["server_id"], "configSource": row["config_source"], "inlineYaml": row["inline_yaml"], "remoteYamlPath": row["remote_yaml_path"], "pythonCommand": row["python_command"], "reportIntervalSeconds": row["report_interval_seconds"], "enabled": bool(row["enabled"]), "showInTabs": bool(row["show_in_tabs"]), "displayOrder": row["display_order"], "lastReportAt": row["last_report_at"], "lastConfigError": row["last_config_error"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+    return {"id": row["id"], "name": row["name"], "serverId": row["server_id"], "configSource": row["config_source"], "inlineYaml": row["inline_yaml"], "remoteYamlPath": row["remote_yaml_path"], "pythonCommand": row["python_command"], "reportIntervalSeconds": row["report_interval_seconds"], "enabled": bool(row["enabled"]), "showInTabs": bool(row["show_in_tabs"]), "displayOrder": row["display_order"], "tbExtraParams": _deserialize_extra_params(row["tb_extra_params"]), "tbDefaultParams": row["tb_default_params"], "lastReportAt": row["last_report_at"], "lastConfigError": row["last_config_error"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+
+
+def _validate_tb_url_params(value: Any, field: str) -> str:
+    value = str(value or "").strip()
+    if len(value) > 4000: raise ToolboxError("INVALID_TB_PARAMS", f"{field} 不能超过 4000 个字符", status_code=400, tool_id=TOOL_ID)
+    if value and not value.startswith(("?", "#")): raise ToolboxError("INVALID_TB_PARAMS", f"{field} 必须以 ? 或 # 开始", status_code=400, tool_id=TOOL_ID)
+    return value
+
+
+def _deserialize_extra_params(raw: str) -> list[dict[str, str]]:
+    try: values = json.loads(raw or "[]")
+    except json.JSONDecodeError: return []
+    return values if isinstance(values, list) else []
+
+
+def _serialize_extra_params(values: Any) -> str:
+    if values is None: return "[]"
+    if not isinstance(values, list): raise ToolboxError("INVALID_TB_PARAMS", "TensorBoard URL 参数组必须是列表", status_code=400, tool_id=TOOL_ID)
+    result: list[dict[str, str]] = []
+    for value in values:
+        if not isinstance(value, dict): raise ToolboxError("INVALID_TB_PARAMS", "每个 URL 参数组必须是对象", status_code=400, tool_id=TOOL_ID)
+        label, params = str(value.get("label", "")).strip(), str(value.get("params", "")).strip()
+        if not label or not params: raise ToolboxError("INVALID_TB_PARAMS", "每个 URL 参数组都需要名称和参数", status_code=400, tool_id=TOOL_ID)
+        if len(label) > 100 or len(params) > 4000: raise ToolboxError("INVALID_TB_PARAMS", "URL 参数组过长", status_code=400, tool_id=TOOL_ID)
+        result.append({"label": label, "params": params})
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+def _validate_tb_environment(data: dict[str, Any]) -> tuple[str, str, str, str]:
+    mode = str(data.get("tbPythonMode", "conda")).strip()
+    conda_base, conda_env = str(data.get("tbCondaBasePath", "")).strip(), str(data.get("tbCondaEnv", "")).strip()
+    python_path = str(data.get("tbPythonPath", "")).strip()
+    if mode not in ("conda", "path"): raise ToolboxError("INVALID_TB_PYTHON", "TensorBoard Python 模式必须是 conda 或 path", status_code=400, tool_id=TOOL_ID)
+    # A server can be used for progress collection without TensorBoard.  A
+    # Conda base alone is also valid while its environment is being selected.
+    if mode == "conda" and conda_env and not conda_base: raise ToolboxError("INVALID_TB_PYTHON", "选择 Conda 环境前需要先设置 Anaconda 路径", status_code=400, tool_id=TOOL_ID)
+    return mode, conda_base, conda_env, python_path
+
+
+def _tb_environment_configured(server: sqlite3.Row | dict[str, Any]) -> bool:
+    mode = str(server["tb_python_mode"] if isinstance(server, sqlite3.Row) else server.get("tbPythonMode", "conda"))
+    if mode == "conda":
+        base = str(server["tb_conda_base_path"] if isinstance(server, sqlite3.Row) else server.get("tbCondaBasePath", "")).strip()
+        env = str(server["tb_conda_env"] if isinstance(server, sqlite3.Row) else server.get("tbCondaEnv", "")).strip()
+        return bool(base and env)
+    path = str(server["tb_python_path"] if isinstance(server, sqlite3.Row) else server.get("tbPythonPath", "")).strip()
+    return bool(path)
 
 
 def list_servers(user: User) -> list[dict[str, Any]]:
@@ -318,12 +426,14 @@ def list_servers(user: User) -> list[dict[str, Any]]:
 
 def create_server(data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id)
-    if not data["name"].strip() or not data["host"].strip() or not data["sshUsername"].strip() or not data.get("sshPassword"):
-        raise ToolboxError("INVALID_SERVER", "服务器名称、地址、用户名和密码不能为空", status_code=400, tool_id=TOOL_ID)
-    row = {"id": secrets.token_urlsafe(12), "now": now_iso(), **data}
+    selected = ssh_server_service.get_server(data["serverId"], user)
+    mode, conda_base, conda_env, python_path = _validate_tb_environment(data)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        conn.execute("INSERT INTO tpm_servers VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)", (row["id"], user.id, row["name"].strip(), row["host"].strip(), int(row["port"]), row["sshUsername"].strip(), encrypt_secret(row["sshPassword"]), row["now"], row["now"]))
-        conn.commit(); saved = conn.execute("SELECT * FROM tpm_servers WHERE id=?", (row["id"],)).fetchone()
+        if conn.execute("SELECT 1 FROM tpm_servers WHERE id=?", (selected["id"],)).fetchone():
+            raise ToolboxError("SERVER_ALREADY_SELECTED", "该全局服务器已添加到此工具", status_code=409, tool_id=TOOL_ID)
+        now = now_iso()
+        conn.execute("INSERT INTO tpm_servers (id,owner_user_id,name,host,port,ssh_username,ssh_password_encrypted,enabled,tb_python_mode,tb_conda_base_path,tb_conda_env,tb_python_path,created_at,updated_at) VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?,?)", (selected["id"], user.id, selected["name"], selected["host"], int(selected["port"]), selected["sshUsername"], "", mode, conda_base, conda_env, python_path, now, now))
+        conn.commit(); saved = conn.execute("SELECT * FROM tpm_servers WHERE id=?", (selected["id"],)).fetchone()
     return _server_public(saved)
 
 
@@ -331,8 +441,29 @@ def update_server(server_id: str, data: dict[str, Any], user: User) -> dict[str,
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         row = _owned_server(conn, server_id, user.id)
-        password = data.get("sshPassword") or decrypt_secret(row["ssh_password_encrypted"])
-        conn.execute("UPDATE tpm_servers SET name=?,host=?,port=?,ssh_username=?,ssh_password_encrypted=?,updated_at=? WHERE id=?", (data["name"].strip(), data["host"].strip(), int(data["port"]), data["sshUsername"].strip(), encrypt_secret(password), now_iso(), server_id))
+        mode, conda_base, conda_env, python_path = _validate_tb_environment(data)
+        connection_changed = False
+        tb_environment_changed = (
+            row["tb_python_mode"] != mode
+            or row["tb_conda_base_path"] != conda_base
+            or row["tb_conda_env"] != conda_env
+            or row["tb_python_path"] != python_path
+        )
+        running_task_ids = [
+            task["id"] for task in conn.execute(
+                """SELECT t.id FROM tpm_tasks t JOIN tpm_tb_sessions s ON s.task_id=t.id
+                   WHERE t.owner_user_id=? AND t.server_id=? AND s.status='running'""",
+                (user.id, server_id),
+            ).fetchall()
+        ] if connection_changed or tb_environment_changed else []
+    # Sessions use the prior SSH connection and Python environment.  Stop them
+    # before changing either so clearing TB configuration cannot leave an
+    # unreachable TensorBoard process behind.
+    for task_id in running_task_ids:
+        stop_tb_session(task_id, user)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        _owned_server(conn, server_id, user.id)
+        conn.execute("UPDATE tpm_servers SET tb_python_mode=?,tb_conda_base_path=?,tb_conda_env=?,tb_python_path=?,updated_at=? WHERE id=?", (mode, conda_base, conda_env, python_path, now_iso(), server_id))
         conn.commit(); return _server_public(conn.execute("SELECT * FROM tpm_servers WHERE id=?", (server_id,)).fetchone())
 
 
@@ -348,7 +479,8 @@ def delete_server(server_id: str, user: User) -> None:
 def _owned_server(conn: sqlite3.Connection, server_id: str, user_id: str) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM tpm_servers WHERE id=? AND owner_user_id=?", (server_id, user_id)).fetchone()
     if not row: raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在", status_code=404, tool_id=TOOL_ID)
-    return row
+    user = User(id=user_id, username="", display_name="", role="user", disabled=False)
+    return ssh_server_service.merge_connection_credentials(row, user)  # type: ignore[return-value]
 
 
 def _owned_task(conn: sqlite3.Connection, task_id: str, user_id: str) -> sqlite3.Row:
@@ -371,7 +503,7 @@ def create_task(data: dict[str, Any], user: User) -> dict[str, Any]:
         _owned_server(conn, data["serverId"], user.id)
         tid, now = secrets.token_urlsafe(12), now_iso()
         display_order = conn.execute("SELECT COALESCE(MAX(display_order), -1) + 1 FROM tpm_tasks WHERE owner_user_id=?", (user.id,)).fetchone()[0]
-        conn.execute("INSERT INTO tpm_tasks (id,owner_user_id,server_id,name,config_source,inline_yaml,remote_yaml_path,python_command,report_interval_seconds,enabled,show_in_tabs,display_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, user.id, data["serverId"], data["name"].strip(), data["configSource"], data.get("inlineYaml", ""), data.get("remoteYamlPath", "").strip(), _validate_python_command(data.get("pythonCommand", "python3")), int(data["reportIntervalSeconds"]), int(data.get("enabled", True)), int(data.get("showInTabs", True)), display_order, now, now))
+        conn.execute("INSERT INTO tpm_tasks (id,owner_user_id,server_id,name,config_source,inline_yaml,remote_yaml_path,python_command,report_interval_seconds,enabled,show_in_tabs,display_order,tb_extra_params,tb_default_params,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, user.id, data["serverId"], data["name"].strip(), data["configSource"], data.get("inlineYaml", ""), data.get("remoteYamlPath", "").strip(), _validate_python_command(data.get("pythonCommand", "python3")), int(data["reportIntervalSeconds"]), int(data.get("enabled", True)), int(data.get("showInTabs", True)), display_order, _serialize_extra_params(data.get("tbExtraParams")), _validate_tb_url_params(data.get("tbDefaultParams"), "TB 默认 URL 参数"), now, now))
         conn.commit(); return _task_public(conn.execute("SELECT * FROM tpm_tasks WHERE id=?", (tid,)).fetchone())
 
 
@@ -391,7 +523,15 @@ def update_task(task_id: str, data: dict[str, Any], user: User) -> dict[str, Any
             or (data["configSource"] == "inline" and task["inline_yaml"] != data.get("inlineYaml", ""))
             or (data["configSource"] == "remote_yaml" and task["remote_yaml_path"] != data.get("remoteYamlPath", "").strip())
         )
-        conn.execute("UPDATE tpm_tasks SET server_id=?,name=?,config_source=?,inline_yaml=?,remote_yaml_path=?,python_command=?,report_interval_seconds=?,enabled=?,show_in_tabs=?,updated_at=? WHERE id=?", (data["serverId"], data["name"].strip(), data["configSource"], data.get("inlineYaml", ""), data.get("remoteYamlPath", "").strip(), _validate_python_command(data.get("pythonCommand", "python3")), int(data["reportIntervalSeconds"]), int(data.get("enabled", True)), int(data.get("showInTabs", True)), now_iso(), task_id))
+        restart_needed = yaml_changed or task["server_id"] != data["serverId"]
+        session = _owned_tb_session(conn, task_id, user.id)
+    # A running session is bound to both the old server and old logdir.  Stop
+    # it before changing either; URL-only presets intentionally do not restart.
+    if restart_needed and session is not None and session["status"] == "running":
+        stop_tb_session(task_id, user)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        _owned_task(conn, task_id, user.id)
+        conn.execute("UPDATE tpm_tasks SET server_id=?,name=?,config_source=?,inline_yaml=?,remote_yaml_path=?,python_command=?,report_interval_seconds=?,enabled=?,show_in_tabs=?,tb_extra_params=?,tb_default_params=?,updated_at=? WHERE id=?", (data["serverId"], data["name"].strip(), data["configSource"], data.get("inlineYaml", ""), data.get("remoteYamlPath", "").strip(), _validate_python_command(data.get("pythonCommand", "python3")), int(data["reportIntervalSeconds"]), int(data.get("enabled", True)), int(data.get("showInTabs", True)), _serialize_extra_params(data.get("tbExtraParams")), _validate_tb_url_params(data.get("tbDefaultParams"), "TB 默认 URL 参数"), now_iso(), task_id))
         if yaml_changed:
             inline_hash = _yaml_hash(data.get("inlineYaml", "")) if data["configSource"] == "inline" else ""
             _invalidate_task_history(conn, task_id, inline_hash)
@@ -401,7 +541,11 @@ def update_task(task_id: str, data: dict[str, Any], user: User) -> dict[str, Any
 def delete_task(task_id: str, user: User) -> None:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        _owned_task(conn, task_id, user.id); conn.execute("DELETE FROM tpm_event_files WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_run_samples WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_reports WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_tasks WHERE id=?", (task_id,)); conn.commit()
+        task = _owned_task(conn, task_id, user.id); session = _owned_tb_session(conn, task_id, user.id); server = _owned_server(conn, task["server_id"], user.id)
+    if session is not None:
+        _kill_process(server, session["remote_pid"]); _stop_tb_tunnel(session["proxy_id"])
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        conn.execute("DELETE FROM tpm_tb_sessions WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_event_files WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_run_samples WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_reports WHERE task_id=?", (task_id,)); conn.execute("DELETE FROM tpm_tasks WHERE id=?", (task_id,)); conn.commit()
 
 
 def copy_task(task_id: str, user: User) -> dict[str, Any]:
@@ -412,9 +556,9 @@ def copy_task(task_id: str, user: User) -> dict[str, Any]:
         copied_id, now = secrets.token_urlsafe(12), now_iso()
         display_order = conn.execute("SELECT COALESCE(MAX(display_order), -1) + 1 FROM tpm_tasks WHERE owner_user_id=?", (user.id,)).fetchone()[0]
         conn.execute(
-            """INSERT INTO tpm_tasks (id,owner_user_id,server_id,name,config_source,inline_yaml,remote_yaml_path,python_command,report_interval_seconds,enabled,show_in_tabs,display_order,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (copied_id, user.id, source["server_id"], f'{source["name"]} 副本', source["config_source"], source["inline_yaml"], source["remote_yaml_path"], source["python_command"], source["report_interval_seconds"], source["enabled"], source["show_in_tabs"], display_order, now, now),
+            """INSERT INTO tpm_tasks (id,owner_user_id,server_id,name,config_source,inline_yaml,remote_yaml_path,python_command,report_interval_seconds,enabled,show_in_tabs,display_order,tb_extra_params,tb_default_params,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (copied_id, user.id, source["server_id"], f'{source["name"]} 副本', source["config_source"], source["inline_yaml"], source["remote_yaml_path"], source["python_command"], source["report_interval_seconds"], source["enabled"], source["show_in_tabs"], display_order, source["tb_extra_params"], source["tb_default_params"], now, now),
         )
         conn.commit()
         return _task_public(conn.execute("SELECT * FROM tpm_tasks WHERE id=?", (copied_id,)).fetchone())
@@ -479,17 +623,25 @@ def _parse_config(raw: str) -> dict[str, Any]:
                 if total < 0: raise ToolboxError("INVALID_CONFIG", "total_runs 不能为负数", status_code=400, tool_id=TOOL_ID)
             children_raw = item.get("children", [])
             if not isinstance(children_raw, list): raise ToolboxError("INVALID_CONFIG", f"分类 {name} 的 children 必须是列表", status_code=400, tool_id=TOOL_ID)
+            include_unmatched_children = item.get("include_unmatched_children", False)
+            if not isinstance(include_unmatched_children, bool): raise ToolboxError("INVALID_CONFIG", f"分类 {name} 的 include_unmatched_children 必须是布尔值", status_code=400, tool_id=TOOL_ID)
             key = f"{parent_key}/{name}" if parent_key else name
-            parsed.append({"name": name, "key": key, "pattern": str(item["pattern"]).strip(), "target_step": target, "total_runs": total, "children": parse_groups(children_raw, key)})
+            parsed.append({"name": name, "key": key, "pattern": str(item["pattern"]).strip(), "target_step": target, "total_runs": total, "include_unmatched_children": include_unmatched_children, "children": parse_groups(children_raw, key)})
         return parsed
 
     groups = parse_groups(groups_raw)
-    return {"tensorboard_root": root, "progress_tag": tag, "progress_mode": mode, "tail_bytes": number("tail_bytes", 1048576, 4096, 67108864), "report_interval_seconds": number("report_interval_seconds", 60, 30, 3600), "rate_report_count": number("rate_report_count", 5, 2, 20), "stale_after_seconds": number("stale_after_seconds", max(number("report_interval_seconds", 60, 30, 3600) * 3, 180), 30, 86400), "overall_concurrency": number("overall_concurrency", 1, 1, 128), "groups": groups}
+    tb_custom_params = _validate_tb_url_params(data.get("tb_custom_params", ""), "YAML tb_custom_params")
+    return {"tensorboard_root": root, "progress_tag": tag, "progress_mode": mode, "tail_bytes": number("tail_bytes", 1048576, 4096, 67108864), "report_interval_seconds": number("report_interval_seconds", 60, 30, 3600), "rate_report_count": number("rate_report_count", 5, 2, 20), "stale_after_seconds": number("stale_after_seconds", max(number("report_interval_seconds", 60, 30, 3600) * 3, 180), 30, 86400), "overall_concurrency": number("overall_concurrency", 1, 1, 128), "tb_custom_params": tb_custom_params, "groups": groups}
 
 
-def _ssh_spec(server: sqlite3.Row, timeout: int = 30) -> SSHConnectionSpec:
-    encrypted = server["ssh_password_encrypted"]
-    return SSHConnectionSpec(tool_id=TOOL_ID, server_id=server["id"], host=server["host"], port=int(server["port"]), username=server["ssh_username"], auth_fingerprint=ssh_connection_service.auth_fingerprint(encrypted), password=decrypt_secret(encrypted), connect_timeout=timeout, connect_error_code="SSH_CONNECT_FAILED", missing_dependency_code="SSH_DEPENDENCY_MISSING", missing_dependency_message="缺少 paramiko 依赖，无法执行 SSH 采集")
+def _ssh_spec(server: sqlite3.Row | dict[str, Any], timeout: int = 30) -> SSHConnectionSpec:
+    values = dict(server)
+    auth_type = values.get("auth_type", "password")
+    common = dict(tool_id=TOOL_ID, server_id=values["id"], host=values["host"], port=int(values["port"]), username=values["ssh_username"], connect_timeout=timeout, connect_error_code="SSH_CONNECT_FAILED", missing_dependency_code="SSH_DEPENDENCY_MISSING", missing_dependency_message="缺少 paramiko 依赖，无法执行 SSH 采集")
+    if auth_type == "private_key":
+        import paramiko
+        return SSHConnectionSpec(**common, auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, values["private_key"]), pkey=ssh_server_service.load_private_key(values["private_key"], values.get("private_key_passphrase"), paramiko))
+    return SSHConnectionSpec(**common, auth_fingerprint=ssh_connection_service.auth_fingerprint(auth_type, values.get("ssh_password", "")), password=values.get("ssh_password", ""))
 
 
 def test_server(server_id: str, user: User) -> dict[str, Any]:
@@ -499,14 +651,73 @@ def test_server(server_id: str, user: User) -> dict[str, Any]:
     return {"connected": code == 0, "python": out.strip() or err.strip(), "error": "" if code == 0 else (err.strip() or out.strip())}
 
 
+def _validate_remote_yaml_path(value: str) -> str:
+    path = value.strip()
+    if not path: raise ToolboxError("INVALID_CONFIG_PATH", "远程 YAML 路径不能为空", status_code=400, tool_id=TOOL_ID)
+    if len(path) > 4096 or "\x00" in path: raise ToolboxError("INVALID_CONFIG_PATH", "远程 YAML 路径无效", status_code=400, tool_id=TOOL_ID)
+    return path
+
+
 def _read_remote_yaml(server: sqlite3.Row, path: str) -> str:
+    path = _validate_remote_yaml_path(path)
     with ssh_connection_service.borrowed_client(_ssh_spec(server)) as client:
         sftp = client.open_sftp()
         try:
             stat = sftp.stat(path)
             if stat.st_size > MAX_YAML_BYTES: raise ToolboxError("YAML_TOO_LARGE", "远程 YAML 超过 1 MiB", status_code=400, tool_id=TOOL_ID)
-            with sftp.open(path, "rb") as fh: return fh.read(MAX_YAML_BYTES + 1).decode("utf-8")
+            with sftp.open(path, "rb") as fh:
+                content = fh.read(MAX_YAML_BYTES + 1)
+            if len(content) > MAX_YAML_BYTES: raise ToolboxError("YAML_TOO_LARGE", "远程 YAML 超过 1 MiB", status_code=400, tool_id=TOOL_ID)
+            return content.decode("utf-8")
         finally: sftp.close()
+
+
+def _write_remote_yaml(server: sqlite3.Row, path: str, content: str) -> None:
+    path = _validate_remote_yaml_path(path)
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_YAML_BYTES: raise ToolboxError("YAML_TOO_LARGE", "远程 YAML 超过 1 MiB", status_code=400, tool_id=TOOL_ID)
+    with ssh_connection_service.borrowed_client(_ssh_spec(server)) as client:
+        sftp = client.open_sftp()
+        try:
+            # Editing is intentionally limited to an existing file: a typo in
+            # the path must not silently create a new, unused configuration.
+            sftp.stat(path)
+            with sftp.open(path, "wb") as fh:
+                fh.write(encoded)
+                fh.flush()
+        finally: sftp.close()
+
+
+def read_remote_yaml(server_id: str, path: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        server = _owned_server(conn, server_id, user.id)
+    return {"content": _read_remote_yaml(server, path)}
+
+
+def write_remote_yaml(server_id: str, path: str, content: str, user: User) -> dict[str, Any]:
+    """Persist an edited remote config and reset every report using that file."""
+    init_database(user.id)
+    path = _validate_remote_yaml_path(path)
+    _parse_config(content)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        server = _owned_server(conn, server_id, user.id)
+        affected = conn.execute(
+            "SELECT id FROM tpm_tasks WHERE owner_user_id=? AND server_id=? AND config_source='remote_yaml' AND remote_yaml_path=?",
+            (user.id, server_id, path),
+        ).fetchall()
+        running_ids = [
+            row["id"] for row in affected
+            if (session := _owned_tb_session(conn, row["id"], user.id)) is not None and session["status"] == "running"
+        ]
+    _write_remote_yaml(server, path, content)
+    for task_id in running_ids:
+        stop_tb_session(task_id, user)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        for row in affected:
+            _invalidate_task_history(conn, row["id"], _yaml_hash(content))
+        conn.commit()
+    return {"updatedTaskCount": len(affected), "stoppedSessionCount": len(running_ids)}
 
 
 def _task_yaml_raw(task: sqlite3.Row, server: sqlite3.Row) -> str:
@@ -533,7 +744,26 @@ def validate_task_config(task_id: str, user: User) -> dict[str, Any]:
 
 def _previous_file_states(conn: sqlite3.Connection, task_id: str) -> dict[str, dict[str, int]]:
     rows = conn.execute("SELECT path,size,mtime_ns FROM tpm_event_files WHERE task_id=?", (task_id,)).fetchall()
-    return {str(row["path"]): {"size": int(row["size"]), "mtime_ns": int(row["mtime_ns"])} for row in rows}
+    # A cached file is safe to skip only if its run already has an observed
+    # progress value.  Otherwise a transient partial event tail (or a prior
+    # parser issue) would leave it permanently marked as "tag missing": its
+    # unchanged metadata would cause every later collection to skip it.
+    known_runs = {
+        str(row["relative_path"])
+        for row in conn.execute(
+            """SELECT DISTINCT s.relative_path FROM tpm_run_samples s
+               JOIN tpm_reports r ON r.id=s.report_id
+               WHERE s.task_id=? AND r.success=1 AND s.progress IS NOT NULL""",
+            (task_id,),
+        ).fetchall()
+    }
+    reusable: dict[str, dict[str, int]] = {}
+    for row in rows:
+        path = str(row["path"])
+        run_path = path.rsplit("/", 1)[0] if "/" in path else "."
+        if run_path in known_runs:
+            reusable[path] = {"size": int(row["size"]), "mtime_ns": int(row["mtime_ns"])}
+    return reusable
 
 
 def _same_collection_config(previous_json: str, config: dict[str, Any]) -> bool:
@@ -566,12 +796,58 @@ def _trim_report_history(conn: sqlite3.Connection, task_id: str, rate_report_cou
     conn.execute(f"DELETE FROM tpm_reports WHERE task_id=? AND id IN ({placeholders})", [task_id, *stale_ids])
 
 
+def _ensure_remote_collector_script(client: Any) -> str:
+    """Upload the versioned collector once per remote server/account."""
+    payload = REMOTE_COLLECTOR_SOURCE.encode("utf-8")
+    temporary = ""
+    sftp = client.open_sftp()
+    try:
+        try:
+            if int(sftp.stat(REMOTE_COLLECTOR_PATH).st_size) == len(payload):
+                return REMOTE_COLLECTOR_PATH
+        except OSError:
+            pass
+        temporary = f"{REMOTE_COLLECTOR_PATH}.{secrets.token_urlsafe(6)}.tmp"
+        with sftp.open(temporary, "wb") as remote_file:
+            remote_file.write(payload)
+            remote_file.flush()
+        sftp.chmod(temporary, 0o600)
+        try:
+            # OpenSSH SFTP supports atomic replacement.  If another report
+            # deployed the same version first, accepting the same-size file
+            # avoids a needless retry.
+            sftp.posix_rename(temporary, REMOTE_COLLECTOR_PATH)
+        except (AttributeError, OSError):
+            try:
+                sftp.rename(temporary, REMOTE_COLLECTOR_PATH)
+            except OSError:
+                if int(sftp.stat(REMOTE_COLLECTOR_PATH).st_size) != len(payload):
+                    raise
+                sftp.remove(temporary)
+        temporary = ""
+        return REMOTE_COLLECTOR_PATH
+    finally:
+        if temporary:
+            try:
+                sftp.remove(temporary)
+            except OSError:
+                pass
+        sftp.close()
+
+
+def _remote_collector_command(python_command: str, script_path: str = REMOTE_COLLECTOR_PATH) -> str:
+    """Keep the remote invocation small; request data is supplied via stdin."""
+    return f"{_validate_python_command(python_command)} {shlex.quote(script_path)} --request-stdin-base64"
+
+
 def _run_remote_collector(server: sqlite3.Row, python_command: str, config: dict[str, Any], previous_files: dict[str, dict[str, int]]) -> dict[str, Any]:
     request = base64.b64encode(json.dumps({"root": config["tensorboard_root"], "progress_tag": config["progress_tag"], "progress_mode": config["progress_mode"], "tail_bytes": config["tail_bytes"], "previous_files": previous_files}, separators=(",", ":")).encode()).decode()
-    command = f"{_validate_python_command(python_command)} - --request-base64 {request}"
     with ssh_connection_service.borrowed_client(_ssh_spec(server, 60)) as client:
+        command = _remote_collector_command(python_command, _ensure_remote_collector_script(client))
         stdin, stdout, stderr = client.exec_command(command, timeout=120)
-        stdin.write(REMOTE_COLLECTOR_SOURCE); stdin.flush(); stdin.close()
+        # The cached file-state map can grow well beyond the OS argument limit.
+        # It is request data, so send it over the SSH stream rather than argv.
+        stdin.write(request); stdin.flush(); stdin.close()
         out = stdout.read().decode("utf-8", "replace").strip(); err = stderr.read().decode("utf-8", "replace").strip(); code = stdout.channel.recv_exit_status()
     try: result = json.loads(out)
     except json.JSONDecodeError as exc: raise ToolboxError("REMOTE_COLLECTOR_FAILED", f"远程采集器未返回 JSON: {(err or out)[:300]}", status_code=502, tool_id=TOOL_ID) from exc
@@ -584,12 +860,25 @@ def _get_task_lock(user_id: str, task_id: str) -> threading.Lock:
 
 
 def _match_group(path: str, groups: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return the deepest matching group; child patterns only run inside a parent match."""
+    """Return the selected deepest group; child patterns only run inside a parent match.
+
+    A parent that has children accepts runs outside those children only when
+    ``include_unmatched_children`` is enabled.  Once a matching child is
+    found, it owns the decision so an excluded grandchild miss never falls
+    back into an ancestor.
+    """
+    def select(group: dict[str, Any]) -> dict[str, Any] | None:
+        for child in group["children"]:
+            if fnmatch.fnmatchcase(path, child["pattern"]):
+                return select(child)
+        if group["children"] and not group["include_unmatched_children"]:
+            return None
+        return group
+
     for group in groups:
         if not fnmatch.fnmatchcase(path, group["pattern"]):
             continue
-        child = _match_group(path, group["children"])
-        return child or group
+        return select(group)
     return None
 
 
@@ -870,3 +1159,360 @@ def collect_due_reports() -> None:
             if _due(task, now):
                 try: _run_task(user_id, task["id"])
                 except Exception: logger.exception("Failed scheduled TensorBoard progress report: user=%s task=%s", user_id, task["id"])
+
+
+# ---------------------------------------------------------------------------
+# TensorBoard sessions (kept private to this tool)
+
+
+class TBProxyTunnel:
+    def __init__(self, proxy_id: str, client: Any, local_port: int, remote_port: int, listener: socket.socket):
+        self.proxy_id, self.client, self.local_port, self.remote_port, self.listener = proxy_id, client, local_port, remote_port, listener
+        self.running = True
+        self.thread = threading.Thread(target=self._accept, daemon=True)
+
+    def start(self) -> None: self.thread.start()
+    def is_alive(self) -> bool:
+        transport = self.client.get_transport()
+        return bool(self.running and transport and transport.is_active())
+    def stop(self) -> None:
+        self.running = False
+        try: self.listener.close()
+        except OSError: pass
+        self.thread.join(timeout=2)
+        try: self.client.close()
+        except Exception: pass
+    def _accept(self) -> None:
+        while self.running:
+            try: sock, _ = self.listener.accept()
+            except OSError: return
+            threading.Thread(target=self._pipe, args=(sock,), daemon=True).start()
+    def _pipe(self, sock: socket.socket) -> None:
+        import select
+        channel = None
+        try:
+            transport = self.client.get_transport()
+            if transport is None: return
+            channel = transport.open_channel("direct-tcpip", ("127.0.0.1", self.remote_port), sock.getpeername())
+            if channel is None: return
+            sock.setblocking(False); channel.setblocking(False)
+            while self.running:
+                ready, _, _ = select.select([sock, channel], [], [], 30)
+                if sock in ready:
+                    data = sock.recv(65536)
+                    if not data: return
+                    channel.sendall(data)
+                if channel in ready:
+                    data = channel.recv(65536)
+                    if not data: return
+                    sock.sendall(data)
+        except Exception:
+            return
+        finally:
+            try: sock.close()
+            except Exception: pass
+            try:
+                if channel is not None: channel.close()
+            except Exception: pass
+
+
+def get_tb_tunnel(proxy_id: str) -> TBProxyTunnel | None:
+    with _tb_tunnels_guard: return _tb_tunnels.get(proxy_id)
+
+
+def _stop_tb_tunnel(proxy_id: str) -> None:
+    with _tb_tunnels_guard: tunnel = _tb_tunnels.pop(proxy_id, None)
+    if tunnel: tunnel.stop()
+
+
+def _new_tb_client(server: sqlite3.Row):
+    try: import paramiko
+    except ImportError as exc: raise ToolboxError("SSH_DEPENDENCY_MISSING", "缺少 paramiko 依赖，无法创建 TensorBoard 隧道", status_code=500, tool_id=TOOL_ID) from exc
+    client = paramiko.SSHClient(); client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=server["host"], port=int(server["port"]), username=server["ssh_username"], password=decrypt_secret(server["ssh_password_encrypted"]), timeout=20, banner_timeout=20, auth_timeout=20, look_for_keys=False, allow_agent=False)
+        transport = client.get_transport()
+        if transport: transport.set_keepalive(30)
+        return client
+    except Exception as exc:
+        client.close(); raise ToolboxError("SSH_CONNECT_FAILED", f"SSH 隧道连接失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
+
+
+def _free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0)); return int(sock.getsockname()[1])
+
+
+def _free_remote_port(server: sqlite3.Row) -> int:
+    for port in range(TB_REMOTE_PORT_START, TB_REMOTE_PORT_END + 1):
+        command = f"python3 -c \"import socket; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.close()\" 2>/dev/null && echo FREE"
+        try:
+            out, _, code = ssh_connection_service.exec_command(_ssh_spec(server, 10), command, timeout=10)
+            if code == 0 and "FREE" in out: return port
+        except Exception: continue
+    raise ToolboxError("NO_FREE_PORT", f"远端 {TB_REMOTE_PORT_START}-{TB_REMOTE_PORT_END} 端口范围没有空闲端口", status_code=502, tool_id=TOOL_ID)
+
+
+def _tb_command(server: sqlite3.Row, logdir: str, port: int, proxy_id: str) -> str:
+    mode = server["tb_python_mode"]
+    if mode == "conda":
+        conda_sh = shlex.quote(f"{server['tb_conda_base_path'].rstrip('/')}/etc/profile.d/conda.sh")
+        runner = f"source {conda_sh} && conda activate {shlex.quote(server['tb_conda_env'])} && exec python"
+    else:
+        runner = f"exec {shlex.quote(server['tb_python_path'])}"
+    args = f"-m tensorboard.main --logdir {shlex.quote(logdir)} --port {port} --host 127.0.0.1 --path_prefix {shlex.quote('/tpm-tb/' + proxy_id)}"
+    return f"nohup bash -c {shlex.quote(runner + ' ' + args)} > {shlex.quote('/tmp/tpm_tb_' + proxy_id + '.log')} 2>&1 & echo $!"
+
+
+def _process_alive(server: sqlite3.Row, pid: str) -> bool:
+    if not pid.isdigit(): return False
+    try:
+        out, _, _ = ssh_connection_service.exec_command(_ssh_spec(server, 8), f"kill -0 {shlex.quote(pid)} 2>/dev/null && echo RUNNING", timeout=8)
+        return "RUNNING" in out
+    except Exception: return False
+
+
+def _kill_process(server: sqlite3.Row, pid: str) -> None:
+    if not pid.isdigit(): return
+    try:
+        ssh_connection_service.exec_command(_ssh_spec(server, 8), f"kill {shlex.quote(pid)} 2>/dev/null; sleep 1; kill -9 {shlex.quote(pid)} 2>/dev/null || true", timeout=8)
+    except Exception: pass
+
+
+def _start_tb_tunnel(server: sqlite3.Row, proxy_id: str, remote_port: int) -> int:
+    local_port = _free_local_port(); client = _new_tb_client(server)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); listener.bind(("127.0.0.1", local_port)); listener.listen(20)
+    except Exception:
+        listener.close(); client.close(); raise
+    tunnel = TBProxyTunnel(proxy_id, client, local_port, remote_port, listener); tunnel.start()
+    with _tb_tunnels_guard: _tb_tunnels[proxy_id] = tunnel
+    return local_port
+
+
+def _tb_session_public(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None: return None
+    return {"id": row["id"], "taskId": row["task_id"], "serverId": row["server_id"], "logdir": row["logdir"], "status": row["status"], "error": row["error"], "startedAt": row["started_at"], "stoppedAt": row["stopped_at"], "updatedAt": row["updated_at"]}
+
+
+def _owned_tb_session(conn: sqlite3.Connection, task_id: str, user_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM tpm_tb_sessions WHERE task_id=? AND owner_user_id=?", (task_id, user_id)).fetchone()
+
+
+def is_tb_session_owner_by_proxy_id(proxy_id: str, user_id: str) -> bool:
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        return conn.execute("SELECT 1 FROM tpm_tb_sessions WHERE proxy_id=? AND owner_user_id=?", (proxy_id, user_id)).fetchone() is not None
+
+
+def list_conda_envs(server_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn: server = _owned_server(conn, server_id, user.id)
+    base = str(server["tb_conda_base_path"]).strip()
+    if not base: return {"envs": [], "error": "请先设置 Anaconda 路径"}
+    command = f"source {shlex.quote(base.rstrip('/') + '/etc/profile.d/conda.sh')} 2>/dev/null && conda env list --json"
+    out, err, code = ssh_connection_service.exec_command(_ssh_spec(server, 15), f"bash -lc {shlex.quote(command)}", timeout=15)
+    if code != 0: return {"envs": [], "error": (err or out)[:300]}
+    try: return {"envs": [str(path).rsplit('/', 1)[-1] for path in json.loads(out).get("envs", [])], "error": ""}
+    except Exception: return {"envs": [], "error": "无法解析 conda 环境列表"}
+
+
+def check_tb_environment(server_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn: server = _owned_server(conn, server_id, user.id)
+    try: _validate_tb_environment({"tbPythonMode": server["tb_python_mode"], "tbCondaBasePath": server["tb_conda_base_path"], "tbCondaEnv": server["tb_conda_env"], "tbPythonPath": server["tb_python_path"]})
+    except ToolboxError as exc: return {"ok": False, "error": exc.message}
+    if not _tb_environment_configured(server): return {"ok": False, "error": "该服务器尚未配置完整的 TensorBoard Python 环境"}
+    if server["tb_python_mode"] == "conda":
+        source = shlex.quote(f"{server['tb_conda_base_path'].rstrip('/')}/etc/profile.d/conda.sh")
+        command = f"source {source} && conda activate {shlex.quote(server['tb_conda_env'])} && python --version && python -c 'import tensorboard; print(tensorboard.__version__)'"
+    else: command = f"{shlex.quote(server['tb_python_path'])} --version && {shlex.quote(server['tb_python_path'])} -c 'import tensorboard; print(tensorboard.__version__)'"
+    out, err, code = ssh_connection_service.exec_command(_ssh_spec(server, 20), f"bash -lc {shlex.quote(command)}", timeout=20)
+    return {"ok": code == 0, "output": (out or err).strip()[:500], "error": "" if code == 0 else (err or out).strip()[:500]}
+
+
+def get_tb_session(task_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        _owned_task(conn, task_id, user.id); return {"session": _tb_session_public(_owned_tb_session(conn, task_id, user.id))}
+
+
+def start_tb_session(task_id: str, user: User, restart: bool = False) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        task = _owned_task(conn, task_id, user.id); server = _owned_server(conn, task["server_id"], user.id); previous = _owned_tb_session(conn, task_id, user.id)
+    if not _tb_environment_configured(server):
+        raise ToolboxError("TB_ENVIRONMENT_NOT_CONFIGURED", "该服务器尚未配置完整的 TensorBoard Python 环境", status_code=409, tool_id=TOOL_ID)
+    if previous and previous["status"] == "running":
+        if not restart: return {"session": _tb_session_public(previous)}
+        stop_tb_session(task_id, user)
+    config, _ = _load_task_config(task, server)
+    proxy_id = previous["proxy_id"] if previous else secrets.token_urlsafe(18)
+    remote_port = _free_remote_port(server)
+    out, err, _ = ssh_connection_service.exec_command(_ssh_spec(server, 30), f"bash -lc {shlex.quote(_tb_command(server, config['tensorboard_root'], remote_port, proxy_id))}", timeout=30)
+    pid = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if not pid.isdigit(): raise ToolboxError("TB_START_FAILED", f"无法获取 TensorBoard PID: {(err or out)[:300]}", status_code=502, tool_id=TOOL_ID)
+    time.sleep(1)
+    if not _process_alive(server, pid):
+        _kill_process(server, pid); raise ToolboxError("TB_START_FAILED", "TensorBoard 进程启动后立即退出", status_code=502, tool_id=TOOL_ID)
+    try: local_port = _start_tb_tunnel(server, proxy_id, remote_port)
+    except Exception as exc:
+        _kill_process(server, pid); raise ToolboxError("TB_TUNNEL_FAILED", f"SSH 隧道创建失败: {exc}", status_code=502, tool_id=TOOL_ID) from exc
+    now = now_iso()
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        if previous:
+            conn.execute("UPDATE tpm_tb_sessions SET server_id=?,logdir=?,remote_port=?,local_port=?,remote_pid=?,status='running',error='',started_at=?,stopped_at=NULL,updated_at=? WHERE task_id=?", (server["id"], config["tensorboard_root"], remote_port, local_port, pid, now, now, task_id))
+        else:
+            conn.execute("INSERT INTO tpm_tb_sessions (id,owner_user_id,task_id,server_id,logdir,remote_port,local_port,remote_pid,proxy_id,status,started_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'running',?,?)", (secrets.token_urlsafe(12), user.id, task_id, server["id"], config["tensorboard_root"], remote_port, local_port, pid, proxy_id, now, now))
+        conn.commit(); row = _owned_tb_session(conn, task_id, user.id)
+    return {"session": _tb_session_public(row)}
+
+
+def stop_tb_session(task_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        task = _owned_task(conn, task_id, user.id); row = _owned_tb_session(conn, task_id, user.id)
+        if row is None: raise ToolboxError("TB_SESSION_NOT_FOUND", "该报表尚未启动 TensorBoard", status_code=404, tool_id=TOOL_ID)
+        server = _owned_server(conn, task["server_id"], user.id)
+    _kill_process(server, row["remote_pid"]); _stop_tb_tunnel(row["proxy_id"]); now = now_iso()
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        conn.execute("UPDATE tpm_tb_sessions SET status='stopped',stopped_at=?,updated_at=? WHERE task_id=?", (now, now, task_id)); conn.commit(); row = _owned_tb_session(conn, task_id, user.id)
+    return {"session": _tb_session_public(row)}
+
+
+def check_tb_session(task_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        task = _owned_task(conn, task_id, user.id); row = _owned_tb_session(conn, task_id, user.id)
+        if row is None: return {"session": None}
+        server = _owned_server(conn, task["server_id"], user.id)
+    alive = row["status"] == "running" and _process_alive(server, row["remote_pid"])
+    tunnel = get_tb_tunnel(row["proxy_id"])
+    if alive and tunnel is None:  # recovery after toolbox restart
+        try: _start_tb_tunnel(server, row["proxy_id"], int(row["remote_port"])); tunnel = get_tb_tunnel(row["proxy_id"])
+        except Exception: tunnel = None
+    alive = bool(alive and tunnel and tunnel.is_alive())
+    if not alive and row["status"] == "running":
+        _stop_tb_tunnel(row["proxy_id"]); now = now_iso()
+        with user_tool_connection_context(user.id, TOOL_ID) as conn:
+            conn.execute("UPDATE tpm_tb_sessions SET status='failed',error=?,stopped_at=?,updated_at=? WHERE task_id=?", ("TensorBoard 进程退出或 SSH 隧道断开", now, now, task_id)); conn.commit(); row = _owned_tb_session(conn, task_id, user.id)
+    return {"session": _tb_session_public(row)}
+
+
+def _find_group(groups: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
+    for group in groups:
+        if group["key"] == key: return group
+        found = _find_group(group["children"], key)
+        if found: return found
+    return None
+
+
+def _find_group_path(groups: list[dict[str, Any]], key: str, ancestors: list[dict[str, Any]] | None = None) -> list[dict[str, Any]] | None:
+    ancestors = ancestors or []
+    for group in groups:
+        path = [*ancestors, group]
+        if group["key"] == key:
+            return path
+        found = _find_group_path(group["children"], key, path)
+        if found:
+            return found
+    return None
+
+
+def _group_patterns(group: dict[str, Any]) -> list[str]:
+    return [group["pattern"], *[pattern for child in group["children"] for pattern in _group_patterns(child)]]
+
+
+def _glob_regex(pattern: str) -> str:
+    """Convert the monitor's ``*`` wildcard to a TensorBoard browser regex.
+
+    ``fnmatch.translate`` is deliberately not used here: recent Python
+    versions emit atomic groups such as ``(?>.*?)``, which JavaScript regular
+    expressions (and therefore TensorBoard's run selector) do not support.
+    Monitor category patterns use ``*`` as their wildcard; an already-written
+    ``.*`` is preserved so it does not become ``..*``.
+    """
+    return re.sub(r"(?<!\.)\*", ".*", pattern)
+
+
+def _regex_param(patterns: list[str]) -> str:
+    """TensorBoard run fields take a raw browser regular expression."""
+    return "|".join(_glob_regex(pattern) for pattern in patterns)
+
+
+def _group_path_regex(path: list[dict[str, Any]]) -> str:
+    """Intersect every ancestor pattern in a TensorBoard browser regex."""
+    return "".join(f"(?=.*{_glob_regex(group['pattern'])})" for group in path) + ".*"
+
+
+def _color_key_regex(pattern: str) -> str:
+    """Match a glob while capturing only its fixed, category-defining text.
+
+    TensorBoard uses the *contents* of every capture group as the color key.
+    Capturing the full match would include a run's algorithm/seed and make
+    every run a separate color.  Splitting a monitor glob around either ``*``
+    or an already-written ``.*`` instead captures only its invariant parts.
+    For example, ``*/ant/*`` becomes ``.*(/ant/).*``.
+    """
+    pieces = re.split(r"\.\*|(?<!\.)\*", pattern)
+    return ".*".join(f"({piece})" if piece else "" for piece in pieces)
+
+
+def _group_path_color_regex(path: list[dict[str, Any]]) -> str:
+    """Restrict to ancestors, then capture the selected direct-child key."""
+    ancestors, child = path[:-1], path[-1]
+    parent_checks = "".join(f"(?=.*{_glob_regex(group['pattern'])})" for group in ancestors)
+    return f"{parent_checks}(?={_color_key_regex(child['pattern'])}).*"
+
+
+def _child_color_group_param(parent_path: list[dict[str, Any]]) -> str | None:
+    """Assign a color group per direct child, only when grouping is meaningful."""
+    children = parent_path[-1]["children"]
+    if len(children) < 2:
+        return None
+    # TensorBoard treats runColorGroup as an encoded selector rather than a
+    # bare regular expression: the ``regex:`` marker selects regex grouping.
+    # Its group key is the list of capture groups from the match.  Each branch
+    # captures only its child's fixed pattern text (such as ``ant``), never
+    # the complete run name, so algorithms and seeds remain in one color.
+    # In contrast, runFilter must remain a *raw* regex (see _group_path_regex).
+    return "regex:" + "|".join(_group_path_color_regex([*parent_path, child]) for child in children)
+
+
+def _merge_tb_url_params(raw: str, run_filter: str, run_color_group: str | None) -> tuple[str, str]:
+    parsed = urlsplit(raw if raw.startswith(("?", "#")) else "?" + raw)
+    pairs = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key not in {"runFilter", "runColorGroup"}]
+    pairs.append(("runFilter", run_filter))
+    if run_color_group: pairs.append(("runColorGroup", run_color_group))
+    return urlencode(pairs), parsed.fragment or "timeseries"
+
+
+def _layer_tb_url_params(default_params: str, custom_params: str) -> str:
+    """Layer YAML custom parameters over the report's default TB parameters."""
+    default = urlsplit(default_params if default_params.startswith(("?", "#")) else "?" + default_params)
+    custom = urlsplit(custom_params if custom_params.startswith(("?", "#")) else "?" + custom_params)
+    pairs = parse_qsl(default.query, keep_blank_values=True)
+    for key, value in parse_qsl(custom.query, keep_blank_values=True):
+        pairs = [(old_key, old_value) for old_key, old_value in pairs if old_key != key]
+        pairs.append((key, value))
+    return urlunsplit(("", "", "", urlencode(pairs), custom.fragment or default.fragment))
+
+
+def tb_group_url(task_id: str, group_key: str, user: User) -> dict[str, str]:
+    """Build a shareable native TensorBoard URL with enforced group controls."""
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        task = _owned_task(conn, task_id, user.id); server = _owned_server(conn, task["server_id"], user.id); session = _owned_tb_session(conn, task_id, user.id)
+    if session is None or session["status"] != "running": raise ToolboxError("TB_SESSION_NOT_RUNNING", "请先启动该报表的 TensorBoard 会话", status_code=409, tool_id=TOOL_ID)
+    tunnel = get_tb_tunnel(session["proxy_id"])
+    if tunnel is None or not tunnel.is_alive():
+        check_tb_session(task_id, user)
+        tunnel = get_tb_tunnel(session["proxy_id"])
+        if tunnel is None or not tunnel.is_alive(): raise ToolboxError("TB_SESSION_NOT_RUNNING", "TensorBoard 隧道未运行，请检查或重启会话", status_code=409, tool_id=TOOL_ID)
+    config, _ = _load_task_config(task, server); group_path = _find_group_path(config["groups"], group_key)
+    if group_path is None: raise ToolboxError("GROUP_NOT_FOUND", "当前配置中不存在该分类", status_code=404, tool_id=TOOL_ID)
+    raw = _layer_tb_url_params(task["tb_default_params"], config["tb_custom_params"])
+    color_group = _child_color_group_param(group_path)
+    query, fragment = _merge_tb_url_params(raw, _group_path_regex(group_path), color_group)
+    path = f"/tpm-tb/{session['proxy_id']}/"
+    return {"url": urlunsplit(("", "", path, query, fragment))}

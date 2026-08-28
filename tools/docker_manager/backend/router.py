@@ -68,11 +68,7 @@ router = APIRouter()
 # ==============================================================
 
 class AddServerPayload(BaseModel):
-    name: str
-    host: str
-    port: int = 22
-    sshUsername: str
-    sshPassword: str
+    serverId: str
 
 
 class SetUserPermsPayload(BaseModel):

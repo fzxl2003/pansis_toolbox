@@ -35,14 +35,7 @@ router = APIRouter()
 
 
 class ServerPayload(BaseModel):
-    name: str
-    host: str
-    port: int = 22
-    sshUsername: str
-    authType: str = "password"
-    sshPassword: str | None = None
-    privateKey: str | None = None
-    privateKeyPassphrase: str | None = None
+    serverId: str | None = None
     condaBasePath: str = ""
 
 

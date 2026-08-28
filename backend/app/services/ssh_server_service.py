@@ -1,8 +1,8 @@
 """Platform-owned SSH server configurations and access control.
 
 Credentials are encrypted at rest and are deliberately never returned by the
-public serializers.  A server belongs either to its creator (private), or to
-an administrator as a shared configuration with an explicit audience.
+public serializers. Every user can create a private server. Only records
+created by administrators can be shared with an explicit audience.
 """
 from __future__ import annotations
 
@@ -43,11 +43,6 @@ def decrypt_secret(value: str) -> str:
         raise ToolboxError("INVALID_SECRET", "无法解密 SSH 凭据", status_code=400) from exc
 
 
-def _require_server_admin(user: User) -> None:
-    if user.role != "admin":
-        raise ToolboxError("ADMIN_REQUIRED", "SSH 服务器配置仅管理员可管理，普通用户只能使用已授权的服务器", status_code=403)
-
-
 def _normalise(payload: dict[str, Any], *, creating: bool, current_auth_type: str | None = None) -> dict[str, Any]:
     name = str(payload.get("name") or "").strip()
     host = str(payload.get("host") or "").strip()
@@ -70,13 +65,19 @@ def _normalise(payload: dict[str, Any], *, creating: bool, current_auth_type: st
     return {"name": name, "host": host, "port": port, "sshUsername": username, "authType": auth_type}
 
 
-def _public(row: Any, *, allowed_user_ids: list[str] | None = None, can_manage: bool = False) -> dict[str, Any]:
+def _public(
+    row: Any,
+    *,
+    allowed_user_ids: list[str] | None = None,
+    can_manage: bool = False,
+    can_share: bool = False,
+) -> dict[str, Any]:
     return {
         "id": row["id"], "name": row["name"], "host": row["host"], "port": row["port"],
         "sshUsername": row["ssh_username"], "authType": row["auth_type"],
         "isPublic": bool(row["is_public"]), "enabled": bool(row["enabled"]),
         "ownerUserId": row["owner_user_id"], "allowedUserIds": allowed_user_ids or [],
-        "canManage": can_manage,
+        "canManage": can_manage, "canShare": can_share,
     }
 
 
@@ -94,6 +95,14 @@ def _can_use_row(connection: Any, row: Any, user: User) -> bool:
     ).fetchone() is not None
 
 
+def _can_manage_row(row: Any, user: User) -> bool:
+    return user.role == "admin" or row["owner_user_id"] == user.id
+
+
+def _can_share_row(row: Any, user: User) -> bool:
+    return user.role == "admin" and bool(row["created_by_admin"])
+
+
 def list_servers(user: User, *, include_disabled: bool = False) -> list[dict[str, Any]]:
     init_database()
     with get_connection() as connection:
@@ -104,8 +113,9 @@ def list_servers(user: User, *, include_disabled: bool = False) -> list[dict[str
         result = []
         for row in rows:
             if _can_use_row(connection, row, user):
-                manage = user.role == "admin"
-                result.append(_public(row, allowed_user_ids=_allowed_ids(connection, row["id"]) if manage else [], can_manage=manage))
+                manage = _can_manage_row(row, user)
+                share = _can_share_row(row, user)
+                result.append(_public(row, allowed_user_ids=_allowed_ids(connection, row["id"]) if share else [], can_manage=manage, can_share=share))
         return result
 
 
@@ -115,10 +125,11 @@ def get_server(server_id: str, user: User, *, require_manage: bool = False) -> d
         row = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
         if row is None or not row["enabled"]:
             raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在或已停用", status_code=404)
-        manage = user.role == "admin"
+        manage = _can_manage_row(row, user)
+        share = _can_share_row(row, user)
         if (require_manage and not manage) or (not require_manage and not _can_use_row(connection, row, user)):
             raise ToolboxError("SERVER_ACCESS_DENIED", "没有该 SSH 服务器的使用权限", status_code=403)
-        return _public(row, allowed_user_ids=_allowed_ids(connection, server_id) if manage else [], can_manage=manage)
+        return _public(row, allowed_user_ids=_allowed_ids(connection, server_id) if share else [], can_manage=manage, can_share=share)
 
 
 def get_server_credentials(server_id: str, user: User) -> dict[str, Any]:
@@ -202,8 +213,9 @@ def migrate_legacy_server(
     """One-time import for an existing tool-local credential.
 
     The original id is deliberately retained so all existing task/session
-    foreign keys continue to work.  Imports are private to the old owner and
-    therefore do not grant any new access to other users.
+    foreign keys continue to work. Imports remain private to the old owner,
+    unless the migration is being performed for an administrator-owned shared
+    configuration.
     """
     init_database()
     with get_connection() as connection:
@@ -211,7 +223,8 @@ def migrate_legacy_server(
         if existing is not None:
             if existing["owner_user_id"] != owner.id and not is_public:
                 raise ToolboxError("SSH_SERVER_ID_COLLISION", f"旧服务器 ID 与现有全局服务器冲突: {server_id}", status_code=409)
-            return _public(existing, can_manage=owner.role == "admin")
+            manage = _can_manage_row(existing, owner)
+            return _public(existing, can_manage=manage, can_share=_can_share_row(existing, owner))
         candidate = (name or source_tool).strip() or source_tool
         used = {r["name"].casefold() for r in connection.execute("SELECT name FROM platform_ssh_servers").fetchall()}
         if candidate.casefold() in used:
@@ -223,40 +236,42 @@ def migrate_legacy_server(
         normalized_auth = auth_type if auth_type in {"password", "private_key"} else "password"
         if normalized_auth == "private_key" and not private_key:
             normalized_auth = "password"
+        created_by_admin = owner.role == "admin"
+        effective_public = bool(is_public and created_by_admin)
         now = _now()
         connection.execute(
             """INSERT INTO platform_ssh_servers
-               (id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,owner_user_id,is_public,enabled,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,owner_user_id,created_by_admin,is_public,enabled,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (server_id, candidate, host, int(port or 22), ssh_username, normalized_auth,
              encrypt_secret(ssh_password), encrypt_secret(private_key), encrypt_secret(private_key_passphrase),
-             owner.id, int(is_public), 1, now, now),
+             owner.id, int(created_by_admin), int(effective_public), 1, now, now),
         )
-        if is_public:
+        if effective_public:
             _replace_access(connection, server_id, list(dict.fromkeys(allowed_user_ids or [])), now)
         row = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
-        return _public(row, can_manage=owner.role == "admin")
+        return _public(row, can_manage=True, can_share=_can_share_row(row, owner))
 
 
 def create_server(payload: dict[str, Any], user: User) -> dict[str, Any]:
     init_database()
-    _require_server_admin(user)
     values = _normalise(payload, creating=True)
-    is_public = bool(payload.get("isPublic", False))
+    can_share = user.role == "admin"
+    is_public = can_share and bool(payload.get("isPublic", False))
     now = _now(); server_id = str(uuid.uuid4())
     allowed = list(dict.fromkeys(payload.get("allowedUserIds") or [])) if is_public else []
     with get_connection() as connection:
         connection.execute(
             """INSERT INTO platform_ssh_servers
-               (id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,owner_user_id,is_public,enabled,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,owner_user_id,created_by_admin,is_public,enabled,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (server_id, values["name"], values["host"], values["port"], values["sshUsername"], values["authType"],
              encrypt_secret(str(payload.get("sshPassword") or "")), encrypt_secret(str(payload.get("privateKey") or "")),
-             encrypt_secret(str(payload.get("privateKeyPassphrase") or "")), user.id, int(is_public), 1, now, now),
+             encrypt_secret(str(payload.get("privateKeyPassphrase") or "")), user.id, int(can_share), int(is_public), 1, now, now),
         )
         _replace_access(connection, server_id, allowed, now)
         row = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
-        return _public(row, allowed_user_ids=allowed, can_manage=True)
+        return _public(row, allowed_user_ids=allowed, can_manage=True, can_share=can_share)
 
 
 def _replace_access(connection: Any, server_id: str, user_ids: list[str], now: str) -> None:
@@ -272,7 +287,8 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
         row = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
         if row is None:
             raise ToolboxError("SERVER_NOT_FOUND", "服务器不存在", status_code=404)
-        _require_server_admin(user)
+        if not _can_manage_row(row, user):
+            raise ToolboxError("SERVER_ACCESS_DENIED", "没有该 SSH 服务器的管理权限", status_code=403)
         merged = {"name": payload.get("name", row["name"]), "host": payload.get("host", row["host"]),
                   "port": payload.get("port", row["port"]), "sshUsername": payload.get("sshUsername", row["ssh_username"]),
                   "authType": payload.get("authType", row["auth_type"])}
@@ -281,17 +297,18 @@ def update_server(server_id: str, payload: dict[str, Any], user: User) -> dict[s
             raise ToolboxError("PASSWORD_REQUIRED", "切换到密码认证时需要填写 SSH 密码", status_code=400)
         if values["authType"] == "private_key" and values["authType"] != row["auth_type"] and not payload.get("privateKey"):
             raise ToolboxError("PRIVATE_KEY_REQUIRED", "切换到私钥认证时需要填写私钥内容", status_code=400)
-        is_public = bool(payload.get("isPublic", row["is_public"]))
+        can_share = _can_share_row(row, user)
+        is_public = can_share and bool(payload.get("isPublic", row["is_public"]))
         now = _now()
         password = row["ssh_password_encrypted"] if not payload.get("sshPassword") else encrypt_secret(str(payload["sshPassword"]))
         private_key = row["private_key_encrypted"] if not payload.get("privateKey") else encrypt_secret(str(payload["privateKey"]))
         passphrase = row["private_key_passphrase_encrypted"] if "privateKeyPassphrase" not in payload else encrypt_secret(str(payload["privateKeyPassphrase"] or ""))
         connection.execute("""UPDATE platform_ssh_servers SET name=?,host=?,port=?,ssh_username=?,auth_type=?,ssh_password_encrypted=?,private_key_encrypted=?,private_key_passphrase_encrypted=?,is_public=?,updated_at=? WHERE id=?""",
             (values["name"], values["host"], values["port"], values["sshUsername"], values["authType"], password, private_key, passphrase, int(is_public), now, server_id))
-        allowed = list(dict.fromkeys(payload.get("allowedUserIds", _allowed_ids(connection, server_id)))) if is_public else []
+        allowed = list(dict.fromkeys(payload.get("allowedUserIds", _allowed_ids(connection, server_id)))) if is_public and can_share else []
         _replace_access(connection, server_id, allowed, now)
         changed = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
-        return _public(changed, allowed_user_ids=allowed, can_manage=True)
+        return _public(changed, allowed_user_ids=allowed, can_manage=True, can_share=can_share)
 
 
 def delete_server(server_id: str, user: User) -> None:
@@ -300,14 +317,16 @@ def delete_server(server_id: str, user: User) -> None:
         row = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
         if row is None:
             return
-        _require_server_admin(user)
+        if not _can_manage_row(row, user):
+            raise ToolboxError("SERVER_ACCESS_DENIED", "没有该 SSH 服务器的管理权限", status_code=403)
         connection.execute("DELETE FROM platform_ssh_servers WHERE id=?", (server_id,))
 
 
 def copy_server(server_id: str, name: str | None, user: User) -> dict[str, Any]:
     """Admin-only duplicate that keeps the copy in the global configuration."""
     init_database()
-    _require_server_admin(user)
+    if user.role != "admin":
+        raise ToolboxError("ADMIN_REQUIRED", "仅管理员可以复制 SSH 服务器", status_code=403)
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (server_id,)).fetchone()
         if row is None:
@@ -318,16 +337,16 @@ def copy_server(server_id: str, name: str | None, user: User) -> dict[str, Any]:
             raise ToolboxError("INVALID_INPUT", "服务器名称不能为空", status_code=400)
         connection.execute(
             """INSERT INTO platform_ssh_servers
-               (id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,owner_user_id,is_public,enabled,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (id,name,host,port,ssh_username,auth_type,ssh_password_encrypted,private_key_encrypted,private_key_passphrase_encrypted,owner_user_id,created_by_admin,is_public,enabled,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (new_id, new_name, row["host"], row["port"], row["ssh_username"], row["auth_type"],
              row["ssh_password_encrypted"], row["private_key_encrypted"], row["private_key_passphrase_encrypted"],
-             user.id, row["is_public"], 1, now, now),
+             user.id, 1, row["is_public"], 1, now, now),
         )
         allowed = _allowed_ids(connection, server_id) if row["is_public"] else []
         _replace_access(connection, new_id, allowed, now)
         copied = connection.execute("SELECT * FROM platform_ssh_servers WHERE id=?", (new_id,)).fetchone()
-        return _public(copied, allowed_user_ids=allowed, can_manage=True)
+        return _public(copied, allowed_user_ids=allowed, can_manage=True, can_share=True)
 
 
 def test_connection(server_id: str, user: User) -> dict[str, Any]:

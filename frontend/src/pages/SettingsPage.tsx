@@ -330,10 +330,10 @@ function SshServersTab({
 
   return (
     <>
-      {isAdmin ? <section className="panel">
-        <div className="result-header"><span><Server size={17} />SSH 服务器</span>{isAdmin && <button className="primary-button settings-header-action" type="button" onClick={startAdd}><Plus size={15} />添加服务器</button>}</div>
+      <section className="panel">
+        <div className="result-header"><span><Server size={17} />SSH 服务器</span><button className="primary-button settings-header-action" type="button" onClick={startAdd}><Plus size={15} />添加服务器</button></div>
         <p className="muted" style={{ marginTop: 0 }}>
-          所有 SSH 工具均从这里选择服务器。密码和私钥均加密保存，且不会返回到浏览器。
+          所有 SSH 工具均从这里选择服务器。你添加的服务器仅自己可用；管理员可设置服务器的公开范围。密码和私钥均加密保存，且不会返回到浏览器。
         </p>
         <div className="compact-list">
           {servers.length === 0 && <span className="muted">尚无可用服务器，请在下方添加。</span>}
@@ -351,8 +351,8 @@ function SshServersTab({
             </div>
           ))}
         </div>
-      </section> : <section className="panel"><div className="admin-notice"><Shield size={14} />SSH 服务器由管理员统一维护；你只能在已授权的工具中选择和使用。</div></section>}
-      {isAdmin && formOpen && <div className="modal-backdrop settings-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setFormOpen(false); }}>
+      </section>
+      {formOpen && <div className="modal-backdrop settings-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setFormOpen(false); }}>
         <section className="modal-panel settings-server-modal" role="dialog" aria-modal="true" aria-label={editing ? '编辑 SSH 服务器' : '添加 SSH 服务器'}>
           <div className="settings-modal-head"><div><span className="eyebrow">Global SSH</span><h2>{editing ? '编辑服务器' : '添加服务器'}</h2><p>保存后可在已授权的工具中直接选择。</p></div><button className="chip settings-modal-close" type="button" aria-label="关闭弹窗" title="关闭" disabled={saving} onClick={() => setFormOpen(false)}><X size={16} /></button></div>
           <form className="monitor-form settings-server-form" onSubmit={(event) => void save(event)}>
@@ -376,7 +376,7 @@ function SshServersTab({
               <SettingField label="私钥口令"><input className="text-input" type="password" placeholder="如有；编辑时留空不修改" value={form.privateKeyPassphrase} onChange={(e) => setForm({ ...form, privateKeyPassphrase: e.target.value })} /></SettingField>
             </>
           )}
-          {isAdmin && (
+          {isAdmin && (!editing || editing.canShare) && (
             <div className="admin-notice settings-server-sharing">
               <label className="settings-public-toggle"><input type="checkbox" checked={form.isPublic} onChange={(e) => setForm({ ...form, isPublic: e.target.checked, allowedUserIds: e.target.checked ? form.allowedUserIds : [] })} /> 作为公开服务器提供给指定用户</label>
               {form.isPublic && <div className="settings-public-audience">

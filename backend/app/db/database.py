@@ -148,6 +148,10 @@ def init_database() -> None:
                 private_key_encrypted TEXT NOT NULL DEFAULT '',
                 private_key_passphrase_encrypted TEXT NOT NULL DEFAULT '',
                 owner_user_id TEXT NOT NULL,
+                -- Records created by an administrator may be shared with a
+                -- selected audience.  User-created records always remain
+                -- private, even if that user later changes role.
+                created_by_admin INTEGER NOT NULL DEFAULT 0,
                 is_public INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
@@ -167,12 +171,18 @@ def init_database() -> None:
         )
         _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
         _ensure_column(connection, "users", "disabled", "INTEGER NOT NULL DEFAULT 0")
+        # Prior to this field, only administrators could create SSH records,
+        # so existing records retain their established sharing behaviour.
+        if _ensure_column(connection, "platform_ssh_servers", "created_by_admin", "INTEGER NOT NULL DEFAULT 0"):
+            connection.execute("UPDATE platform_ssh_servers SET created_by_admin=1")
 
 
-def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> bool:
     columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        return True
+    return False
 
 
 def ensure_directory(path: Path) -> Path:

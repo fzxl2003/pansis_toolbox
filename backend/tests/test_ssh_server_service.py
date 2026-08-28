@@ -52,10 +52,14 @@ def test_admin_public_server_uses_explicit_audience_and_hides_credentials():
     assert ssh_server_service.list_servers(user("blocked")) == []
 
 
-def test_regular_user_cannot_configure_but_can_use_authorized_key_server():
-    database.init_database(); add_user("admin"); add_user("user")
-    with pytest.raises(ToolboxError, match="仅管理员"):
-        ssh_server_service.create_server(payload(isPublic=True), user("user"))
+def test_regular_user_can_create_only_private_server_and_use_authorized_key_server():
+    database.init_database(); add_user("admin"); add_user("user"); add_user("other")
+    private = ssh_server_service.create_server(payload(isPublic=True, allowedUserIds=["other"]), user("user"))
+    assert private["canManage"] is True
+    assert private["canShare"] is False
+    assert private["isPublic"] is False
+    assert ssh_server_service.list_servers(user("other")) == []
+    assert ssh_server_service.get_server_credentials(private["id"], user("user"))["ssh_password"] == "secret"
     saved = ssh_server_service.create_server(
         payload(authType="private_key", sshPassword="", privateKey="key", isPublic=True, allowedUserIds=["user"]),
         user("admin", "admin"),
@@ -63,6 +67,16 @@ def test_regular_user_cannot_configure_but_can_use_authorized_key_server():
     credentials = ssh_server_service.get_server_credentials(saved["id"], user("user"))
     assert credentials["auth_type"] == "private_key"
     assert credentials["private_key"] == "key"
+
+
+def test_regular_owner_can_edit_and_delete_own_private_server():
+    database.init_database(); add_user("owner")
+    saved = ssh_server_service.create_server(payload(), user("owner"))
+    updated = ssh_server_service.update_server(saved["id"], payload(name="gpu-b", isPublic=True), user("owner"))
+    assert updated["name"] == "gpu-b"
+    assert updated["isPublic"] is False
+    ssh_server_service.delete_server(saved["id"], user("owner"))
+    assert ssh_server_service.list_servers(user("owner")) == []
 
 
 def test_legacy_migration_preserves_id_owner_and_avoids_duplicate_names():
@@ -78,10 +92,21 @@ def test_legacy_migration_preserves_id_owner_and_avoids_duplicate_names():
 
 
 def test_shared_legacy_migration_preserves_existing_default_server_access():
-    database.init_database(); add_user("owner"); add_user("reader")
+    database.init_database(); add_user("admin"); add_user("reader")
     ssh_server_service.migrate_legacy_server(
-        server_id="old-default-id", owner=user("owner"), name="legacy-default", host="10.0.0.3", port=22,
+        server_id="old-default-id", owner=user("admin", "admin"), name="legacy-default", host="10.0.0.3", port=22,
         ssh_username="ubuntu", ssh_password="old-secret", source_tool="server_monitor",
-        is_public=True, allowed_user_ids=["owner", "reader"],
+        is_public=True, allowed_user_ids=["admin", "reader"],
     )
     assert ssh_server_service.get_server_credentials("old-default-id", user("reader"))["ssh_password"] == "old-secret"
+
+
+def test_legacy_user_server_remains_private_even_if_old_binding_was_shared():
+    database.init_database(); add_user("owner"); add_user("reader")
+    migrated = ssh_server_service.migrate_legacy_server(
+        server_id="old-user-id", owner=user("owner"), name="legacy-user", host="10.0.0.4", port=22,
+        ssh_username="ubuntu", ssh_password="old-secret", source_tool="server_monitor",
+        is_public=True, allowed_user_ids=["reader"],
+    )
+    assert migrated["isPublic"] is False
+    assert ssh_server_service.list_servers(user("reader")) == []

@@ -175,6 +175,7 @@ def test_tb_environment_is_optional_for_collection_but_must_be_complete_for_tb()
     assert _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "", "tbPythonPath": ""})
     assert _tb_environment_configured({"tbPythonMode": "conda", "tbCondaBasePath": "/opt/conda", "tbCondaEnv": "tb", "tbPythonPath": ""})
     assert _tb_environment_configured({"tbPythonMode": "path", "tbCondaBasePath": "", "tbCondaEnv": "", "tbPythonPath": "/venv/bin/python"})
+    assert _tb_environment_configured({"tb_python_mode": "conda", "tb_conda_base_path": "/opt/conda", "tb_conda_env": "tb", "tb_python_path": ""})
 
 
 def test_empty_conda_environment_activates_the_conda_base() -> None:

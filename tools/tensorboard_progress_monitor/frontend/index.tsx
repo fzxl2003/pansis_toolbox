@@ -1299,24 +1299,29 @@ function ServerModal({
                 />
               </Field>
               <Field label="TensorBoard Conda 环境">
-                <input
-                  className="tb-input"
-                  list="tpm-conda-environments"
+                <select
+                  className="tb-select"
                   value={form.tbCondaEnv}
+                  disabled={
+                    !condaPathSaved || condaLoading || Boolean(condaError)
+                  }
                   onChange={(event) =>
                     setForm({ ...form, tbCondaEnv: event.target.value })
                   }
-                  placeholder="例如：pansis_toolbox"
-                />
-                <datalist id="tpm-conda-environments">
+                >
+                  <option value="">
+                    {condaLoading
+                      ? "正在读取 Conda 环境…"
+                      : condaPathSaved
+                        ? "请选择 TensorBoard Conda 环境"
+                        : "请先保存 Anaconda 路径后再选择"}
+                  </option>
                   {condaEnvs.map((env) => (
                     <option key={env} value={env}>
+                      {env}
                     </option>
                   ))}
-                </datalist>
-                <small className="tpm-muted">
-                  可直接输入环境名称；留空则使用 Conda base 环境。保存过 Anaconda 路径后会自动提供远程环境候选项。
-                </small>
+                </select>
                 {condaError && (
                   <small className="tpm-warning">{condaError}</small>
                 )}

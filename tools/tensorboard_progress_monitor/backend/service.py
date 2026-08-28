@@ -412,8 +412,9 @@ def _tb_environment_configured(server: sqlite3.Row | dict[str, Any]) -> bool:
     mode = str(server["tb_python_mode"] if isinstance(server, sqlite3.Row) else server.get("tbPythonMode", "conda"))
     if mode == "conda":
         base = str(server["tb_conda_base_path"] if isinstance(server, sqlite3.Row) else server.get("tbCondaBasePath", "")).strip()
-        env = str(server["tb_conda_env"] if isinstance(server, sqlite3.Row) else server.get("tbCondaEnv", "")).strip()
-        return bool(base and env)
+        # TensorBoard may be installed in Conda's base environment.  An
+        # explicit environment is optional; when omitted we activate `base`.
+        return bool(base)
     path = str(server["tb_python_path"] if isinstance(server, sqlite3.Row) else server.get("tbPythonPath", "")).strip()
     return bool(path)
 
@@ -1256,8 +1257,7 @@ def _free_remote_port(server: sqlite3.Row) -> int:
 def _tb_command(server: sqlite3.Row, logdir: str, port: int, proxy_id: str) -> str:
     mode = server["tb_python_mode"]
     if mode == "conda":
-        conda_sh = shlex.quote(f"{server['tb_conda_base_path'].rstrip('/')}/etc/profile.d/conda.sh")
-        runner = f"source {conda_sh} && conda activate {shlex.quote(server['tb_conda_env'])} && exec python"
+        runner = _conda_python_runner(server) + " && exec python"
     else:
         runner = f"exec {shlex.quote(server['tb_python_path'])}"
     args = f"-m tensorboard.main --logdir {shlex.quote(logdir)} --port {port} --host 127.0.0.1 --path_prefix {shlex.quote('/tpm-tb/' + proxy_id)}"
@@ -1317,6 +1317,17 @@ def list_conda_envs(server_id: str, user: User) -> dict[str, Any]:
     except Exception: return {"envs": [], "error": "无法解析 conda 环境列表"}
 
 
+def _conda_python_runner(server: sqlite3.Row | dict[str, Any]) -> str:
+    """Return a shell prefix that activates the selected Conda environment.
+
+    Empty ``tb_conda_env`` intentionally means the Conda base environment.
+    """
+    base = str(server["tb_conda_base_path"]).strip()
+    environment = str(server["tb_conda_env"]).strip() or base
+    conda_sh = shlex.quote(f"{base.rstrip('/')}/etc/profile.d/conda.sh")
+    return f"source {conda_sh} && conda activate {shlex.quote(environment)}"
+
+
 def check_tb_environment(server_id: str, user: User) -> dict[str, Any]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn: server = _owned_server(conn, server_id, user.id)
@@ -1324,8 +1335,7 @@ def check_tb_environment(server_id: str, user: User) -> dict[str, Any]:
     except ToolboxError as exc: return {"ok": False, "error": exc.message}
     if not _tb_environment_configured(server): return {"ok": False, "error": "该服务器尚未配置完整的 TensorBoard Python 环境"}
     if server["tb_python_mode"] == "conda":
-        source = shlex.quote(f"{server['tb_conda_base_path'].rstrip('/')}/etc/profile.d/conda.sh")
-        command = f"source {source} && conda activate {shlex.quote(server['tb_conda_env'])} && python --version && python -c 'import tensorboard; print(tensorboard.__version__)'"
+        command = _conda_python_runner(server) + " && python --version && python -c 'import tensorboard; print(tensorboard.__version__)'"
     else: command = f"{shlex.quote(server['tb_python_path'])} --version && {shlex.quote(server['tb_python_path'])} -c 'import tensorboard; print(tensorboard.__version__)'"
     out, err, code = ssh_connection_service.exec_command(_ssh_spec(server, 20), f"bash -lc {shlex.quote(command)}", timeout=20)
     return {"ok": code == 0, "output": (out or err).strip()[:500], "error": "" if code == 0 else (err or out).strip()[:500]}

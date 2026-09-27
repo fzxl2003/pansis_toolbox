@@ -1302,6 +1302,14 @@
   gap: 7px;
 }
 
+.settings-proxy-form { display: grid; gap: 18px; }
+.settings-proxy-domains { display: grid; gap: 8px; padding: 14px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
+.settings-proxy-domains h3 { margin: 0 0 2px; color: #334155; font-size: 14px; }
+.settings-proxy-domain { display: flex; align-items: center; gap: 9px; min-height: 34px; color: #334155; font-size: 13px; cursor: pointer; }
+.settings-proxy-domain input { accent-color: #4f46e5; }.settings-proxy-domain span { display: grid; gap: 2px; }.settings-proxy-domain small { color: #64748b; font-size: 12px; }.settings-proxy-domain .chip { margin-left: auto; }
+.settings-proxy-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.settings-key-test-modal-form { display: grid; gap: 14px; padding: 18px 20px 20px; }
+
 .settings-page .user-row,
 .settings-page .storage-row {
   min-height: 58px;

@@ -8,6 +8,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 node_modules/
+tools/git_blog/assets/vendor/
 dist/
 frontend/dist/
 frontend/tsconfig.tsbuildinfo

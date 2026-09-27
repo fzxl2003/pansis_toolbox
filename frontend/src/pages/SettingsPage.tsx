@@ -30,7 +30,7 @@ import {
   updateUserRole,
   type AuthUser,
 } from '../api/auth';
-import { createSshServer, deleteSshServer, fetchEmailConfig, fetchSshServers, saveEmailConfig, testEmailConfig, testSshServer, updateSshServer, type EmailConfig, type EmailConfigPayload, type SshServer, type SshServerPayload, fetchAbout, type AboutInfo } from '../api/settings';
+import { createSshServer, deleteSshServer, fetchEmailConfig, fetchSshServers, saveEmailConfig, testEmailConfig, testSshServer, updateSshServer, type EmailConfig, type EmailConfigPayload, type SshServer, type SshServerPayload, fetchAbout, type AboutInfo, createGithubKey, deleteGithubKey, fetchGithubKeys, testGithubKey, fetchProxySettings, saveProxySettings, type GithubKey, type ProxySettings } from '../api/settings';
 import {
   fetchMyStorage,
   fetchStorageUsage,
@@ -54,7 +54,7 @@ import { LoginPanel } from '../components/LoginPanel';
 
 type ManagedUser = AuthUser & { disabled: boolean };
 
-type TabId = 'personal' | 'ssh' | 'users' | 'data' | 'access' | 'email' | 'about';
+type TabId = 'personal' | 'ssh' | 'githubKeys' | 'proxy' | 'users' | 'data' | 'access' | 'email' | 'about';
 
 const emptySshServer: SshServerPayload = {
   name: '', host: '', port: 22, sshUsername: '', authType: 'password', sshPassword: '',
@@ -63,6 +63,26 @@ const emptySshServer: SshServerPayload = {
 
 function SettingField({ label, required = false, className = '', children }: { label: string; required?: boolean; className?: string; children: ReactNode }) {
   return <label className={`settings-field ${className}`}><span>{label}{required && <em> *</em>}</span>{children}</label>;
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Non-secure origins and embedded browsers commonly reject this API.
+    }
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.setAttribute('readonly', '');
+  input.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('浏览器不允许访问剪贴板，请手动复制公开密钥。');
 }
 
 const emptyEmailConfigForm: EmailConfigPayload = {
@@ -97,7 +117,7 @@ export function SettingsPage() {
 
   // If non-admin tries to access an admin tab, redirect to personal.
   useEffect(() => {
-    if (me && !isAdmin && !['personal', 'ssh', 'about'].includes(activeTab)) {
+    if (me && !isAdmin && !['personal', 'ssh', 'githubKeys', 'about'].includes(activeTab)) {
       setActiveTab('personal');
     }
   }, [me, isAdmin, activeTab]);
@@ -128,6 +148,8 @@ export function SettingsPage() {
   const tabs: { id: TabId; label: string; icon: typeof Users; adminOnly: boolean }[] = [
     { id: 'personal', label: '个人', icon: KeyRound, adminOnly: false },
     { id: 'ssh', label: 'SSH 服务器', icon: Server, adminOnly: false },
+    { id: 'githubKeys', label: 'GitHub 密钥', icon: KeyRound, adminOnly: false },
+    { id: 'proxy', label: '代理设置', icon: Globe, adminOnly: true },
     { id: 'users', label: '用户管理', icon: Users, adminOnly: true },
     { id: 'data', label: '工具数据清理', icon: Database, adminOnly: true },
     { id: 'access', label: '工具可见性', icon: Eye, adminOnly: true },
@@ -173,6 +195,8 @@ export function SettingsPage() {
         {activeTab === 'ssh' && (
           <SshServersTab isAdmin={isAdmin} onError={handleError} onSuccess={showSuccess} />
         )}
+        {activeTab === 'githubKeys' && <GithubKeysTab onError={handleError} onSuccess={showSuccess} />}
+        {activeTab === 'proxy' && isAdmin && <ProxySettingsTab onError={handleError} onSuccess={showSuccess} />}
         {activeTab === 'users' && isAdmin && (
           <UserManagementTab me={me} onError={handleError} onSuccess={showSuccess} />
         )}
@@ -191,6 +215,38 @@ export function SettingsPage() {
       </div>
     </div>
   );
+}
+
+function GithubKeysTab({ onError, onSuccess }: { onError: (err: unknown, fallback: string) => void; onSuccess: (msg: string) => void }) {
+  const [keys, setKeys] = useState<GithubKey[]>([]);
+  const [name, setName] = useState('');
+  const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
+  const [testRepoUrl, setTestRepoUrl] = useState('');
+  const [testing, setTesting] = useState(false);
+  async function load() { try { setKeys((await fetchGithubKeys()).keys); } catch (err) { onError(err, '加载 GitHub 密钥失败'); } }
+  useEffect(() => { void load(); }, []);
+  async function create(event: FormEvent) { event.preventDefault(); try { const key = (await createGithubKey(name)).key; setName(''); await load(); onSuccess(`密钥「${key.name}」已创建。请复制公开密钥并添加到 GitHub 仓库 Deploy keys。`); } catch (err) { onError(err, '创建 GitHub 密钥失败'); } }
+  async function remove(key: GithubKey) { if (!window.confirm(`确认删除 GitHub 密钥「${key.name}」？已引用它的博客将无法继续拉取私有仓库。`)) return; try { await deleteGithubKey(key.id); await load(); onSuccess('GitHub 密钥已删除'); } catch (err) { onError(err, '删除 GitHub 密钥失败'); } }
+  async function copy(key: GithubKey) { try { await copyText(key.publicKey); onSuccess('公开密钥已复制'); } catch (err) { onError(err, '复制公开密钥失败'); } }
+  async function testKey(event: FormEvent) { event.preventDefault(); if (!testingKeyId) return; setTesting(true); try { const result = await testGithubKey(testingKeyId, testRepoUrl); onSuccess(`密钥读取权限验证成功：${result.repoUrl}（${result.branchCount} 个分支）`); setTestingKeyId(null); setTestRepoUrl(''); } catch (err) { onError(err, '密钥权限测试失败'); } finally { setTesting(false); } }
+  const testingKey = keys.find((key) => key.id === testingKeyId);
+  return <><section className="panel"><div className="result-header"><span><KeyRound size={17} />GitHub Deploy Keys</span></div><p className="muted">密钥仅属于当前用户，管理员无法查看或管理。创建后将公开密钥添加到 GitHub 仓库 Settings → Deploy keys，并授予只读权限。</p><form className="monitor-form user-form" onSubmit={(event) => void create(event)}><SettingField label="密钥名称" required><input className="text-input" placeholder="例如：我的博客仓库" value={name} onChange={(event) => setName(event.target.value)} /></SettingField><button className="primary-button" type="submit"><Plus size={15} />创建密钥</button></form><div className="compact-list">{keys.length === 0 && <span className="muted">尚未创建 GitHub 密钥。</span>}{keys.map((key) => <div className="user-row storage-row" key={key.id}><span><strong>{key.name}</strong><small style={{ wordBreak: 'break-all' }}>{key.publicKey}</small></span><div style={{ display: 'flex', gap: 6 }}><button className="chip" type="button" onClick={() => void copy(key)}>复制公开密钥</button><button className="chip" type="button" onClick={() => { setTestingKeyId(key.id); setTestRepoUrl(''); }}>测试权限</button><button className="chip" style={{ color: 'var(--danger)' }} type="button" onClick={() => void remove(key)}>删除</button></div></div>)}</div></section>{testingKey && <div className="modal-backdrop settings-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !testing) setTestingKeyId(null); }}><section className="modal-panel settings-server-modal settings-key-test-modal" role="dialog" aria-modal="true" aria-label="测试 GitHub Deploy Key 权限"><div className="settings-modal-head"><div><span className="eyebrow">GitHub Deploy Key</span><h2>测试读取权限</h2><p>使用「{testingKey.name}」访问目标仓库，不会写入任何内容。</p></div><button className="chip settings-modal-close" type="button" aria-label="关闭弹窗" disabled={testing} onClick={() => setTestingKeyId(null)}><X size={16} /></button></div><form className="settings-key-test-modal-form" onSubmit={(event) => void testKey(event)}><SettingField label="GitHub 仓库 HTTPS 地址" required><input className="text-input" required autoFocus placeholder="https://github.com/owner/repo" value={testRepoUrl} onChange={(event) => setTestRepoUrl(event.target.value)} /></SettingField><p className="muted">成功代表该 Deploy Key 已被此仓库接受，并具备只读拉取权限。</p><div className="responsive-actions settings-modal-actions"><button className="primary-button" disabled={testing} type="submit">{testing ? '正在验证…' : '验证只读权限'}</button><button className="chip" disabled={testing} type="button" onClick={() => setTestingKeyId(null)}>取消</button></div></form></section></div>}</>;
+}
+
+function ProxySettingsTab({ onError, onSuccess }: { onError: (err: unknown, fallback: string) => void; onSuccess: (msg: string) => void }) {
+  const [settings, setSettings] = useState<ProxySettings | null>(null);
+  const [customDomain, setCustomDomain] = useState('');
+  async function load() { try { setSettings(await fetchProxySettings()); } catch (err) { onError(err, '加载代理设置失败'); } }
+  useEffect(() => { void load(); }, []);
+  const selected = new Set(settings?.selectedDomains ?? []);
+  const suggested = settings?.suggestedDomains ?? [];
+  const customDomains = settings?.customDomains ?? [];
+  function toggleDomain(domain: string) { if (!settings) return; const next = new Set(settings.selectedDomains); next.has(domain) ? next.delete(domain) : next.add(domain); setSettings({ ...settings, selectedDomains: [...next].sort() }); }
+  function addDomain() { const domain = customDomain.trim().toLowerCase().replace(/\.$/, ''); if (!domain || !settings) return; if (!settings.customDomains.includes(domain)) setSettings({ ...settings, customDomains: [...settings.customDomains, domain].sort() }); setCustomDomain(''); }
+  function removeDomain(domain: string) { if (!settings) return; setSettings({ ...settings, customDomains: settings.customDomains.filter((item) => item !== domain), selectedDomains: settings.selectedDomains.filter((item) => item !== domain) }); }
+  async function save(event: FormEvent) { event.preventDefault(); if (!settings) return; try { const result = await saveProxySettings({ protocol: settings.protocol, host: settings.host, port: settings.port, selectedDomains: settings.selectedDomains, customDomains: settings.customDomains }); setSettings(result); onSuccess('全局代理设置已保存。已勾选域名的后续请求将通过代理访问。'); } catch (err) { onError(err, '保存代理设置失败'); } }
+  if (!settings) return <section className="panel"><p className="muted">正在加载代理设置…</p></section>;
+  return <section className="panel"><div className="result-header"><span><Globe size={17} />全局代理设置</span></div><p className="muted">仅管理员可配置。代理只会用于下方勾选的域名；未勾选域名保持直连。工具声明的域名会自动显示，管理员确认后才生效。</p><form className="settings-proxy-form" onSubmit={(event) => void save(event)}><div className="monitor-form user-form"><SettingField label="代理协议" required><select className="text-input" value={settings.protocol} onChange={(event) => setSettings({ ...settings, protocol: event.target.value as ProxySettings['protocol'] })}><option value="http">HTTP CONNECT</option><option value="https">HTTPS CONNECT</option><option value="socks5">SOCKS5</option><option value="socks5h">SOCKS5（代理解析域名）</option></select></SettingField><SettingField label="代理地址" required><input className="text-input" placeholder="127.0.0.1" value={settings.host} onChange={(event) => setSettings({ ...settings, host: event.target.value })} /></SettingField><SettingField label="代理端口" required><input className="text-input" type="number" min="1" max="65535" value={settings.port} onChange={(event) => setSettings({ ...settings, port: Number(event.target.value) })} /></SettingField></div><div className="settings-proxy-domains"><h3>工具建议域名</h3>{suggested.map((item) => <label className="settings-proxy-domain" key={item.domain}><input type="checkbox" checked={selected.has(item.domain)} onChange={() => toggleDomain(item.domain)} /><span><strong>{item.domain}</strong><small>{item.toolName} · {item.description}</small></span></label>)}</div><div className="settings-proxy-domains"><h3>自定义域名</h3><div className="settings-proxy-add"><input className="text-input" placeholder="例如：api.example.com" value={customDomain} onChange={(event) => setCustomDomain(event.target.value)} /><button className="secondary-button" type="button" onClick={addDomain}>添加域名</button></div>{customDomains.length === 0 ? <p className="muted">尚未添加自定义域名。</p> : customDomains.map((domain) => <label className="settings-proxy-domain" key={domain}><input type="checkbox" checked={selected.has(domain)} onChange={() => toggleDomain(domain)} /><strong>{domain}</strong><button type="button" className="chip" onClick={() => removeDomain(domain)}>移除</button></label>)}</div><button className="primary-button" type="submit"><Globe size={15} />保存全局代理设置</button></form></section>;
 }
 
 // ── Personal Tab ──────────────────────────────────────────────────────────

@@ -1,0 +1,11 @@
+:root { --blog-accent: #2563eb; --blog-width: 820px; --blog-font: system-ui, sans-serif; }
+body.git-blog-page { margin: 0; background: #f8fafc; color: #172033; font-family: var(--blog-font); }
+.blog-shell { max-width: var(--blog-width); margin: 0 auto; padding: 28px 20px 56px; }
+.blog-head { border-bottom: 1px solid #dbe3eb; margin-bottom: 28px; padding-bottom: 18px; }
+.blog-head a { color: inherit; text-decoration: none; }.blog-head h1 { margin: 0; font-size: 2rem; }.blog-head p { color: #64748b; margin: 8px 0 0; }
+.blog-nav { display:flex; flex-wrap:wrap; gap:12px; margin-top:14px; font-size:.92rem; }.blog-nav a, .blog-list a { color: var(--blog-accent); }
+.blog-list { list-style:none; padding:0; }.blog-list li { padding:17px 0; border-bottom:1px solid #e2e8f0; }.blog-list h2 { font-size:1.28rem; margin:0 0 6px; }.blog-meta { color:#64748b; font-size:.9rem; }.blog-summary { color:#475569; }
+.markdown-body { box-sizing:border-box; min-width:200px; max-width:100%; margin:0 auto; }.markdown-body img { max-width:100%; }.markdown-body pre { overflow:auto; padding:14px; border-radius:8px; }.markdown-body .mermaid { text-align:center; }
+.blog-pagination { display:flex; justify-content:space-between; margin-top:28px; }.blog-not-found { text-align:center; padding:72px 20px; }
+@media (prefers-color-scheme: dark) { body.git-blog-page.theme-auto { background:#0f172a; color:#e2e8f0; }.theme-auto .blog-head,.theme-auto .blog-list li { border-color:#334155; }.theme-auto .blog-head p,.theme-auto .blog-meta,.theme-auto .blog-summary { color:#94a3b8; } }
+body.git-blog-page.theme-dark { background:#0f172a; color:#e2e8f0; }.theme-dark .blog-head,.theme-dark .blog-list li { border-color:#334155; }.theme-dark .blog-head p,.theme-dark .blog-meta,.theme-dark .blog-summary { color:#94a3b8; }

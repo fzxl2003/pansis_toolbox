@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import html
+from datetime import datetime
+from urllib.parse import quote
+
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, Response
+
+from tools.git_blog.backend import service
+
+
+def _site(blog: dict) -> dict:
+    config = (blog.get("effectiveConfig") or blog["config"])["site"]
+    return {**config, "title": blog["name"], "description": config.get("description") or "GitHub Markdown 博客"}
+
+
+def _esc(value: object) -> str: return html.escape(str(value or ""), quote=True)
+
+
+def _url(request: Request, path: str) -> str:
+    return str(request.base_url).rstrip("/") + path
+
+
+def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False) -> HTMLResponse:
+    site = _site(blog); base = f"/blog/{quote(blog['slug'])}"; css = "/tool-assets/git_blog"
+    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css"><style>:root{{--blog-accent:{_esc(site.get('accentColor','#2563eb'))};--blog-width:{int(site.get('contentWidth',820))}px;--blog-font:{_esc(site.get('fontFamily','system-ui, sans-serif'))};}}</style></head>'''
+    nav=f'<header class="blog-head"><a href="{base}"><h1>{_esc(site["title"])}</h1></a><p>{_esc(site["description"])}</p><nav class="blog-nav"><a href="{base}">文章</a><a href="{base}/archive">归档</a><a href="{base}/feed.xml">RSS</a><a href="{base}/atom.xml">Atom</a></nav></header>'
+    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(site.get("theme","auto"))}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js"></script></body></html>', status_code=404 if not_found else 200)
+
+
+def _missing(request: Request, slug: str = "") -> HTMLResponse:
+    if slug and (blog := service.public_blog(slug)):
+        return _layout(request,blog,"页面不存在",'<section class="blog-not-found"><h2>404</h2><p>请求的内容不存在或尚未发布。</p></section>',not_found=True)
+    return HTMLResponse('<!doctype html><title>博客不存在</title><main style="font-family:system-ui;text-align:center;padding:5rem"><h1>404</h1><p>博客不存在或暂不可访问。</p></main>',status_code=404)
+
+
+def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False) -> HTMLResponse:
+    page=max(1,int(request.query_params.get("page","1") or 1)); query=request.query_params.get("q","").strip()[:100]
+    articles,total=service.public_articles(blog["id"],page=page,tag=tag,query=query)
+    base=f"/blog/{quote(blog['slug'])}"; items=[]
+    for article in articles:
+        tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in article["tags"])
+        items.append(f'<li><h2><a href="{base}/posts/{quote(article["slug"])}">{_esc(article["title"])}</a></h2><p class="blog-meta">{_esc(article["publishedAt"])} {tags}</p><p class="blog-summary">{_esc(article["summary"])}</p></li>')
+    title = f"标签：{tag}" if tag else ("归档" if archive else "文章")
+    search=f'<form action="{base}" method="get"><input name="q" value="{_esc(query)}" placeholder="搜索文章"><button>搜索</button></form>' if not archive else ""
+    tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in service.public_tags(blog["id"]))
+    prev=f'<a href="?page={page-1}">上一页</a>' if page>1 else ''
+    next_=f'<a href="?page={page+1}">下一页</a>' if page*50<total else ''
+    body=f'<h2>{_esc(title)}</h2>{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul><nav class="blog-pagination">{prev}{next_}</nav>'
+    return _layout(request,blog,title,body,description=_site(blog)["description"])
+
+
+def mount_extra(app: FastAPI) -> None:
+    @app.get("/blog", include_in_schema=False)
+    def blog_about() -> HTMLResponse:
+        return HTMLResponse('<!doctype html><title>Git 博客</title><main style="font-family:system-ui;max-width:720px;margin:4rem auto;padding:0 1rem"><h1>Git 博客</h1><p>这是由 Pansis Toolbox 托管的 Markdown 博客服务。</p></main>')
+
+    @app.get("/blog/{blog_slug}", include_in_schema=False)
+    def blog_home(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        response = _list(request,blog); service.record_access(blog,request,status_code=response.status_code)
+        return response
+
+    @app.get("/blog/{blog_slug}/archive", include_in_schema=False)
+    def archive(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        response = _list(request,blog,archive=True); service.record_access(blog,request,status_code=response.status_code)
+        return response
+
+    @app.get("/blog/{blog_slug}/tags/{tag}", include_in_schema=False)
+    def tag(request: Request, blog_slug: str, tag: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        response = _list(request,blog,tag=tag); service.record_access(blog,request,status_code=response.status_code)
+        return response
+
+    @app.get("/blog/{blog_slug}/posts/{article_slug:path}", include_in_schema=False)
+    def article(request: Request, blog_slug: str, article_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        item=service.public_article(blog["id"],article_slug)
+        if not item:
+            response = _missing(request,blog_slug); service.record_access(blog,request,status_code=404,article_slug=article_slug)
+            return response
+        response = _layout(request,blog,item["title"],f'<article class="markdown-body">{item["html"]}</article>',description=item["summary"])
+        service.record_access(blog,request,status_code=response.status_code,article_slug=article_slug)
+        return response
+
+    @app.get("/blog/{blog_slug}/assets/{asset_path:path}", include_in_schema=False)
+    def asset(request: Request, blog_slug: str, asset_path: str):
+        blog=service.public_blog(blog_slug)
+        path=service.public_asset(blog,asset_path) if blog else None
+        response = FileResponse(path) if path else Response(status_code=404)
+        if blog: service.record_access(blog,request,status_code=response.status_code)
+        return response
+
+    @app.get("/blog/{blog_slug}/feed.xml", include_in_schema=False)
+    def rss(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        articles,_=service.public_articles(blog["id"]); base=f"/blog/{quote(blog_slug)}"; site=_site(blog)
+        entries=''.join(f'<item><title>{_esc(a["title"])}</title><link>{_esc(_url(request,base+"/posts/"+quote(a["slug"])))}</link><description>{_esc(a["summary"])}</description><pubDate>{_esc(a["publishedAt"])}</pubDate></item>' for a in articles)
+        return Response(f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>{_esc(site["title"])}</title><link>{_esc(_url(request,base))}</link><description>{_esc(site["description"])}</description>{entries}</channel></rss>',media_type="application/rss+xml")
+
+    @app.get("/blog/{blog_slug}/atom.xml", include_in_schema=False)
+    def atom(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        articles,_=service.public_articles(blog["id"]); base=f"/blog/{quote(blog_slug)}"; site=_site(blog)
+        entries=''.join(f'<entry><title>{_esc(a["title"])}</title><id>{_esc(_url(request,base+"/posts/"+quote(a["slug"])))}</id><link href="{_esc(_url(request,base+"/posts/"+quote(a["slug"]))) }"/><updated>{_esc(a["updatedAt"])}</updated><summary>{_esc(a["summary"])}</summary></entry>' for a in articles)
+        return Response(f'<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>{_esc(site["title"])}</title><id>{_esc(_url(request,base))}</id><updated>{_esc(blog.get("updated_at") or blog["created_at"])}</updated>{entries}</feed>',media_type="application/atom+xml")
+
+    @app.get("/blog/{blog_slug}/sitemap.xml", include_in_schema=False)
+    def sitemap(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        items,_=service.public_articles(blog["id"]); base=f"/blog/{quote(blog_slug)}"
+        urls=[_url(request,base),*[_url(request,base+"/posts/"+quote(a["slug"])) for a in items]]
+        return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+''.join(f'<url><loc>{_esc(u)}</loc></url>' for u in urls)+'</urlset>',media_type="application/xml")

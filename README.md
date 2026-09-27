@@ -27,6 +27,7 @@ storage/          本地数据库、上传文件和用户工具数据
 | `text_cleaner`       | 文本清洗           | `text`    | `/api/tools/text-cleaner`       | 无                             |
 | `url_navigator`      | 网址导航           | `network` | `/api/tools/url-navigator`      | 无                             |
 | `web_proxy`          | 网页代理           | `network` | `/web-proxy`                    | 内置 Rammerhead Node sidecar   |
+| `git_blog`           | Git 博客           | `text`    | `/api/tools/git-blog`           | Git、Node Markdown renderer    |
 
 ## 本地环境配置
 

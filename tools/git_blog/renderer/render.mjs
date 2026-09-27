@@ -18,6 +18,16 @@ function resolveHref(href, sourcePath, sourceMap, blogSlug, image = false) {
   return href;
 }
 
+// remark-math recognises $ and $$ delimiters, while many LaTex-oriented
+// Markdown repositories use the equivalent display delimiters \[ and \].
+// Convert delimiter-only lines before parsing, leaving ordinary backslashes
+// (and inline text) untouched.
+function normalizeMathSyntax(markdown) {
+  return markdown
+    .replace(/(^|\n)[\t ]*\\\[[\t ]*(?=\n|$)/g, (_, prefix) => `${prefix}$$`)
+    .replace(/(^|\n)[\t ]*\\\][\t ]*(?=\n|$)/g, (_, prefix) => `${prefix}$$`);
+}
+
 function app(input) {
   const components = {
     a: ({node, href, children, ...props}) => React.createElement('a', {...props, href: resolveHref(href, input.sourcePath, input.sourceMap, input.blogSlug)}, children),
@@ -27,7 +37,7 @@ function app(input) {
       return React.createElement('code', {className, ...props}, children);
     },
   };
-  return React.createElement(Markdown, {remarkPlugins:[remarkGfm,remarkMath], rehypePlugins:[rehypeRaw,rehypeKatex,rehypeHighlight,rehypeSlug], components}, input.markdown);
+  return React.createElement(Markdown, {remarkPlugins:[remarkGfm,remarkMath], rehypePlugins:[rehypeRaw,rehypeKatex,rehypeHighlight,rehypeSlug], components}, normalizeMathSyntax(input.markdown));
 }
 try {
   const input = JSON.parse(await new Promise((resolve, reject) => { let text=''; process.stdin.setEncoding('utf8'); process.stdin.on('data', x => text += x); process.stdin.on('end', () => resolve(text)); process.stdin.on('error', reject); }));

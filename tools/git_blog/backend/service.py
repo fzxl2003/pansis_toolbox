@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -31,6 +32,7 @@ TOOL_ID = "git_blog"
 MAX_BLOGS_PER_USER = 10
 MIN_SYNC_MINUTES, MAX_SYNC_MINUTES = 5, 1440
 MAX_FILES, MAX_MARKDOWN_BYTES, MAX_ASSET_BYTES = 10_000, 2 * 1024 * 1024, 25 * 1024 * 1024
+MAX_TEMPLATE_FILES, MAX_TEMPLATE_BYTES = 200, 10 * 1024 * 1024
 SYNC_TIMEOUT = 300
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 GITHUB_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
@@ -152,7 +154,7 @@ def _validate_branch(value: str) -> str:
 
 
 def _defaults() -> dict[str, Any]:
-    return {"site": {"description": "", "author": "", "language": "zh-CN", "theme": "auto", "accentColor": "#2563eb", "contentWidth": 820, "fontFamily": "system-ui, sans-serif", "postsPerPage": 10}, "defaults": {"published": False, "author": "", "cover": ""}, "logs": {"accessEnabled": True, "recordIp": False, "recordUserAgent": True, "recordReferrer": True, "retentionDays": 30}}
+    return {"site": {"description": "", "author": "", "language": "zh-CN", "theme": "auto", "accentColor": "#2563eb", "contentWidth": 820, "fontFamily": "system-ui, sans-serif", "postsPerPage": 10, "customTemplate": False}, "defaults": {"published": False, "author": "", "cover": ""}, "logs": {"accessEnabled": True, "recordIp": False, "recordUserAgent": True, "recordReferrer": True, "retentionDays": 30}}
 
 
 def _normalise_config(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -382,7 +384,12 @@ def _article_slug(source: str, declared: Any) -> str:
     return path.as_posix()
 
 
-def _plain(text: str) -> str: return re.sub(r"\s+", " ", re.sub(r"[`*_#>\[\]()]", "", text)).strip()
+def _plain(text: str) -> str:
+    text = re.sub(r"```.*?```|\$\$.*?\$\$", " ", text, flags=re.S)
+    text = re.sub(r"\$[^$\n]+\$|<[^>]+>|https?://\S+", " ", text)
+    paragraphs = [re.sub(r"\s+", " ", re.sub(r"[`*_>#]", "", part)).strip() for part in re.split(r"\n\s*\n", text) if not re.match(r"^\s*#", part)]
+    paragraphs = [part for part in paragraphs if len(part) >= 40]
+    return max(paragraphs, key=len, default="")[:180]
 
 
 def _render(markdown: str, *, source: str, source_map: dict[str,str], blog_slug: str) -> str:
@@ -462,7 +469,7 @@ def sync_blog(blog_id: str) -> None:
             if not published: continue
             heading=re.search(r"^#\s+(.+?)\s*$",body,re.MULTILINE)
             title=str(meta.get("title") or (heading.group(1) if heading else path.stem)).strip()
-            slug=_article_slug(source,meta.get("slug")); summary=str(meta.get("summary") or _plain(body).split(". ",1)[0][:240]).strip()
+            slug=_article_slug(source,meta.get("slug")); summary=str(meta.get("summary") or _plain(body)).strip()[:180]
             tags=meta.get("tags",[]); tags=[str(x).strip() for x in (tags if isinstance(tags,list) else [tags]) if str(x).strip()]
             articles.append({"source":source,"slug":slug,"title":title,"summary":summary,"author":str(meta.get("author") or defaults.get("author") or effective["site"].get("author") or ""),"date":str(meta.get("date") or stamp),"updated":str(meta.get("updated") or meta.get("date") or stamp),"tags":tags,"cover":str(meta.get("cover") or defaults.get("cover") or ""),"body":body})
         source_map={item["source"]:item["slug"] for item in articles}
@@ -500,10 +507,11 @@ def public_blog(slug: str) -> dict[str,Any] | None:
     return _row(row) if owner and can_access_tool(TOOL_ID,owner) else None
 
 
-def public_articles(blog_id:str, *, page:int=1, tag:str="", query:str="") -> tuple[list[dict[str,Any]],int]:
+def public_articles(blog_id:str, *, page:int=1, tag:str="", query:str="", path_prefix:str="") -> tuple[list[dict[str,Any]],int]:
     where=["blog_id=?"]; args:list[Any]=[blog_id]
     if tag: where.append("tags_json LIKE ?"); args.append(f'%"{tag}"%')
     if query: where.append("(title LIKE ? OR summary LIKE ? OR plain_text LIKE ?)"); args.extend([f"%{query}%"]*3)
+    if path_prefix: where.append("source_path LIKE ?"); args.append(f"{path_prefix.rstrip('/')}%")
     clause=" AND ".join(where)
     with _conn() as conn:
         total=conn.execute(f"SELECT COUNT(*) FROM git_blog_articles WHERE {clause}",args).fetchone()[0]
@@ -523,6 +531,61 @@ def public_article(blog_id:str, slug:str)->dict[str,Any]|None:
 def public_tags(blog_id:str)->list[str]:
     with _conn() as conn: rows=conn.execute("SELECT tags_json FROM git_blog_articles WHERE blog_id=?",(blog_id,)).fetchall()
     return sorted({tag for row in rows for tag in json.loads(row["tags_json"])},key=str.lower)
+
+
+def public_tag_counts(blog_id: str) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    with _conn() as conn: rows = conn.execute("SELECT tags_json FROM git_blog_articles WHERE blog_id=?", (blog_id,)).fetchall()
+    for row in rows:
+        for tag in json.loads(row["tags_json"]): counts[tag] = counts.get(tag, 0) + 1
+    return [{"tag": tag, "count": counts[tag]} for tag in sorted(counts, key=str.lower)]
+
+
+def public_directory(blog_id: str) -> dict[str, Any]:
+    root: dict[str, Any] = {"name": "", "children": {}, "article": None}
+    with _conn() as conn: rows = conn.execute("SELECT source_path,slug,title FROM git_blog_articles WHERE blog_id=? ORDER BY source_path", (blog_id,)).fetchall()
+    for row in rows:
+        node = root
+        parts = PurePosixPath(row["source_path"]).with_suffix("").parts
+        for part in parts:
+            node = node["children"].setdefault(part, {"name": part, "children": {}, "article": None})
+        node["article"] = {"slug": row["slug"], "title": row["title"]}
+    def serialise(node: dict[str, Any]) -> dict[str, Any]:
+        return {"name": node["name"], "article": node["article"], "children": [serialise(child) for _, child in sorted(node["children"].items(), key=lambda pair: pair[0].lower())]}
+    return serialise(root)
+
+
+def template_dir(blog_id: str) -> Path: return _root() / "templates" / blog_id
+
+
+def save_template(blog_id: str, archive: Any, user: User) -> None:
+    blog = _owner_blog(blog_id, user)
+    raw = archive.file.read(MAX_TEMPLATE_BYTES + 1)
+    if len(raw) > MAX_TEMPLATE_BYTES: raise ToolboxError("TEMPLATE_TOO_LARGE", "模板包超过 10 MiB", status_code=400)
+    try: bundle = zipfile.ZipFile(__import__("io").BytesIO(raw))
+    except zipfile.BadZipFile as exc: raise ToolboxError("INVALID_TEMPLATE", "模板必须是 ZIP 文件", status_code=400) from exc
+    entries = [entry for entry in bundle.infolist() if not entry.is_dir()]
+    if len(entries) > MAX_TEMPLATE_FILES: raise ToolboxError("TEMPLATE_TOO_MANY_FILES", "模板文件数量超过限制", status_code=400)
+    allowed = {".css", ".woff", ".woff2", ".ttf", ".otf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+    if not any(PurePosixPath(entry.filename).suffix.lower() == ".css" for entry in entries): raise ToolboxError("INVALID_TEMPLATE", "模板包必须包含 CSS 文件", status_code=400)
+    target = template_dir(blog_id); temporary = Path(tempfile.mkdtemp(prefix="git-blog-template-", dir=_root()))
+    try:
+        for entry in entries:
+            path = PurePosixPath(entry.filename)
+            if path.is_absolute() or ".." in path.parts or path.suffix.lower() not in allowed: raise ToolboxError("INVALID_TEMPLATE", "模板包含不支持或不安全的文件", status_code=400)
+            output = temporary / path.as_posix(); output.parent.mkdir(parents=True, exist_ok=True)
+            with bundle.open(entry) as source, output.open("wb") as destination: shutil.copyfileobj(source, destination)
+        shutil.rmtree(target, ignore_errors=True); target.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(temporary), str(target))
+        config = _normalise_config(json.loads(blog["config_json"])); config["site"]["customTemplate"] = True
+        with _conn() as conn: conn.execute("UPDATE git_blog_blogs SET config_json=?,updated_at=? WHERE id=?", (json.dumps(config, ensure_ascii=False), _now(), blog_id)); conn.commit()
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True); raise
+
+
+def delete_template(blog_id: str, user: User) -> None:
+    blog = _owner_blog(blog_id, user); shutil.rmtree(template_dir(blog_id), ignore_errors=True)
+    config = _normalise_config(json.loads(blog["config_json"])); config["site"]["customTemplate"] = False
+    with _conn() as conn: conn.execute("UPDATE git_blog_blogs SET config_json=?,updated_at=? WHERE id=?", (json.dumps(config, ensure_ascii=False), _now(), blog_id)); conn.commit()
 
 
 def public_asset(blog:dict[str,Any], path:str)->Path|None:

@@ -11,7 +11,7 @@ from tools.git_blog.backend import service
 
 
 def _site(blog: dict) -> dict:
-    config = (blog.get("effectiveConfig") or blog["config"])["site"]
+    config = {**(blog.get("effectiveConfig") or blog["config"])["site"], "customTemplate": blog["config"]["site"].get("customTemplate", False)}
     return {**config, "title": blog["name"], "description": config.get("description") or "GitHub Markdown 博客"}
 
 
@@ -24,8 +24,10 @@ def _url(request: Request, path: str) -> str:
 
 def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False) -> HTMLResponse:
     site = _site(blog); base = f"/blog/{quote(blog['slug'])}"; css = "/tool-assets/git_blog"
-    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css"><style>:root{{--blog-accent:{_esc(site.get('accentColor','#2563eb'))};--blog-width:{int(site.get('contentWidth',820))}px;--blog-font:{_esc(site.get('fontFamily','system-ui, sans-serif'))};}}</style></head>'''
-    nav=f'<header class="blog-head"><a href="{base}"><h1>{_esc(site["title"])}</h1></a><p>{_esc(site["description"])}</p><nav class="blog-nav"><a href="{base}">文章</a><a href="{base}/archive">归档</a><a href="{base}/feed.xml">RSS</a><a href="{base}/atom.xml">Atom</a></nav></header>'
+    custom = f'<link rel="stylesheet" href="{base}/theme/style.css">' if site.get("customTemplate") else ""
+    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css">{custom}<style>:root{{--blog-accent:{_esc(site.get('accentColor','#2563eb'))};--blog-width:{int(site.get('contentWidth',820))}px;--blog-font:{_esc(site.get('fontFamily','system-ui, sans-serif'))};}}</style></head>'''
+    icons=f'<a class="blog-icon" title="RSS" href="{base}/feed.xml">◔</a><a class="blog-icon" title="Atom" href="{base}/atom.xml">◉</a>'
+    nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span></header>'
     return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(site.get("theme","auto"))}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js"></script></body></html>', status_code=404 if not_found else 200)
 
 
@@ -41,14 +43,32 @@ def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False)
     base=f"/blog/{quote(blog['slug'])}"; items=[]
     for article in articles:
         tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in article["tags"])
-        items.append(f'<li><h2><a href="{base}/posts/{quote(article["slug"])}">{_esc(article["title"])}</a></h2><p class="blog-meta">{_esc(article["publishedAt"])} {tags}</p><p class="blog-summary">{_esc(article["summary"])}</p></li>')
-    title = f"标签：{tag}" if tag else ("归档" if archive else "文章")
-    search=f'<form action="{base}" method="get"><input name="q" value="{_esc(query)}" placeholder="搜索文章"><button>搜索</button></form>' if not archive else ""
-    tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in service.public_tags(blog["id"]))
+        cover = article["coverPath"]
+        if cover and not cover.startswith(("http://", "https://")): cover = f'{base}/assets/{quote(cover.lstrip("/"))}'
+        image = f'<img class="blog-cover" src="{_esc(cover)}" alt="">' if cover else ""
+        items.append(f'<li class="blog-card"><div><h2><a href="{base}/posts/{quote(article["slug"])}">{_esc(article["title"])}</a></h2><p class="blog-meta">{_esc(article["publishedAt"])} {tags}</p><p class="blog-summary">{_esc(article["summary"])}</p></div>{image}</li>')
+    title = f"标签：{tag}" if tag else ("归档" if archive else "")
+    search=f'<form class="blog-search" action="{base}" method="get"><input name="q" value="{_esc(query)}" placeholder="搜索文章"><button>搜索</button></form>' if not archive else ""
+    tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in service.public_tags(blog["id"])) if tag else ''
     prev=f'<a href="?page={page-1}">上一页</a>' if page>1 else ''
     next_=f'<a href="?page={page+1}">下一页</a>' if page*50<total else ''
-    body=f'<h2>{_esc(title)}</h2>{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul><nav class="blog-pagination">{prev}{next_}</nav>'
+    heading=f'<h2>{_esc(title)}</h2>' if title else ''
+    body=f'{heading}{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul><nav class="blog-pagination">{prev}{next_}</nav>'
     return _layout(request,blog,title,body,description=_site(blog)["description"])
+
+
+def _directory_body(blog: dict, selected: str = "") -> str:
+    base = f'/blog/{quote(blog["slug"])}'
+    def node(item: dict, parent: str = "") -> str:
+        path = f'{parent}/{item["name"]}'.strip('/')
+        children = ''.join(node(child, path) for child in item["children"] if child["children"])
+        if not item["children"]:
+            return ""
+        link = f'<a href="{base}/directory?path={quote(path)}">{_esc(item["name"])}</a>'
+        return f'<li><details open><summary>{link}</summary><ul>{children}</ul></details></li>' if children else f'<li class="blog-folder-leaf">{link}</li>'
+    articles,_ = service.public_articles(blog["id"], path_prefix=selected)
+    cards=''.join(f'<li class="blog-card"><div><h2><a href="{base}/posts/{quote(a["slug"])}">{_esc(a["title"])}</a></h2><p class="blog-summary">{_esc(a["summary"])}</p></div></li>' for a in articles)
+    return f'<section class="blog-directory-layout"><aside class="blog-directory"><h2>目录</h2><ul>{"".join(node(item) for item in service.public_directory(blog["id"])["children"])}</ul></aside><section><h2>{_esc(selected or "全部文档")}</h2><ul class="blog-list">{cards or "<li>暂无文档。</li>"}</ul></section></section>'
 
 
 def mount_extra(app: FastAPI) -> None:
@@ -61,6 +81,23 @@ def mount_extra(app: FastAPI) -> None:
         blog=service.public_blog(blog_slug)
         if not blog: return _missing(request)
         response = _list(request,blog); service.record_access(blog,request,status_code=response.status_code)
+        return response
+
+    @app.get("/blog/{blog_slug}/directory", include_in_schema=False)
+    def directory(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        selected=request.query_params.get("path", "").strip().strip("/")
+        response = _layout(request, blog, "目录", _directory_body(blog, selected)); service.record_access(blog, request, status_code=response.status_code)
+        return response
+
+    @app.get("/blog/{blog_slug}/tags", include_in_schema=False)
+    def tags(request: Request, blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        if not blog: return _missing(request)
+        base=f'/blog/{quote(blog_slug)}'; tags = service.public_tag_counts(blog["id"])
+        body='<section class="blog-tags"><h2>标签</h2><div>'+''.join(f'<a href="{base}/tags/{quote(item["tag"])}">#{_esc(item["tag"])} <small>{item["count"]}</small></a>' for item in tags)+'</div></section>'
+        response = _layout(request, blog, "标签", body); service.record_access(blog, request, status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/archive", include_in_schema=False)
@@ -96,6 +133,13 @@ def mount_extra(app: FastAPI) -> None:
         response = FileResponse(path) if path else Response(status_code=404)
         if blog: service.record_access(blog,request,status_code=response.status_code)
         return response
+
+    @app.get("/blog/{blog_slug}/theme/{asset_path:path}", include_in_schema=False)
+    def theme_asset(blog_slug: str, asset_path: str):
+        blog=service.public_blog(blog_slug)
+        if not blog or not _site(blog).get("customTemplate"): return Response(status_code=404)
+        path=(service.template_dir(blog["id"]) / asset_path).resolve(); root=service.template_dir(blog["id"]).resolve()
+        return FileResponse(path) if path.is_file() and root in path.parents else Response(status_code=404)
 
     @app.get("/blog/{blog_slug}/feed.xml", include_in_schema=False)
     def rss(request: Request, blog_slug: str):

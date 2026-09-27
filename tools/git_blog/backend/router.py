@@ -1,5 +1,5 @@
 from typing import Any
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request, Response, UploadFile, File
 from pydantic import BaseModel, Field
 from backend.app.core.security import require_user
 from tools.git_blog.backend import public, service
@@ -28,6 +28,12 @@ def sync(request:Request,blog_id:str)->dict[str,str]: service.request_sync(blog_
 def runs(request:Request,blog_id:str)->dict[str,Any]: return {"runs":service.list_runs(blog_id,require_user(request))}
 @router.get("/blogs/{blog_id}/access-logs")
 def access_logs(request:Request,blog_id:str)->dict[str,Any]: return {"logs":service.list_access_logs(blog_id,require_user(request))}
+@router.post("/blogs/{blog_id}/template")
+def upload_template(request: Request, blog_id: str, archive: UploadFile = File(...))->dict[str,bool]:
+    service.save_template(blog_id, archive, require_user(request)); return {"uploaded": True}
+@router.delete("/blogs/{blog_id}/template")
+def remove_template(request: Request, blog_id: str)->dict[str,bool]:
+    service.delete_template(blog_id, require_user(request)); return {"deleted": True}
 @router.post("/repository/probe")
 def probe(request:Request,payload:ProbePayload)->dict[str,Any]:
     user=require_user(request)

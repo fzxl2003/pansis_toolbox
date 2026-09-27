@@ -70,3 +70,15 @@ def test_article_slug_rejects_path_traversal() -> None:
     assert service._article_slug("nested/post.md", None) == "nested/post"
     with pytest.raises(ToolboxError):
         service._article_slug("post.md", "../secret")
+
+
+def test_public_directory_and_tag_counts_use_only_indexed_articles(isolated_storage, owner: User) -> None:
+    blog = service.create_blog({"slug": "docs", "repoUrl": "https://github.com/acme/docs"}, owner)
+    with service._conn() as conn:
+        conn.executemany(
+            "INSERT INTO git_blog_articles(blog_id,slug,source_path,title,summary,author,published_at,updated_at,tags_json,html,plain_text) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [(blog["id"], "guide/install", "guide/install.md", "Install", "", "", "2026-01-02", "", '["guide", "setup"]', "", ""), (blog["id"], "readme", "README.md", "Readme", "", "", "2026-01-01", "", '["guide"]', "", "")],
+        )
+    directory = service.public_directory(blog["id"])
+    assert [item["name"] for item in directory["children"]] == ["guide", "README"]
+    assert service.public_tag_counts(blog["id"]) == [{"tag": "guide", "count": 2}, {"tag": "setup", "count": 1}]

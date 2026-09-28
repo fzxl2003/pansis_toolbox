@@ -9,7 +9,7 @@ mount_extra=public.mount_extra
 
 class BlogPayload(BaseModel):
     name:str=""; slug:str; repoUrl:str; branch:str="main"; contentRoot:str=""; syncIntervalMinutes:int=15
-    config:dict[str,Any]=Field(default_factory=dict); githubKeyId:str=""; enabled:bool=True
+    config:dict[str,Any]=Field(default_factory=dict); githubKeyId:str=""; enabled:bool=True; autoSyncEnabled:bool=True
 class ProbePayload(BaseModel): repoUrl:str; githubKeyId:str=""
 
 @router.get("/blogs")
@@ -24,6 +24,10 @@ def update(request:Request,blog_id:str,payload:BlogPayload)->dict[str,Any]: retu
 def delete(request:Request,blog_id:str)->dict[str,bool]: service.delete_blog(blog_id,require_user(request)); return {"deleted":True}
 @router.post("/blogs/{blog_id}/sync",status_code=202)
 def sync(request:Request,blog_id:str)->dict[str,str]: service.request_sync(blog_id,require_user(request)); return {"status":"queued"}
+@router.get("/blogs/{blog_id}/snapshots")
+def snapshots(request:Request,blog_id:str)->dict[str,Any]: return {"snapshots":service.list_snapshots(blog_id,require_user(request))}
+@router.post("/blogs/{blog_id}/snapshots/{commit}/rollback")
+def rollback(request:Request,blog_id:str,commit:str)->dict[str,Any]: return {"blog":service.rollback_snapshot(blog_id,commit,require_user(request))}
 @router.get("/blogs/{blog_id}/runs")
 def runs(request:Request,blog_id:str)->dict[str,Any]: return {"runs":service.list_runs(blog_id,require_user(request))}
 @router.get("/blogs/{blog_id}/access-logs")

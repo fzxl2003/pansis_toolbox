@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import subprocess
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -99,8 +102,11 @@ def test_sync_run_stores_the_complete_error(monkeypatch: pytest.MonkeyPatch, iso
 def test_sync_skips_clone_when_remote_commit_is_current(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
     blog = service.create_blog({"slug": "current", "repoUrl": "https://github.com/acme/docs"}, owner)
     commit = "a" * 40
+    service._snapshot_dir(blog["id"], commit).mkdir(parents=True)
     with service._conn() as conn:
         conn.execute("UPDATE git_blog_blogs SET current_commit=? WHERE id=?", (commit, blog["id"]))
+        row = conn.execute("SELECT * FROM git_blog_blogs WHERE id=?", (blog["id"],)).fetchone()
+        conn.execute("UPDATE git_blog_blogs SET render_fingerprint=? WHERE id=?", (service._render_fingerprint(row), blog["id"]))
         conn.commit()
     calls: list[list[str]] = []
 
@@ -127,6 +133,8 @@ def test_sync_clones_when_remote_commit_changed(monkeypatch: pytest.MonkeyPatch,
         conn.execute("UPDATE git_blog_blogs SET current_commit=? WHERE id=?", (old_commit, blog["id"]))
         conn.commit()
     calls: list[list[str]] = []
+    stages: list[str] = []
+    set_status = service._set_sync_status
 
     def fake_git(args, **kwargs):
         calls.append(args)
@@ -142,12 +150,99 @@ def test_sync_clones_when_remote_commit_changed(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(service, "_git", fake_git)
     monkeypatch.setattr(service.proxy_service, "get_proxy_url_for_host", lambda host: "")
     monkeypatch.setattr(service, "_prepare_snapshot", lambda blog_row, target: (service._normalise_config(None), [], []))
+    monkeypatch.setattr(service, "_set_sync_status", lambda blog_id, status: (stages.append(status), set_status(blog_id, status))[1])
 
     service.sync_blog(blog["id"])
 
     assert [args[0] for args in calls] == ["ls-remote", "clone", "rev-parse"]
+    assert stages == ["syncing_cloning", "syncing_rendering", "syncing_publishing"]
     assert service.get_blog(blog["id"], owner)["currentCommit"] == new_commit
-    assert service.list_runs(blog["id"], owner)[0]["message"] == "同步 0 篇文章"
+    assert service.list_runs(blog["id"], owner)[0]["message"] == "远端发现新提交，已同步 0 篇文章"
+
+
+def test_config_change_rebuilds_current_snapshot_without_clone_when_auto_sync_is_off(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    blog = service.create_blog(
+        {"slug": "local-rebuild", "repoUrl": "https://github.com/acme/docs", "autoSyncEnabled": False},
+        owner,
+    )
+    commit = "c" * 40
+    service._snapshot_dir(blog["id"], commit).mkdir(parents=True)
+    with service._conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET current_commit=?,sync_status='success' WHERE id=?", (commit, blog["id"]))
+        row = conn.execute("SELECT * FROM git_blog_blogs WHERE id=?", (blog["id"],)).fetchone()
+        conn.execute("UPDATE git_blog_blogs SET render_fingerprint=? WHERE id=?", (service._render_fingerprint(row), blog["id"]))
+        conn.commit()
+
+    updated = service.update_blog(
+        blog["id"],
+        {"config": {"defaults": {"published": True}}},
+        owner,
+    )
+    assert updated["syncStatus"] == "queued"
+    assert updated["autoSyncEnabled"] is False
+
+    calls: list[list[str]] = []
+    stages: list[str] = []
+    set_status = service._set_sync_status
+    def fake_git(args, **kwargs):
+        calls.append(args)
+        return f"{commit}\trefs/heads/main\n"
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(service.proxy_service, "get_proxy_url_for_host", lambda host: "")
+    monkeypatch.setattr(service, "_prepare_snapshot", lambda blog_row, target: (service._normalise_config(json.loads(blog_row["config_json"])), [], []))
+    monkeypatch.setattr(service, "_set_sync_status", lambda blog_id, status: (stages.append(status), set_status(blog_id, status))[1])
+
+    service.sync_blog(blog["id"])
+
+    assert calls == [["ls-remote", "--heads", "https://github.com/acme/docs.git", "refs/heads/main"]]
+    assert stages == ["syncing_rebuilding", "syncing_publishing"]
+    refreshed = service.get_blog(blog["id"], owner)
+    assert refreshed["syncStatus"] == "success"
+    assert refreshed["renderFingerprint"] != blog["renderFingerprint"]
+    assert service.list_runs(blog["id"], owner)[0]["message"] == "仓库版本未变化，已应用博客配置更新，共 0 篇文章"
+
+
+def test_typora_theme_crud_preserves_css_and_resets_using_blogs(isolated_storage, owner: User) -> None:
+    raw = b'@charset "UTF-8";\n#write { color: #123456; }\n'
+    theme = service.save_theme(SimpleNamespace(filename="misty-light.css", file=BytesIO(raw)), owner)
+
+    assert theme["name"] == "misty-light"
+    assert theme["size"] == len(raw)
+    assert service.theme_css(theme["id"], owner) == raw
+    assert service.list_themes(owner) == [theme]
+
+    blog = service.create_blog(
+        {
+            "slug": "themed",
+            "repoUrl": "https://github.com/acme/docs",
+            "config": {"site": {"customThemeId": theme["id"]}},
+        },
+        owner,
+    )
+    public_blog = {**blog, "ownerUserId": owner.id}
+    assert service.public_theme_css(public_blog) == raw
+
+    assert service.delete_theme(theme["id"], owner) == 1
+    assert service.get_blog(blog["id"], owner)["config"]["site"]["customThemeId"] == ""
+    assert service.list_themes(owner) == []
+
+
+def test_blog_rejects_another_users_custom_theme(isolated_storage, owner: User) -> None:
+    theme = service.save_theme(SimpleNamespace(filename="private.css", file=BytesIO(b"#write {}")), owner)
+    stranger = User(id="theme-stranger", username="stranger", display_name="Stranger")
+
+    with pytest.raises(ToolboxError) as error:
+        service.create_blog(
+            {
+                "slug": "stolen-theme",
+                "repoUrl": "https://github.com/acme/docs",
+                "config": {"site": {"customThemeId": theme["id"]}},
+            },
+            stranger,
+        )
+
+    assert error.value.code == "THEME_NOT_FOUND"
 
 
 def test_snapshot_retention_keeps_only_the_latest_five(isolated_storage, owner: User) -> None:
@@ -210,6 +305,21 @@ def test_manual_sync_still_queues_when_auto_sync_is_disabled(monkeypatch: pytest
     service.request_sync(blog["id"], owner)
     service.sync_due_blogs()
     assert synced == [blog["id"]]
+
+
+def test_sync_due_does_not_restart_an_active_phase(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    blog = service.create_blog({"slug": "active-sync", "repoUrl": "https://github.com/acme/docs"}, owner)
+    with service._conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET sync_status='syncing_rendering' WHERE id=?", (blog["id"],))
+        conn.commit()
+    synced: list[str] = []
+    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    monkeypatch.setattr(service, "can_access_tool", lambda tool_id, user: True)
+    monkeypatch.setattr(service, "sync_blog", lambda blog_id: synced.append(blog_id))
+
+    service.sync_due_blogs()
+
+    assert synced == []
 
 
 def test_article_slug_rejects_path_traversal() -> None:

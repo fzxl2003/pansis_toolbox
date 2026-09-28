@@ -9,11 +9,16 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from tools.git_blog.backend import service
 
-ASSET_VERSION = "vue-copy-icon-20260928"
+ASSET_VERSION = "custom-theme-outline-20260928"
 
 
 def _site(blog: dict) -> dict:
-    config = {**(blog.get("effectiveConfig") or blog["config"])["site"], "customTemplate": blog["config"]["site"].get("customTemplate", False)}
+    configured_site = blog["config"]["site"]
+    config = {
+        **(blog.get("effectiveConfig") or blog["config"])["site"],
+        "customTemplate": configured_site.get("customTemplate", False),
+        "customThemeId": configured_site.get("customThemeId", ""),
+    }
     return {**config, "title": blog["name"], "description": config.get("description") or "GitHub Markdown 博客"}
 
 
@@ -87,13 +92,16 @@ def _article_card(article: dict, base: str, *, show_meta: bool = True) -> str:
     return f'<li class="blog-card" data-href="{_esc(href)}" tabindex="0" role="link" aria-label="阅读：{_esc(article["title"])}"><div><h2><a href="{_esc(href)}">{_esc(article["title"])}</a></h2>{meta}<p class="blog-summary">{_esc(article["summary"])}</p></div>{image}</li>'
 
 
-def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False) -> HTMLResponse:
+def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False, article_theme: bool = False) -> HTMLResponse:
     site = _site(blog); base = f"/blog/{quote(blog['slug'])}"; css = "/tool-assets/git_blog"
-    custom = f'<link rel="stylesheet" href="{base}/theme/style.css">' if site.get("customTemplate") else ""
+    template_css = f'<link rel="stylesheet" href="{base}/theme/style.css">' if site.get("customTemplate") else ""
+    typora_css = f'<link rel="stylesheet" href="{base}/custom-theme.css">' if article_theme and site.get("customThemeId") else ""
+    custom = template_css + typora_css
+    body_theme = "custom" if article_theme and site.get("customThemeId") else str(site.get("theme", "auto"))
     head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css?v={ASSET_VERSION}">{custom}<style>:root{{--blog-user-accent:{_esc(site.get('accentColor','#42b983'))};--blog-width:{int(site.get('contentWidth',860))}px;--blog-font:{_esc(site.get('fontFamily','Ubuntu, Source Sans Pro, sans-serif'))};}}</style></head>'''
     icons=f'<a class="blog-icon" title="RSS" href="{base}/feed.xml">◔</a><a class="blog-icon" title="Atom" href="{base}/atom.xml">◉</a>'
     nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span></header>'
-    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(site.get("theme","auto"))}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
+    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(body_theme)}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
 
 
 def _missing(request: Request, slug: str = "") -> HTMLResponse:
@@ -181,8 +189,9 @@ def mount_extra(app: FastAPI) -> None:
         if not item:
             response = _missing(request,blog_slug); service.record_access(blog,request,status_code=404,article_slug=article_slug)
             return response
-        article_body = f'<section class="blog-article-layout"><button class="blog-outline-toggle" type="button" aria-expanded="true" aria-controls="blog-outline">大纲</button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="隐藏大纲">×</button></div><nav class="blog-outline-list"></nav></aside><article id="write" class="markdown-body typora-export">{item["html"]}</article></section>'
-        response = _layout(request,blog,item["title"],article_body,description=item["summary"])
+        article_class = "typora-export" if _site(blog).get("customThemeId") else "markdown-body typora-export"
+        article_body = f'<section class="blog-article-layout"><button class="blog-outline-toggle" type="button" aria-expanded="true" aria-controls="blog-outline">大纲</button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="隐藏大纲">×</button></div><nav class="blog-outline-list"></nav></aside><article id="write" class="{article_class}">{item["html"]}</article></section>'
+        response = _layout(request,blog,item["title"],article_body,description=item["summary"],article_theme=True)
         service.record_access(blog,request,status_code=response.status_code,article_slug=article_slug)
         return response
 
@@ -200,6 +209,12 @@ def mount_extra(app: FastAPI) -> None:
         if not blog or not _site(blog).get("customTemplate"): return Response(status_code=404)
         path=(service.template_dir(blog["id"]) / asset_path).resolve(); root=service.template_dir(blog["id"]).resolve()
         return FileResponse(path) if path.is_file() and root in path.parents else Response(status_code=404)
+
+    @app.get("/blog/{blog_slug}/custom-theme.css", include_in_schema=False)
+    def custom_theme(blog_slug: str):
+        blog=service.public_blog(blog_slug)
+        raw=service.public_theme_css(blog) if blog else None
+        return Response(raw,media_type="text/css",headers={"X-Content-Type-Options":"nosniff"}) if raw is not None else Response(status_code=404)
 
     @app.get("/blog/{blog_slug}/feed.xml", include_in_schema=False)
     def rss(request: Request, blog_slug: str):

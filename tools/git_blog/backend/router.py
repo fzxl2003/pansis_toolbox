@@ -1,5 +1,7 @@
+import html
 from typing import Any
 from fastapi import APIRouter, Request, Response, UploadFile, File
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from backend.app.core.security import require_user
 from tools.git_blog.backend import public, service
@@ -14,6 +16,22 @@ class ProbePayload(BaseModel): repoUrl:str; githubKeyId:str=""
 
 @router.get("/blogs")
 def blogs(request:Request)->dict[str,Any]: return {"blogs":service.list_blogs(require_user(request))}
+@router.get("/themes")
+def themes(request:Request)->dict[str,Any]: return {"themes":service.list_themes(require_user(request))}
+@router.post("/themes",status_code=201)
+def create_theme(request:Request,css:UploadFile=File(...))->dict[str,Any]: return {"theme":service.save_theme(css,require_user(request))}
+@router.get("/themes/{theme_id}/css")
+def theme_css(request:Request,theme_id:str)->Response:
+    raw=service.theme_css(theme_id,require_user(request))
+    return Response(raw,media_type="text/css",headers={"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"})
+@router.get("/themes/{theme_id}/preview",response_class=HTMLResponse)
+def preview_theme(request:Request,theme_id:str)->HTMLResponse:
+    user=require_user(request); service.theme_css(theme_id,user)
+    theme=next(item for item in service.list_themes(user) if item["id"]==theme_id)
+    title=html.escape(theme["name"])
+    return HTMLResponse(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>html{{background:#f1f5f9}}body{{margin:0}}#write{{box-sizing:border-box;min-height:100vh;background:var(--bg-color,#fff)}}img{{max-width:100%}}</style><link rel="stylesheet" href="/api/tools/git-blog/themes/{theme_id}/css"></head><body><article id="write" class="typora-export"><h1>Typora 主题预览</h1><p>这是一段用于检查正文、<strong>强调文字</strong>、<em>斜体</em>和<a href="#">链接样式</a>的示例内容。</p><h2>二级标题</h2><blockquote><p>主题会以原始 CSS 直接应用，无需修改选择器。</p></blockquote><h3>列表与代码</h3><ul><li>第一项</li><li>第二项<ul><li>嵌套项目</li></ul></li></ul><pre class="md-fences"><code>def hello():\n    return "theme preview"</code></pre><p>行内代码示例：<code>custom-theme.css</code></p><table class="md-table"><thead><tr><th>功能</th><th>状态</th></tr></thead><tbody><tr><td>Typora CSS</td><td>已加载</td></tr><tr><td>上传即用</td><td>支持</td></tr></tbody></table></article></body></html>''')
+@router.delete("/themes/{theme_id}")
+def remove_theme(request:Request,theme_id:str)->dict[str,Any]: return {"deleted":True,"affectedBlogs":service.delete_theme(theme_id,require_user(request))}
 @router.post("/blogs",status_code=201)
 def create(request:Request,payload:BlogPayload)->dict[str,Any]: return {"blog":service.create_blog(payload.model_dump(),require_user(request))}
 @router.get("/blogs/{blog_id}")

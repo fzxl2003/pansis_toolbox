@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from starlette.requests import Request
 
@@ -37,3 +38,28 @@ def test_pagination_preserves_search_and_includes_page_numbers() -> None:
     assert '>1</a>' in pagination
     assert '>10</a>' in pagination
     assert 'blog-page-ellipsis' in pagination
+
+
+def test_custom_typora_theme_is_only_loaded_for_article_layout() -> None:
+    blog = {
+        "id": "blog-1",
+        "slug": "notes",
+        "name": "Notes",
+        "config": {"site": {"theme": "dark", "customThemeId": "theme-1", "customTemplate": False}},
+        "effectiveConfig": {"site": {"theme": "dark", "language": "zh-CN"}},
+    }
+
+    listing = public._layout(_request(), blog, "首页", "<p>list</p>").body.decode()
+    article = public._layout(_request(), blog, "文章", '<article id="write"></article>', article_theme=True).body.decode()
+
+    assert "/blog/notes/custom-theme.css" not in listing
+    assert 'class="git-blog-page theme-dark"' in listing
+    assert '<link rel="stylesheet" href="/blog/notes/custom-theme.css">' in article
+    assert 'class="git-blog-page theme-custom"' in article
+
+
+def test_outline_script_targets_the_stable_typora_article_container() -> None:
+    script = (Path(__file__).parents[1] / "assets" / "public.js").read_text(encoding="utf-8")
+
+    assert "articleLayout?.querySelector('#write')" in script
+    assert "articleLayout?.querySelector('.markdown-body')" not in script

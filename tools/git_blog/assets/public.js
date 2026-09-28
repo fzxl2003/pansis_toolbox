@@ -109,7 +109,7 @@ const outline = articleLayout?.querySelector('.blog-outline');
 const outlineList = articleLayout?.querySelector('.blog-outline-list');
 const outlineToggle = articleLayout?.querySelector('.blog-outline-toggle');
 const outlineClose = articleLayout?.querySelector('.blog-outline-close');
-const article = articleLayout?.querySelector('.markdown-body');
+const article = articleLayout?.querySelector('#write');
 
 if (articleLayout && outline && outlineList && outlineToggle && article) {
   const headings = [...article.querySelectorAll('h1, h2, h3, h4')];

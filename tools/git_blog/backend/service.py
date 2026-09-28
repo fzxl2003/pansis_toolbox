@@ -33,7 +33,9 @@ MAX_BLOGS_PER_USER = 10
 MIN_SYNC_MINUTES, MAX_SYNC_MINUTES = 5, 1440
 MAX_FILES, MAX_MARKDOWN_BYTES, MAX_ASSET_BYTES = 10_000, 2 * 1024 * 1024, 25 * 1024 * 1024
 MAX_TEMPLATE_FILES, MAX_TEMPLATE_BYTES = 200, 10 * 1024 * 1024
+MAX_THEME_BYTES = 2 * 1024 * 1024
 MAX_SNAPSHOTS = 5
+RENDER_PIPELINE_VERSION = "1"
 SYNC_TIMEOUT = 300
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 GITHUB_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
@@ -70,6 +72,7 @@ def _init(conn: sqlite3.Connection) -> None:
         config_json TEXT NOT NULL DEFAULT '{}', effective_config_json TEXT NOT NULL DEFAULT '{}', token_encrypted TEXT NOT NULL DEFAULT '', github_key_id TEXT NOT NULL DEFAULT '',
         enabled INTEGER NOT NULL DEFAULT 1, auto_sync_enabled INTEGER NOT NULL DEFAULT 1,
         current_commit TEXT NOT NULL DEFAULT '',
+        render_fingerprint TEXT NOT NULL DEFAULT '',
         sync_status TEXT NOT NULL DEFAULT 'pending', last_error TEXT NOT NULL DEFAULT '',
         last_success_at TEXT, last_attempt_at TEXT, next_sync_at TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -92,6 +95,11 @@ def _init(conn: sqlite3.Connection) -> None:
         blog_id TEXT NOT NULL, commit_hash TEXT NOT NULL, created_at TEXT NOT NULL,
         PRIMARY KEY(blog_id, commit_hash)
       );
+      CREATE TABLE IF NOT EXISTS git_blog_themes (
+        id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, name TEXT NOT NULL,
+        filename TEXT NOT NULL, css BLOB NOT NULL, created_at TEXT NOT NULL,
+        UNIQUE(owner_user_id, name)
+      );
       CREATE TABLE IF NOT EXISTS git_blog_access_logs (
         id TEXT PRIMARY KEY, blog_id TEXT NOT NULL, requested_at TEXT NOT NULL,
         path TEXT NOT NULL, method TEXT NOT NULL, status_code INTEGER NOT NULL,
@@ -101,6 +109,7 @@ def _init(conn: sqlite3.Connection) -> None:
       CREATE INDEX IF NOT EXISTS idx_git_blog_articles_date ON git_blog_articles(blog_id, published_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_runs_blog ON git_blog_runs(blog_id, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_snapshots_blog ON git_blog_snapshots(blog_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_git_blog_themes_owner ON git_blog_themes(owner_user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_access_logs_blog ON git_blog_access_logs(blog_id, requested_at DESC);
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(git_blog_blogs)").fetchall()}
@@ -110,6 +119,8 @@ def _init(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN github_key_id TEXT NOT NULL DEFAULT ''")
     if "auto_sync_enabled" not in columns:
         conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN auto_sync_enabled INTEGER NOT NULL DEFAULT 1")
+    if "render_fingerprint" not in columns:
+        conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN render_fingerprint TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -163,7 +174,7 @@ def _validate_branch(value: str) -> str:
 
 
 def _defaults() -> dict[str, Any]:
-    return {"site": {"description": "", "author": "", "language": "zh-CN", "theme": "auto", "accentColor": "#2563eb", "contentWidth": 820, "fontFamily": "system-ui, sans-serif", "postsPerPage": 10, "customTemplate": False}, "defaults": {"published": False, "author": "", "cover": ""}, "logs": {"accessEnabled": True, "recordIp": False, "recordUserAgent": True, "recordReferrer": True, "retentionDays": 30}}
+    return {"site": {"description": "", "author": "", "language": "zh-CN", "theme": "auto", "customThemeId": "", "accentColor": "#2563eb", "contentWidth": 820, "fontFamily": "system-ui, sans-serif", "postsPerPage": 10, "customTemplate": False}, "defaults": {"published": False, "author": "", "cover": ""}, "logs": {"accessEnabled": True, "recordIp": False, "recordUserAgent": True, "recordReferrer": True, "retentionDays": 30}}
 
 
 def _normalise_config(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -174,6 +185,7 @@ def _normalise_config(value: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(incoming, dict): result[section].update(incoming)
     site, defaults = result["site"], result["defaults"]
     site["theme"] = site["theme"] if site["theme"] in {"auto", "light", "dark"} else "auto"
+    site["customThemeId"] = str(site.get("customThemeId") or "").strip()
     site["postsPerPage"] = max(1, min(50, int(site.get("postsPerPage") or 10)))
     site["contentWidth"] = max(480, min(1400, int(site.get("contentWidth") or 820)))
     defaults["published"] = bool(defaults.get("published", False))
@@ -197,6 +209,7 @@ def _row(row: sqlite3.Row) -> dict[str, Any]:
     data["repoUrl"] = data.pop("repo_url")
     data["ownerUserId"] = data.pop("owner_user_id")
     data["currentCommit"] = data.pop("current_commit")
+    data["renderFingerprint"] = data.pop("render_fingerprint")
     data["syncStatus"] = data.pop("sync_status")
     data["lastError"] = data.pop("last_error")
     return data
@@ -218,6 +231,132 @@ def list_blogs(user: User) -> list[dict[str, Any]]:
 def get_blog(blog_id: str, user: User) -> dict[str, Any]: return _row(_owner_blog(blog_id, user))
 
 
+def _theme_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "filename": row["filename"],
+        "size": len(row["css"]),
+        "createdAt": row["created_at"],
+    }
+
+
+def list_themes(user: User) -> list[dict[str, Any]]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM git_blog_themes WHERE owner_user_id=? ORDER BY created_at DESC",
+            (user.id,),
+        ).fetchall()
+    return [_theme_row(row) for row in rows]
+
+
+def save_theme(upload: Any, user: User) -> dict[str, Any]:
+    filename = PurePosixPath(str(upload.filename or "").replace("\\", "/")).name
+    if PurePosixPath(filename).suffix.lower() != ".css":
+        raise ToolboxError("INVALID_THEME", "请选择 CSS 主题文件", status_code=400)
+    name = PurePosixPath(filename).stem.strip()[:100]
+    if not name:
+        raise ToolboxError("INVALID_THEME", "主题文件名不能为空", status_code=400)
+    raw = upload.file.read(MAX_THEME_BYTES + 1)
+    if not raw:
+        raise ToolboxError("INVALID_THEME", "主题 CSS 不能为空", status_code=400)
+    if len(raw) > MAX_THEME_BYTES:
+        raise ToolboxError("THEME_TOO_LARGE", "主题 CSS 不能超过 2 MiB", status_code=400)
+    theme_id, created_at = uuid4().hex, _now()
+    with _conn() as conn:
+        duplicate = conn.execute(
+            "SELECT 1 FROM git_blog_themes WHERE owner_user_id=? AND lower(name)=lower(?)",
+            (user.id, name),
+        ).fetchone()
+        if duplicate:
+            raise ToolboxError("THEME_NAME_EXISTS", "已存在同名主题", status_code=409)
+        conn.execute(
+            "INSERT INTO git_blog_themes(id,owner_user_id,name,filename,css,created_at) VALUES(?,?,?,?,?,?)",
+            (theme_id,user.id,name,filename,sqlite3.Binary(raw),created_at),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM git_blog_themes WHERE id=?", (theme_id,)).fetchone()
+    return _theme_row(row)
+
+
+def theme_css(theme_id: str, user: User) -> bytes:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT css FROM git_blog_themes WHERE id=? AND owner_user_id=?",
+            (theme_id,user.id),
+        ).fetchone()
+    if row is None:
+        raise ToolboxError("THEME_NOT_FOUND", "主题不存在", status_code=404)
+    return bytes(row["css"])
+
+
+def delete_theme(theme_id: str, user: User) -> int:
+    with _conn() as conn:
+        theme = conn.execute(
+            "SELECT 1 FROM git_blog_themes WHERE id=? AND owner_user_id=?",
+            (theme_id,user.id),
+        ).fetchone()
+        if theme is None:
+            raise ToolboxError("THEME_NOT_FOUND", "主题不存在", status_code=404)
+        affected = 0
+        rows = conn.execute(
+            "SELECT id,config_json FROM git_blog_blogs WHERE owner_user_id=?",
+            (user.id,),
+        ).fetchall()
+        for blog in rows:
+            config = _normalise_config(json.loads(blog["config_json"]))
+            if config["site"].get("customThemeId") != theme_id:
+                continue
+            config["site"]["customThemeId"] = ""
+            conn.execute(
+                "UPDATE git_blog_blogs SET config_json=?,sync_status=CASE WHEN current_commit<>'' THEN 'queued' ELSE sync_status END,next_sync_at=?,updated_at=? WHERE id=?",
+                (json.dumps(config,ensure_ascii=False),_now(),_now(),blog["id"]),
+            )
+            affected += 1
+        conn.execute("DELETE FROM git_blog_themes WHERE id=?", (theme_id,))
+        conn.commit()
+    return affected
+
+
+def public_theme_css(blog: dict[str, Any]) -> bytes | None:
+    theme_id = str((blog.get("config") or {}).get("site", {}).get("customThemeId") or "")
+    if not theme_id:
+        return None
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT css FROM git_blog_themes WHERE id=? AND owner_user_id=?",
+            (theme_id,blog["ownerUserId"]),
+        ).fetchone()
+    return bytes(row["css"]) if row else None
+
+
+def _validate_custom_theme(config: dict[str, Any], user: User, conn: sqlite3.Connection) -> None:
+    theme_id = config["site"].get("customThemeId", "")
+    if not theme_id:
+        return
+    found = conn.execute(
+        "SELECT 1 FROM git_blog_themes WHERE id=? AND owner_user_id=?",
+        (theme_id, user.id),
+    ).fetchone()
+    if found is None:
+        raise ToolboxError("THEME_NOT_FOUND", "所选自定义主题不存在", status_code=400)
+
+
+def _render_fingerprint(blog: sqlite3.Row | dict[str, Any], commit: str | None = None) -> str:
+    config = blog["config_json"]
+    if isinstance(config, str):
+        config = json.loads(config)
+    payload = {
+        "version": RENDER_PIPELINE_VERSION,
+        "commit": (commit if commit is not None else blog["current_commit"]).lower(),
+        "slug": blog["slug"],
+        "contentRoot": blog["content_root"],
+        "config": _normalise_config(config),
+    }
+    encoded = json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def create_blog(payload: dict[str, Any], user: User) -> dict[str, Any]:
     with _conn() as conn:
         count = conn.execute("SELECT COUNT(*) FROM git_blog_blogs WHERE owner_user_id=?", (user.id,)).fetchone()[0]
@@ -230,7 +369,9 @@ def create_blog(payload: dict[str, Any], user: User) -> dict[str, Any]:
         try:
             key_id=str(payload.get("githubKeyId") or "")
             if key_id: github_key_service.get_private_key(key_id,user)
-            conn.execute("""INSERT INTO git_blog_blogs (id,owner_user_id,name,slug,repo_url,branch,content_root,sync_interval_minutes,config_json,github_key_id,auto_sync_enabled,next_sync_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (blog_id,user.id,name,slug,repo,branch,_normalize_root(str(payload.get("contentRoot") or "")),interval,json.dumps(_normalise_config(payload.get("config")),ensure_ascii=False),key_id,1 if payload.get("autoSyncEnabled", True) else 0,now,now,now))
+            config = _normalise_config(payload.get("config"))
+            _validate_custom_theme(config, user, conn)
+            conn.execute("""INSERT INTO git_blog_blogs (id,owner_user_id,name,slug,repo_url,branch,content_root,sync_interval_minutes,config_json,github_key_id,auto_sync_enabled,next_sync_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (blog_id,user.id,name,slug,repo,branch,_normalize_root(str(payload.get("contentRoot") or "")),interval,json.dumps(config,ensure_ascii=False),key_id,1 if payload.get("autoSyncEnabled", True) else 0,now,now,now))
             conn.commit()
         except sqlite3.IntegrityError as exc: raise ToolboxError("BLOG_SLUG_EXISTS", "该博客地址已被占用", status_code=409) from exc
         row = conn.execute("SELECT * FROM git_blog_blogs WHERE id=?", (blog_id,)).fetchone()
@@ -260,10 +401,13 @@ def update_blog(blog_id: str, payload: dict[str, Any], user: User) -> dict[str, 
         key_id=str(payload.get("githubKeyId") or "")
         if key_id: github_key_service.get_private_key(key_id,user)
         values["github_key_id"] = key_id
+    if values["current_commit"] and _render_fingerprint(values) != values["render_fingerprint"]:
+        values["sync_status"] = "queued"
     values["updated_at"], values["next_sync_at"] = _now(), _now()
     with _conn() as conn:
         try:
-            conn.execute("""UPDATE git_blog_blogs SET name=:name,slug=:slug,repo_url=:repo_url,branch=:branch,content_root=:content_root,sync_interval_minutes=:sync_interval_minutes,config_json=:config_json,github_key_id=:github_key_id,enabled=:enabled,auto_sync_enabled=:auto_sync_enabled,updated_at=:updated_at,next_sync_at=:next_sync_at WHERE id=:id""", values); conn.commit()
+            _validate_custom_theme(json.loads(values["config_json"]), user, conn)
+            conn.execute("""UPDATE git_blog_blogs SET name=:name,slug=:slug,repo_url=:repo_url,branch=:branch,content_root=:content_root,sync_interval_minutes=:sync_interval_minutes,config_json=:config_json,github_key_id=:github_key_id,enabled=:enabled,auto_sync_enabled=:auto_sync_enabled,sync_status=:sync_status,updated_at=:updated_at,next_sync_at=:next_sync_at WHERE id=:id""", values); conn.commit()
         except sqlite3.IntegrityError as exc: raise ToolboxError("BLOG_SLUG_EXISTS", "该博客地址已被占用", status_code=409) from exc
         row=conn.execute("SELECT * FROM git_blog_blogs WHERE id=?",(blog_id,)).fetchone()
     return _row(row)
@@ -561,7 +705,7 @@ def sync_due_blogs() -> None:
     all_users={u.id:u for u in list_users()}
     with _conn() as conn:
         orphan_ids=[row["id"] for row in conn.execute("SELECT id,owner_user_id FROM git_blog_blogs").fetchall() if row["owner_user_id"] not in all_users]
-        rows=conn.execute("SELECT id FROM git_blog_blogs WHERE enabled=1 AND sync_status<>'syncing' AND (sync_status='queued' OR (auto_sync_enabled=1 AND next_sync_at<=?)) ORDER BY next_sync_at LIMIT 3",(now,)).fetchall()
+        rows=conn.execute("SELECT id FROM git_blog_blogs WHERE enabled=1 AND sync_status<>'syncing' AND sync_status NOT LIKE 'syncing_%' AND (sync_status='queued' OR (auto_sync_enabled=1 AND next_sync_at<=?)) ORDER BY next_sync_at LIMIT 3",(now,)).fetchall()
     for orphan_id in orphan_ids:
         with _conn() as conn:
             conn.execute("DELETE FROM git_blog_assets WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_articles WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_runs WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_snapshots WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_blogs WHERE id=?",(orphan_id,)); conn.commit()
@@ -577,12 +721,18 @@ def sync_due_blogs() -> None:
         sync_blog(blog_id)
 
 
+def _set_sync_status(blog_id: str, status: str) -> None:
+    with _conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET sync_status=? WHERE id=?", (status,blog_id))
+        conn.commit()
+
+
 def sync_blog(blog_id: str) -> None:
     with _conn() as conn: blog=conn.execute("SELECT * FROM git_blog_blogs WHERE id=?",(blog_id,)).fetchone()
     if blog is None: return
     run_id, started=uuid4().hex,_now()
     with _conn() as conn:
-        conn.execute("INSERT INTO git_blog_runs(id,blog_id,status,started_at) VALUES(?,?,?,?)",(run_id,blog_id,"running",started)); conn.execute("UPDATE git_blog_blogs SET sync_status='syncing',last_attempt_at=?,last_error='' WHERE id=?",(started,blog_id)); conn.commit()
+        conn.execute("INSERT INTO git_blog_runs(id,blog_id,status,started_at) VALUES(?,?,?,?)",(run_id,blog_id,"running",started)); conn.execute("UPDATE git_blog_blogs SET sync_status='syncing_checking',last_attempt_at=?,last_error='' WHERE id=?",(started,blog_id)); conn.commit()
     warnings: list[str]=[]
     temp: Path | None = None
     target: Path | None = None
@@ -605,7 +755,11 @@ def sync_blog(blog_id: str) -> None:
         if not remote_commit:
             raise ToolboxError("GIT_BRANCH_NOT_FOUND", f'远端分支不存在: {blog["branch"]}', status_code=400)
         next_time=(datetime.now(timezone.utc)+timedelta(minutes=int(blog["sync_interval_minutes"]))).isoformat()
-        if blog["current_commit"].lower() == remote_commit:
+        source_changed = blog["current_commit"].lower() != remote_commit
+        target = _snapshot_dir(blog_id,remote_commit)
+        snapshot_missing = not target.is_dir()
+        expected_fingerprint = _render_fingerprint(blog,remote_commit)
+        if not source_changed and not snapshot_missing and blog["render_fingerprint"] == expected_fingerprint:
             finished = _now()
             with _conn() as conn:
                 conn.execute(
@@ -618,22 +772,37 @@ def sync_blog(blog_id: str) -> None:
                 )
                 conn.commit()
             return
-        temp=Path(tempfile.mkdtemp(prefix="git-blog-",dir=_root()))
-        checkout=temp/"repo"
-        _git(["clone","--depth","1","--branch",blog["branch"],clone_url,str(checkout)],private_key=private_key,proxy_url=proxy_url)
-        commit=_git(["rev-parse","HEAD"],cwd=checkout).strip().lower()
-        target=_snapshot_dir(blog_id,commit); target.parent.mkdir(parents=True,exist_ok=True)
-        if not target.exists():
-            shutil.move(str(checkout),str(target))
-            target_created = True
-        else: shutil.rmtree(temp,ignore_errors=True)
+        commit = remote_commit
+        if source_changed or snapshot_missing:
+            _set_sync_status(blog_id,"syncing_cloning")
+            temp=Path(tempfile.mkdtemp(prefix="git-blog-",dir=_root()))
+            checkout=temp/"repo"
+            _git(["clone","--depth","1","--branch",blog["branch"],clone_url,str(checkout)],private_key=private_key,proxy_url=proxy_url)
+            commit=_git(["rev-parse","HEAD"],cwd=checkout).strip().lower()
+            source_changed = blog["current_commit"].lower() != commit
+            target=_snapshot_dir(blog_id,commit); target.parent.mkdir(parents=True,exist_ok=True)
+            if not target.exists():
+                shutil.move(str(checkout),str(target))
+                target_created = True
+            else: shutil.rmtree(temp,ignore_errors=True)
+            _set_sync_status(blog_id,"syncing_rendering")
+        else:
+            _set_sync_status(blog_id,"syncing_rebuilding")
         effective, articles, valid_assets = _prepare_snapshot(blog, target)
+        render_fingerprint = _render_fingerprint(blog,commit)
+        if source_changed:
+            message = f"远端发现新提交，已同步 {len(articles)} 篇文章"
+        elif snapshot_missing:
+            message = f"本地快照缺失，已重新同步 {len(articles)} 篇文章"
+        else:
+            message = f"仓库版本未变化，已应用博客配置更新，共 {len(articles)} 篇文章"
         _reconcile_snapshots(blog_id)
+        _set_sync_status(blog_id,"syncing_publishing")
         with _conn() as conn:
             _replace_snapshot_index(conn, blog_id, effective, articles, valid_assets)
             conn.execute("INSERT OR IGNORE INTO git_blog_snapshots(blog_id,commit_hash,created_at) VALUES(?,?,?)", (blog_id,commit,_now()))
-            conn.execute("UPDATE git_blog_blogs SET current_commit=?,effective_config_json=?,sync_status='success',last_error='',last_success_at=?,next_sync_at=?,updated_at=? WHERE id=?",(commit,json.dumps(effective,ensure_ascii=False),_now(),next_time,_now(),blog_id))
-            conn.execute("UPDATE git_blog_runs SET status='success',commit_hash=?,message=?,warnings_json=?,finished_at=? WHERE id=?",(commit,f"同步 {len(articles)} 篇文章",json.dumps(warnings,ensure_ascii=False),_now(),run_id)); conn.commit()
+            conn.execute("UPDATE git_blog_blogs SET current_commit=?,render_fingerprint=?,effective_config_json=?,sync_status='success',last_error='',last_success_at=?,next_sync_at=?,updated_at=? WHERE id=?",(commit,render_fingerprint,json.dumps(effective,ensure_ascii=False),_now(),next_time,_now(),blog_id))
+            conn.execute("UPDATE git_blog_runs SET status='success',commit_hash=?,message=?,warnings_json=?,finished_at=? WHERE id=?",(commit,message,json.dumps(warnings,ensure_ascii=False),_now(),run_id)); conn.commit()
         _prune_snapshots(blog_id)
     except Exception as exc:
         if target_created and target is not None:
@@ -665,12 +834,13 @@ def rollback_snapshot(blog_id: str, commit: str, user: User) -> dict[str, Any]:
         conn.commit()
     try:
         effective, articles, assets = _prepare_snapshot(blog, target)
+        render_fingerprint = _render_fingerprint(blog,commit)
         message = f"已回滚至 {commit[:8]}，自动同步已关闭"
         with _conn() as conn:
             _replace_snapshot_index(conn, blog_id, effective, articles, assets)
             conn.execute(
-                "UPDATE git_blog_blogs SET current_commit=?,effective_config_json=?,auto_sync_enabled=0,sync_status='success',last_error='',updated_at=? WHERE id=?",
-                (commit,json.dumps(effective,ensure_ascii=False),_now(),blog_id),
+                "UPDATE git_blog_blogs SET current_commit=?,render_fingerprint=?,effective_config_json=?,auto_sync_enabled=0,sync_status='success',last_error='',updated_at=? WHERE id=?",
+                (commit,render_fingerprint,json.dumps(effective,ensure_ascii=False),_now(),blog_id),
             )
             conn.execute("UPDATE git_blog_runs SET status='success',message=?,finished_at=? WHERE id=?", (message,_now(),run_id))
             conn.commit()

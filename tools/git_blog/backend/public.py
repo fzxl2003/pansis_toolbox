@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import html
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from tools.git_blog.backend import service
+
+ASSET_VERSION = "vue-copy-icon-20260928"
 
 
 def _site(blog: dict) -> dict:
@@ -22,13 +24,76 @@ def _url(request: Request, path: str) -> str:
     return str(request.base_url).rstrip("/") + path
 
 
+def _relative_time(value: object) -> str:
+    """Format an ISO timestamp for article cards without exposing clock noise."""
+    raw = str(value or "")
+    try:
+        date = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        now = datetime.now(date.tzinfo) if date.tzinfo else datetime.now()
+        seconds = max(0, int((now - date).total_seconds()))
+    except (TypeError, ValueError):
+        return raw[:10]
+    if seconds < 60:
+        return "刚刚"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    if seconds < 7 * 86400:
+        return f"{seconds // 86400} 天前"
+    return date.strftime("%Y-%m-%d")
+
+
+def _time(value: object) -> str:
+    raw = str(value or "")
+    return f'<time class="blog-time" datetime="{_esc(raw)}" data-time="{_esc(raw)}">{_esc(_relative_time(raw))}</time>'
+
+
+def _page_url(request: Request, page: int) -> str:
+    params = {key: value for key, value in request.query_params.items() if key != "page"}
+    params["page"] = str(page)
+    return "?" + urlencode(params)
+
+
+def _pagination(request: Request, page: int, total: int, *, page_size: int = 50) -> str:
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    if total_pages <= 1:
+        return ""
+    candidates = {1, total_pages, *range(max(1, page - 2), min(total_pages, page + 2) + 1)}
+    pieces: list[str] = []
+    previous = f'<a class="blog-page-control" href="{_esc(_page_url(request, page - 1))}" aria-label="上一页">‹</a>' if page > 1 else '<span class="blog-page-control is-disabled" aria-hidden="true">‹</span>'
+    pieces.append(previous)
+    last = 0
+    for number in sorted(candidates):
+        if number - last > 1:
+            pieces.append('<span class="blog-page-ellipsis" aria-hidden="true">…</span>')
+        current = ' aria-current="page"' if number == page else ''
+        active = ' is-current' if number == page else ''
+        pieces.append(f'<a class="blog-page-number{active}" href="{_esc(_page_url(request, number))}"{current}>{number}</a>')
+        last = number
+    following = f'<a class="blog-page-control" href="{_esc(_page_url(request, page + 1))}" aria-label="下一页">›</a>' if page < total_pages else '<span class="blog-page-control is-disabled" aria-hidden="true">›</span>'
+    pieces.append(following)
+    return f'<nav class="blog-pagination" aria-label="文章分页">{"".join(pieces)}</nav>'
+
+
+def _article_card(article: dict, base: str, *, show_meta: bool = True) -> str:
+    href = f'{base}/posts/{quote(article["slug"])}'
+    tags = ' '.join(f'<a href="{base}/tags/{quote(tag)}">#{_esc(tag)}</a>' for tag in article["tags"])
+    cover = article["coverPath"]
+    if cover and not cover.startswith(("http://", "https://")):
+        cover = f'{base}/assets/{quote(cover.lstrip("/"))}'
+    image = f'<img class="blog-cover" src="{_esc(cover)}" alt="" loading="lazy">' if cover else ""
+    meta = f'<p class="blog-meta">{_time(article["publishedAt"])} {tags}</p>' if show_meta else ""
+    return f'<li class="blog-card" data-href="{_esc(href)}" tabindex="0" role="link" aria-label="阅读：{_esc(article["title"])}"><div><h2><a href="{_esc(href)}">{_esc(article["title"])}</a></h2>{meta}<p class="blog-summary">{_esc(article["summary"])}</p></div>{image}</li>'
+
+
 def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False) -> HTMLResponse:
     site = _site(blog); base = f"/blog/{quote(blog['slug'])}"; css = "/tool-assets/git_blog"
     custom = f'<link rel="stylesheet" href="{base}/theme/style.css">' if site.get("customTemplate") else ""
-    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css">{custom}<style>:root{{--blog-accent:{_esc(site.get('accentColor','#2563eb'))};--blog-width:{int(site.get('contentWidth',820))}px;--blog-font:{_esc(site.get('fontFamily','system-ui, sans-serif'))};}}</style></head>'''
+    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css?v={ASSET_VERSION}">{custom}<style>:root{{--blog-user-accent:{_esc(site.get('accentColor','#42b983'))};--blog-width:{int(site.get('contentWidth',860))}px;--blog-font:{_esc(site.get('fontFamily','Ubuntu, Source Sans Pro, sans-serif'))};}}</style></head>'''
     icons=f'<a class="blog-icon" title="RSS" href="{base}/feed.xml">◔</a><a class="blog-icon" title="Atom" href="{base}/atom.xml">◉</a>'
     nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span></header>'
-    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(site.get("theme","auto"))}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js"></script></body></html>', status_code=404 if not_found else 200)
+    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(site.get("theme","auto"))}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
 
 
 def _missing(request: Request, slug: str = "") -> HTMLResponse:
@@ -42,18 +107,12 @@ def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False)
     articles,total=service.public_articles(blog["id"],page=page,tag=tag,query=query)
     base=f"/blog/{quote(blog['slug'])}"; items=[]
     for article in articles:
-        tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in article["tags"])
-        cover = article["coverPath"]
-        if cover and not cover.startswith(("http://", "https://")): cover = f'{base}/assets/{quote(cover.lstrip("/"))}'
-        image = f'<img class="blog-cover" src="{_esc(cover)}" alt="">' if cover else ""
-        items.append(f'<li class="blog-card"><div><h2><a href="{base}/posts/{quote(article["slug"])}">{_esc(article["title"])}</a></h2><p class="blog-meta">{_esc(article["publishedAt"])} {tags}</p><p class="blog-summary">{_esc(article["summary"])}</p></div>{image}</li>')
+        items.append(_article_card(article, base))
     title = f"标签：{tag}" if tag else ("归档" if archive else "")
     search=f'<form class="blog-search" action="{base}" method="get"><input name="q" value="{_esc(query)}" placeholder="搜索文章"><button>搜索</button></form>' if not archive else ""
     tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in service.public_tags(blog["id"])) if tag else ''
-    prev=f'<a href="?page={page-1}">上一页</a>' if page>1 else ''
-    next_=f'<a href="?page={page+1}">下一页</a>' if page*50<total else ''
     heading=f'<h2>{_esc(title)}</h2>' if title else ''
-    body=f'{heading}{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul><nav class="blog-pagination">{prev}{next_}</nav>'
+    body=f'{heading}{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul>{_pagination(request,page,total)}'
     return _layout(request,blog,title,body,description=_site(blog)["description"])
 
 
@@ -67,7 +126,7 @@ def _directory_body(blog: dict, selected: str = "") -> str:
         link = f'<a href="{base}/directory?path={quote(path)}">{_esc(item["name"])}</a>'
         return f'<li><details open><summary>{link}</summary><ul>{children}</ul></details></li>' if children else f'<li class="blog-folder-leaf">{link}</li>'
     articles,_ = service.public_articles(blog["id"], path_prefix=selected)
-    cards=''.join(f'<li class="blog-card"><div><h2><a href="{base}/posts/{quote(a["slug"])}">{_esc(a["title"])}</a></h2><p class="blog-summary">{_esc(a["summary"])}</p></div></li>' for a in articles)
+    cards=''.join(_article_card(article, base, show_meta=False) for article in articles)
     return f'<section class="blog-directory-layout"><aside class="blog-directory"><h2>目录</h2><ul>{"".join(node(item) for item in service.public_directory(blog["id"])["children"])}</ul></aside><section><h2>{_esc(selected or "全部文档")}</h2><ul class="blog-list">{cards or "<li>暂无文档。</li>"}</ul></section></section>'
 
 
@@ -122,7 +181,8 @@ def mount_extra(app: FastAPI) -> None:
         if not item:
             response = _missing(request,blog_slug); service.record_access(blog,request,status_code=404,article_slug=article_slug)
             return response
-        response = _layout(request,blog,item["title"],f'<article class="markdown-body">{item["html"]}</article>',description=item["summary"])
+        article_body = f'<section class="blog-article-layout"><button class="blog-outline-toggle" type="button" aria-expanded="true" aria-controls="blog-outline">大纲</button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="隐藏大纲">×</button></div><nav class="blog-outline-list"></nav></aside><article id="write" class="markdown-body typora-export">{item["html"]}</article></section>'
+        response = _layout(request,blog,item["title"],article_body,description=item["summary"])
         service.record_access(blog,request,status_code=response.status_code,article_slug=article_slug)
         return response
 

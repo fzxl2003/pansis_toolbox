@@ -20,6 +20,8 @@ defaults:
 
 博客编辑页可上传 ZIP 视觉模板包。模板包至少包含一个 `.css` 文件，也可包含字体和图片资源；它只覆盖公开页面的视觉样式，不支持自定义 HTML 或 JavaScript。可随时删除模板并回到内置亮色、暗色或自动主题。
 
+公开文章容器同时使用 Typora 常见的 `#write` 与 `.typora-export` 选择器，并提供 `--bg-color`、`--text-color`、`--window-border`、`--code-block-bg-color` 等常见 CSS 变量。将 Typora 主题的 CSS 放入模板 ZIP 并按博客实际页面微调后，可复用其中大部分排版规则；涉及 Typora 编辑器专属界面的规则会被忽略。
+
 私有仓库使用设置页生成的 GitHub Deploy Key。复制公开密钥到 GitHub 仓库的 Deploy keys，并仅授予读取权限。
 
 ## 同步与快照

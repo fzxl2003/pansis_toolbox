@@ -588,11 +588,39 @@ def sync_blog(blog_id: str) -> None:
     target: Path | None = None
     target_created = False
     try:
-        temp=Path(tempfile.mkdtemp(prefix="git-blog-",dir=_root()))
-        checkout=temp/"repo"; owner=next((u for u in list_users() if u.id==blog["owner_user_id"]),None)
+        owner=next((u for u in list_users() if u.id==blog["owner_user_id"]),None)
         private_key=github_key_service.get_private_key(blog["github_key_id"],owner) if blog["github_key_id"] and owner else ""
         proxy_url=proxy_service.get_proxy_url_for_host("ssh.github.com" if private_key else "github.com")
-        _git(["clone","--depth","1","--branch",blog["branch"],_clone_url(blog["repo_url"],bool(private_key)),str(checkout)],private_key=private_key,proxy_url=proxy_url)
+        clone_url = _clone_url(blog["repo_url"], bool(private_key))
+        remote_ref = f'refs/heads/{blog["branch"]}'
+        remote_output = _git(
+            ["ls-remote", "--heads", clone_url, remote_ref],
+            private_key=private_key,
+            proxy_url=proxy_url,
+        )
+        remote_commit = next(
+            (line.split(None, 1)[0].lower() for line in remote_output.splitlines() if line.strip()),
+            "",
+        )
+        if not remote_commit:
+            raise ToolboxError("GIT_BRANCH_NOT_FOUND", f'远端分支不存在: {blog["branch"]}', status_code=400)
+        next_time=(datetime.now(timezone.utc)+timedelta(minutes=int(blog["sync_interval_minutes"]))).isoformat()
+        if blog["current_commit"].lower() == remote_commit:
+            finished = _now()
+            with _conn() as conn:
+                conn.execute(
+                    "UPDATE git_blog_blogs SET sync_status='success',last_error='',last_success_at=?,next_sync_at=?,updated_at=? WHERE id=?",
+                    (finished,next_time,finished,blog_id),
+                )
+                conn.execute(
+                    "UPDATE git_blog_runs SET status='success',commit_hash=?,message=?,warnings_json=?,finished_at=? WHERE id=?",
+                    (remote_commit,"当前已是最新版本",json.dumps(warnings,ensure_ascii=False),finished,run_id),
+                )
+                conn.commit()
+            return
+        temp=Path(tempfile.mkdtemp(prefix="git-blog-",dir=_root()))
+        checkout=temp/"repo"
+        _git(["clone","--depth","1","--branch",blog["branch"],clone_url,str(checkout)],private_key=private_key,proxy_url=proxy_url)
         commit=_git(["rev-parse","HEAD"],cwd=checkout).strip().lower()
         target=_snapshot_dir(blog_id,commit); target.parent.mkdir(parents=True,exist_ok=True)
         if not target.exists():
@@ -601,7 +629,6 @@ def sync_blog(blog_id: str) -> None:
         else: shutil.rmtree(temp,ignore_errors=True)
         effective, articles, valid_assets = _prepare_snapshot(blog, target)
         _reconcile_snapshots(blog_id)
-        next_time=(datetime.now(timezone.utc)+timedelta(minutes=int(blog["sync_interval_minutes"]))).isoformat()
         with _conn() as conn:
             _replace_snapshot_index(conn, blog_id, effective, articles, valid_assets)
             conn.execute("INSERT OR IGNORE INTO git_blog_snapshots(blog_id,commit_hash,created_at) VALUES(?,?,?)", (blog_id,commit,_now()))

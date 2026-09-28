@@ -7,6 +7,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.python-version
+uv.*
 node_modules/
 tools/git_blog/assets/vendor/
 dist/
@@ -24,3 +26,4 @@ storage/data/tools/
 !storage/outputs/.gitkeep
 !storage/temp/.gitkeep
 !storage/data/.gitkeep
+

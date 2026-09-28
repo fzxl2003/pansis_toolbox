@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -93,6 +94,60 @@ def test_sync_run_stores_the_complete_error(monkeypatch: pytest.MonkeyPatch, iso
     run = service.list_runs(blog["id"], owner)[0]
     assert run["message"] == message
     assert service.get_blog(blog["id"], owner)["lastError"] == message
+
+
+def test_sync_skips_clone_when_remote_commit_is_current(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    blog = service.create_blog({"slug": "current", "repoUrl": "https://github.com/acme/docs"}, owner)
+    commit = "a" * 40
+    with service._conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET current_commit=? WHERE id=?", (commit, blog["id"]))
+        conn.commit()
+    calls: list[list[str]] = []
+
+    def fake_git(args, **kwargs):
+        calls.append(args)
+        return f"{commit}\trefs/heads/main\n"
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(service.proxy_service, "get_proxy_url_for_host", lambda host: "")
+
+    service.sync_blog(blog["id"])
+
+    assert calls == [["ls-remote", "--heads", "https://github.com/acme/docs.git", "refs/heads/main"]]
+    run = service.list_runs(blog["id"], owner)[0]
+    assert run["status"] == "success"
+    assert run["commit_hash"] == commit
+    assert run["message"] == "当前已是最新版本"
+
+
+def test_sync_clones_when_remote_commit_changed(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    blog = service.create_blog({"slug": "changed", "repoUrl": "https://github.com/acme/docs"}, owner)
+    old_commit, new_commit = "a" * 40, "b" * 40
+    with service._conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET current_commit=? WHERE id=?", (old_commit, blog["id"]))
+        conn.commit()
+    calls: list[list[str]] = []
+
+    def fake_git(args, **kwargs):
+        calls.append(args)
+        if args[0] == "ls-remote":
+            return f"{new_commit}\trefs/heads/main\n"
+        if args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
+            return ""
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return f"{new_commit}\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    monkeypatch.setattr(service.proxy_service, "get_proxy_url_for_host", lambda host: "")
+    monkeypatch.setattr(service, "_prepare_snapshot", lambda blog_row, target: (service._normalise_config(None), [], []))
+
+    service.sync_blog(blog["id"])
+
+    assert [args[0] for args in calls] == ["ls-remote", "clone", "rev-parse"]
+    assert service.get_blog(blog["id"], owner)["currentCommit"] == new_commit
+    assert service.list_runs(blog["id"], owner)[0]["message"] == "同步 0 篇文章"
 
 
 def test_snapshot_retention_keeps_only_the_latest_five(isolated_storage, owner: User) -> None:

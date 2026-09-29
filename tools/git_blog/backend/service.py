@@ -174,7 +174,7 @@ def _validate_branch(value: str) -> str:
 
 
 def _defaults() -> dict[str, Any]:
-    return {"site": {"description": "", "author": "", "language": "zh-CN", "theme": "auto", "customThemeId": "", "accentColor": "#2563eb", "contentWidth": 820, "fontFamily": "system-ui, sans-serif", "postsPerPage": 10, "customTemplate": False}, "defaults": {"published": False, "author": "", "cover": ""}, "logs": {"accessEnabled": True, "recordIp": False, "recordUserAgent": True, "recordReferrer": True, "retentionDays": 30}}
+    return {"site": {"description": "", "author": "", "language": "zh-CN", "theme": "auto", "customThemeId": "", "accentColor": "#42b983", "accentColorEnabled": False, "contentWidth": 820, "fontFamily": "system-ui, sans-serif", "postsPerPage": 10, "customTemplate": False}, "defaults": {"published": False, "author": "", "cover": ""}, "logs": {"accessEnabled": True, "recordIp": False, "recordUserAgent": True, "recordReferrer": True, "retentionDays": 30}}
 
 
 def _normalise_config(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -186,6 +186,9 @@ def _normalise_config(value: dict[str, Any] | None) -> dict[str, Any]:
     site, defaults = result["site"], result["defaults"]
     site["theme"] = site["theme"] if site["theme"] in {"auto", "light", "dark"} else "auto"
     site["customThemeId"] = str(site.get("customThemeId") or "").strip()
+    accent = str(site.get("accentColor") or "").strip().lower()
+    site["accentColor"] = accent if re.fullmatch(r"#[0-9a-f]{6}", accent) else "#42b983"
+    site["accentColorEnabled"] = bool(site.get("accentColorEnabled", False))
     site["postsPerPage"] = max(1, min(50, int(site.get("postsPerPage") or 10)))
     site["contentWidth"] = max(480, min(1400, int(site.get("contentWidth") or 820)))
     defaults["published"] = bool(defaults.get("published", False))

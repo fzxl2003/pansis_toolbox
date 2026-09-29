@@ -58,6 +58,23 @@ def test_custom_typora_theme_is_only_loaded_for_article_layout() -> None:
     assert 'class="git-blog-page theme-custom"' in article
 
 
+def test_layout_applies_configured_accent_color_and_keeps_green_as_default() -> None:
+    blog = {
+        "id": "blog-1",
+        "slug": "notes",
+        "name": "Notes",
+        "config": {"site": {"theme": "auto", "accentColor": "#7c3aed", "accentColorEnabled": True}},
+        "effectiveConfig": {"site": {"theme": "auto", "language": "zh-CN"}},
+    }
+
+    configured = public._layout(_request(), blog, "首页", "<p>list</p>").body.decode()
+    blog["config"]["site"]["accentColorEnabled"] = False
+    defaulted = public._layout(_request(), blog, "首页", "<p>list</p>").body.decode()
+
+    assert "--blog-user-accent:#7c3aed" in configured
+    assert "--blog-user-accent:#42b983" in defaulted
+
+
 def test_outline_script_targets_the_stable_typora_article_container() -> None:
     script = (Path(__file__).parents[1] / "assets" / "public.js").read_text(encoding="utf-8")
 

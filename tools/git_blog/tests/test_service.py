@@ -33,6 +33,15 @@ def test_frontmatter_and_config_precedence() -> None:
     assert service._merge_config(ui, repo)["defaults"] == {"published": True, "author": "", "cover": ""}
 
 
+def test_accent_color_config_accepts_hex_and_rejects_invalid_values() -> None:
+    configured = service._normalise_config({"site": {"accentColor": " #7C3AED ", "accentColorEnabled": True}})
+    invalid = service._normalise_config({"site": {"accentColor": "rebeccapurple", "accentColorEnabled": True}})
+
+    assert configured["site"]["accentColor"] == "#7c3aed"
+    assert configured["site"]["accentColorEnabled"] is True
+    assert invalid["site"]["accentColor"] == "#42b983"
+
+
 def test_blog_crud_is_owner_isolated(isolated_storage, owner: User) -> None:
     blog = service.create_blog({"name": "Notes", "slug": "writer-notes", "repoUrl": "https://github.com/acme/notes", "branch": "main"}, owner)
     assert blog["repoUrl"] == "https://github.com/acme/notes.git"

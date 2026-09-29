@@ -6,13 +6,14 @@
  */
 :root {
   --blog-width: 860px;
-  --blog-accent: #42b983;
+  --blog-accent: var(--blog-user-accent, #42b983);
+  --blog-accent-ring: color-mix(in srgb, var(--blog-accent) 18%, transparent);
   --side-bar-bg-color: #fff;
   --control-text-color: #777;
-  --select-text-bg-color: rgba(66, 185, 131, .28);
-  --active-file-bg-color: rgba(66, 185, 131, .12);
+  --select-text-bg-color: color-mix(in srgb, var(--blog-accent) 28%, transparent);
+  --active-file-bg-color: color-mix(in srgb, var(--blog-accent) 12%, transparent);
   --active-file-text-color: #34495e;
-  --item-hover-bg-color: rgba(66, 185, 131, .09);
+  --item-hover-bg-color: color-mix(in srgb, var(--blog-accent) 9%, transparent);
   --bg-color: #fff;
   --text-color: #34495e;
   --heading-color: #34495e;
@@ -22,7 +23,7 @@
   --code-bg: #f8f8f8;
   --code-color: #e96900;
   --table-alt-bg: #fafafa;
-  --quote-bg: rgba(66, 185, 131, .1);
+  --quote-bg: color-mix(in srgb, var(--blog-accent) 10%, transparent);
   --font-sans-serif: Ubuntu, "Source Sans Pro", "Noto Sans SC", sans-serif;
   --font-monospace: "Fira Code", "Roboto Mono", Consolas, monospace;
 }
@@ -47,11 +48,11 @@ html { min-height: 100%; background: var(--bg-color); scroll-behavior: smooth; }
 
 /* Index and search. */
 .blog-search { display: flex; width: 100%; margin: 0 0 26px; overflow: hidden; border: 1px solid var(--window-border); border-radius: 3px; background: var(--bg-color); }
-.blog-search:focus-within { border-color: var(--blog-accent); box-shadow: 0 0 0 2px rgba(66, 185, 131, .12); }
+.blog-search:focus-within { border-color: var(--blog-accent); box-shadow: 0 0 0 2px var(--blog-accent-ring); }
 .blog-search input { flex: 1 1 auto; min-width: 0; height: 40px; padding: 0 12px; border: 0; outline: 0; background: transparent; color: var(--text-color); font: inherit; }
 .blog-search input::placeholder { color: var(--muted-color); opacity: .72; }
 .blog-search button { flex: 0 0 auto; min-width: 62px; padding: 0 15px; border: 0; background: var(--blog-accent); color: #fff; cursor: pointer; font: inherit; font-size: .9rem; font-weight: 600; white-space: nowrap; }
-.blog-search button:hover { background: #36a875; }
+.blog-search button:hover { background: color-mix(in srgb, var(--blog-accent) 84%, #000); }
 .blog-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .blog-list > li:not(.blog-card) { color: var(--muted-color); }
 .blog-card { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 24px; align-items: center; position: relative; padding: 22px 14px; border-bottom: 1px solid var(--soft-border); cursor: pointer; outline: none; transition: background-color .15s, transform .15s; }
@@ -166,8 +167,8 @@ html { min-height: 100%; background: var(--bg-color); scroll-behavior: smooth; }
 body.git-blog-page.theme-dark {
   --side-bar-bg-color: #1d1d1d;
   --control-text-color: #aaa;
-  --select-text-bg-color: hsl(153, 47%, 40%);
-  --active-file-bg-color: hsl(153, 47%, 40%);
+  --select-text-bg-color: color-mix(in srgb, var(--blog-accent) 60%, transparent);
+  --active-file-bg-color: color-mix(in srgb, var(--blog-accent) 60%, transparent);
   --active-file-text-color: #eee;
   --item-hover-bg-color: rgba(0, 0, 0, .5);
   --bg-color: #1f1f1f;
@@ -179,14 +180,14 @@ body.git-blog-page.theme-dark {
   --code-bg: rgba(0, 0, 0, .2);
   --code-color: #f3b37f;
   --table-alt-bg: hsl(0, 0%, 10%);
-  --quote-bg: rgba(66, 185, 131, .1);
+  --quote-bg: color-mix(in srgb, var(--blog-accent) 14%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   body.git-blog-page.theme-auto {
     --side-bar-bg-color: #1d1d1d;
     --control-text-color: #aaa;
-    --select-text-bg-color: hsl(153, 47%, 40%);
-    --active-file-bg-color: hsl(153, 47%, 40%);
+    --select-text-bg-color: color-mix(in srgb, var(--blog-accent) 60%, transparent);
+    --active-file-bg-color: color-mix(in srgb, var(--blog-accent) 60%, transparent);
     --active-file-text-color: #eee;
     --item-hover-bg-color: rgba(0, 0, 0, .5);
     --bg-color: #1f1f1f;
@@ -198,7 +199,7 @@ body.git-blog-page.theme-dark {
     --code-bg: rgba(0, 0, 0, .2);
     --code-color: #f3b37f;
     --table-alt-bg: hsl(0, 0%, 10%);
-    --quote-bg: rgba(66, 185, 131, .1);
+    --quote-bg: color-mix(in srgb, var(--blog-accent) 14%, transparent);
   }
 }
 .theme-dark :where(#write) blockquote { color: #eee; }

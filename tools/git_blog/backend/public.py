@@ -9,15 +9,17 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from tools.git_blog.backend import service
 
-ASSET_VERSION = "custom-theme-outline-20260928"
+ASSET_VERSION = "accent-color-20260928"
 
 
 def _site(blog: dict) -> dict:
     configured_site = blog["config"]["site"]
+    accent = configured_site.get("accentColor", "#42b983") if configured_site.get("accentColorEnabled") else "#42b983"
     config = {
         **(blog.get("effectiveConfig") or blog["config"])["site"],
         "customTemplate": configured_site.get("customTemplate", False),
         "customThemeId": configured_site.get("customThemeId", ""),
+        "accentColor": accent,
     }
     return {**config, "title": blog["name"], "description": config.get("description") or "GitHub Markdown 博客"}
 

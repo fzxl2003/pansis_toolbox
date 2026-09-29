@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import html
+import json
 from datetime import datetime
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from tools.git_blog.backend import service
 
-ASSET_VERSION = "accent-color-20260928"
+ASSET_VERSION = "sticky-blog-header-20260929"
+DIRECTORY_COOKIE_NAME = "git_blog_directory_collapsed"
 
 
 def _site(blog: dict) -> dict:
@@ -56,6 +58,11 @@ def _time(value: object) -> str:
     return f'<time class="blog-time" datetime="{_esc(raw)}" data-time="{_esc(raw)}">{_esc(_relative_time(raw))}</time>'
 
 
+def _back_to_top_button(extra_class: str = "") -> str:
+    classes = f"blog-back-to-top {extra_class}".strip()
+    return f'<button class="{classes}" type="button" aria-label="返回页面开头" title="返回开头"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 10 6-6 6 6M12 4v16"></path></svg></button>'
+
+
 def _page_url(request: Request, page: int) -> str:
     params = {key: value for key, value in request.query_params.items() if key != "page"}
     params["page"] = str(page)
@@ -100,10 +107,11 @@ def _layout(request: Request, blog: dict, title: str, body: str, *, description:
     typora_css = f'<link rel="stylesheet" href="{base}/custom-theme.css">' if article_theme and site.get("customThemeId") else ""
     custom = template_css + typora_css
     body_theme = "custom" if article_theme and site.get("customThemeId") else str(site.get("theme", "auto"))
+    page_kind = "blog-article-page" if article_theme else "blog-overview-page"
     head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css?v={ASSET_VERSION}">{custom}<style>:root{{--blog-user-accent:{_esc(site.get('accentColor','#42b983'))};--blog-width:{int(site.get('contentWidth',860))}px;--blog-font:{_esc(site.get('fontFamily','Ubuntu, Source Sans Pro, sans-serif'))};}}</style></head>'''
     icons=f'<a class="blog-icon" title="RSS" href="{base}/feed.xml">◔</a><a class="blog-icon" title="Atom" href="{base}/atom.xml">◉</a>'
     nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span></header>'
-    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(body_theme)}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
+    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(body_theme)} {page_kind}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
 
 
 def _missing(request: Request, slug: str = "") -> HTMLResponse:
@@ -122,22 +130,39 @@ def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False)
     search=f'<form class="blog-search" action="{base}" method="get"><input name="q" value="{_esc(query)}" placeholder="搜索文章"><button>搜索</button></form>' if not archive else ""
     tags=' '.join(f'<a href="{base}/tags/{quote(t)}">#{_esc(t)}</a>' for t in service.public_tags(blog["id"])) if tag else ''
     heading=f'<h2>{_esc(title)}</h2>' if title else ''
-    body=f'{heading}{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul>{_pagination(request,page,total)}'
+    back_to_top = _back_to_top_button("blog-home-back-to-top") if not tag and not archive else ""
+    body=f'{heading}{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul>{_pagination(request,page,total)}{back_to_top}'
     return _layout(request,blog,title,body,description=_site(blog)["description"])
 
 
-def _directory_body(blog: dict, selected: str = "") -> str:
+def _collapsed_directories(request: Request) -> set[str]:
+    raw = request.cookies.get(DIRECTORY_COOKIE_NAME, "")
+    if not raw or len(raw) > 4096:
+        return set()
+    try:
+        paths = json.loads(unquote(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return set()
+    if not isinstance(paths, list):
+        return set()
+    return {path for path in paths[:100] if isinstance(path, str) and 0 < len(path) <= 500}
+
+
+def _directory_body(blog: dict, selected: str = "", collapsed: set[str] | None = None) -> str:
     base = f'/blog/{quote(blog["slug"])}'
+    collapsed = collapsed or set()
     def node(item: dict, parent: str = "") -> str:
         path = f'{parent}/{item["name"]}'.strip('/')
         children = ''.join(node(child, path) for child in item["children"] if child["children"])
         if not item["children"]:
             return ""
         link = f'<a href="{base}/directory?path={quote(path)}">{_esc(item["name"])}</a>'
-        return f'<li><details open><summary>{link}</summary><ul>{children}</ul></details></li>' if children else f'<li class="blog-folder-leaf">{link}</li>'
+        open_attr = "" if path in collapsed else " open"
+        return f'<li><details data-directory-path="{_esc(path)}"{open_attr}><summary>{link}</summary><ul>{children}</ul></details></li>' if children else f'<li class="blog-folder-leaf">{link}</li>'
     articles,_ = service.public_articles(blog["id"], path_prefix=selected)
     cards=''.join(_article_card(article, base, show_meta=False) for article in articles)
-    return f'<section class="blog-directory-layout"><aside class="blog-directory"><h2>目录</h2><ul>{"".join(node(item) for item in service.public_directory(blog["id"])["children"])}</ul></aside><section><h2>{_esc(selected or "全部文档")}</h2><ul class="blog-list">{cards or "<li>暂无文档。</li>"}</ul></section></section>'
+    directory = "".join(node(item) for item in service.public_directory(blog["id"])["children"])
+    return f'<section class="blog-directory-layout"><div class="blog-directory-rail"><button class="blog-directory-toggle" type="button" aria-label="显示文件目录" title="显示文件目录" aria-expanded="true" aria-controls="blog-directory-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg></button><button class="blog-directory-backdrop" type="button" aria-label="点击页面收起文件目录" tabindex="-1"></button><aside class="blog-directory" id="blog-directory-panel" data-cookie-path="{_esc(base)}"><div class="blog-directory-head"><strong>目录</strong><button class="blog-directory-close" type="button" aria-label="收起文件目录" title="收起文件目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg></button></div><ul>{directory}</ul></aside></div><section class="blog-directory-content"><h2>{_esc(selected or "全部文档")}</h2><ul class="blog-list">{cards or "<li>暂无文档。</li>"}</ul></section>{_back_to_top_button()}</section>'
 
 
 def mount_extra(app: FastAPI) -> None:
@@ -157,7 +182,7 @@ def mount_extra(app: FastAPI) -> None:
         blog=service.public_blog(blog_slug)
         if not blog: return _missing(request)
         selected=request.query_params.get("path", "").strip().strip("/")
-        response = _layout(request, blog, "目录", _directory_body(blog, selected)); service.record_access(blog, request, status_code=response.status_code)
+        response = _layout(request, blog, "目录", _directory_body(blog, selected, _collapsed_directories(request))); service.record_access(blog, request, status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/tags", include_in_schema=False)
@@ -192,7 +217,7 @@ def mount_extra(app: FastAPI) -> None:
             response = _missing(request,blog_slug); service.record_access(blog,request,status_code=404,article_slug=article_slug)
             return response
         article_class = "typora-export" if _site(blog).get("customThemeId") else "markdown-body typora-export"
-        article_body = f'<section class="blog-article-layout"><button class="blog-outline-toggle" type="button" aria-expanded="true" aria-controls="blog-outline">大纲</button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="隐藏大纲">×</button></div><nav class="blog-outline-list"></nav></aside><article id="write" class="{article_class}">{item["html"]}</article></section>'
+        article_body = f'<section class="blog-article-layout"><div class="blog-outline-rail"><button class="blog-outline-toggle" type="button" aria-label="显示目录" title="显示目录" aria-expanded="true" aria-controls="blog-outline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg></button><button class="blog-outline-backdrop" type="button" aria-label="点击页面收起目录" tabindex="-1"></button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="收起目录" title="收起目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg></button></div><nav class="blog-outline-list"></nav></aside></div><article id="write" class="{article_class}">{item["html"]}</article>{_back_to_top_button()}</section>'
         response = _layout(request,blog,item["title"],article_body,description=item["summary"],article_theme=True)
         service.record_access(blog,request,status_code=response.status_code,article_slug=article_slug)
         return response

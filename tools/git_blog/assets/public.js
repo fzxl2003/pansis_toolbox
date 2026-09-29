@@ -33,6 +33,48 @@ for (const card of document.querySelectorAll('.blog-card[data-href]')) {
   });
 }
 
+const blogDirectory = document.querySelector('.blog-directory[data-cookie-path]');
+if (blogDirectory) {
+  const details = [...blogDirectory.querySelectorAll('details[data-directory-path]')];
+  const saveDirectoryState = () => {
+    const collapsed = details.filter((item) => !item.open).map((item) => item.dataset.directoryPath);
+    let encoded = encodeURIComponent(JSON.stringify(collapsed));
+    while (encoded.length > 3500 && collapsed.length) {
+      collapsed.shift();
+      encoded = encodeURIComponent(JSON.stringify(collapsed));
+    }
+    document.cookie = `git_blog_directory_collapsed=${encoded}; Max-Age=31536000; Path=${blogDirectory.dataset.cookiePath}; SameSite=Lax`;
+  };
+  details.forEach((item) => item.addEventListener('toggle', saveDirectoryState));
+}
+
+const directoryLayout = document.querySelector('.blog-directory-layout');
+const directoryToggle = directoryLayout?.querySelector('.blog-directory-toggle');
+const directoryClose = directoryLayout?.querySelector('.blog-directory-close');
+const directoryBackdrop = directoryLayout?.querySelector('.blog-directory-backdrop');
+const directoryPanel = directoryLayout?.querySelector('.blog-directory');
+
+if (directoryLayout && directoryToggle && directoryPanel) {
+  const narrowDirectoryViewport = window.matchMedia('(max-width: 920px)');
+  const setDirectoryVisible = (visible) => {
+    directoryLayout.classList.toggle('directory-hidden', !visible);
+    directoryLayout.classList.toggle('directory-visible', visible);
+    directoryToggle.setAttribute('aria-expanded', String(visible));
+    directoryPanel.setAttribute('aria-hidden', String(!visible));
+  };
+  directoryToggle.addEventListener('click', () => setDirectoryVisible(directoryLayout.classList.contains('directory-hidden')));
+  directoryClose?.addEventListener('click', () => {
+    setDirectoryVisible(false);
+    directoryToggle.focus();
+  });
+  directoryBackdrop?.addEventListener('click', () => setDirectoryVisible(false));
+  directoryPanel.querySelectorAll('a').forEach((link) => link.addEventListener('click', () => {
+    if (narrowDirectoryViewport.matches) setDirectoryVisible(false);
+  }));
+  setDirectoryVisible(!narrowDirectoryViewport.matches);
+  narrowDirectoryViewport.addEventListener('change', (event) => setDirectoryVisible(!event.matches));
+}
+
 async function writeToClipboard(text) {
   if (navigator.clipboard?.writeText) {
     try {
@@ -109,9 +151,28 @@ const outline = articleLayout?.querySelector('.blog-outline');
 const outlineList = articleLayout?.querySelector('.blog-outline-list');
 const outlineToggle = articleLayout?.querySelector('.blog-outline-toggle');
 const outlineClose = articleLayout?.querySelector('.blog-outline-close');
+const outlineBackdrop = articleLayout?.querySelector('.blog-outline-backdrop');
+const backToTop = document.querySelector('.blog-back-to-top');
 const article = articleLayout?.querySelector('#write');
 
+if (backToTop) {
+  const updateBackToTop = () => backToTop.classList.toggle('is-visible', window.scrollY > 320);
+  updateBackToTop();
+  window.addEventListener('scroll', updateBackToTop, { passive: true });
+  backToTop.addEventListener('click', () => {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+  });
+}
+
 if (articleLayout && outline && outlineList && outlineToggle && article) {
+  const narrowViewport = window.matchMedia('(max-width: 920px)');
+  const setOutline = (visible) => {
+    articleLayout.classList.toggle('outline-hidden', !visible);
+    articleLayout.classList.toggle('outline-visible', visible);
+    outlineToggle.setAttribute('aria-expanded', String(visible));
+    outline.setAttribute('aria-hidden', String(!visible));
+  };
   const headings = [...article.querySelectorAll('h1, h2, h3, h4')];
   const usedIds = new Set();
   headings.forEach((heading, index) => {
@@ -133,19 +194,21 @@ if (articleLayout && outline && outlineList && outlineToggle && article) {
       event.preventDefault();
       heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
       history.replaceState(null, '', `#${encodeURIComponent(heading.id)}`);
+      if (narrowViewport.matches) setOutline(false);
     });
     outlineList.append(link);
   });
   if (!headings.length) {
     articleLayout.classList.add('outline-unavailable');
   } else {
-    const setOutline = (visible) => {
-      articleLayout.classList.toggle('outline-hidden', !visible);
-      outlineToggle.setAttribute('aria-expanded', String(visible));
-    };
     outlineToggle.addEventListener('click', () => setOutline(articleLayout.classList.contains('outline-hidden')));
-    outlineClose?.addEventListener('click', () => setOutline(false));
-    if (window.matchMedia('(max-width: 920px)').matches) setOutline(false);
+    outlineClose?.addEventListener('click', () => {
+      setOutline(false);
+      outlineToggle.focus();
+    });
+    outlineBackdrop?.addEventListener('click', () => setOutline(false));
+    setOutline(!narrowViewport.matches);
+    narrowViewport.addEventListener('change', (event) => setOutline(!event.matches));
     const links = [...outlineList.querySelectorAll('a')];
     const observer = new IntersectionObserver((entries) => {
       const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];

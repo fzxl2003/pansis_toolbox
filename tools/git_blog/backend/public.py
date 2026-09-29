@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from urllib.parse import quote, unquote, urlencode
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi import Body, FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
+from backend.app.core.errors import ToolboxError
+from backend.app.core.security import get_optional_user
 from tools.git_blog.backend import service
 
-ASSET_VERSION = "sticky-blog-header-20260929"
+ASSET_VERSION = "access-sharing-ui-20260929"
 DIRECTORY_COOKIE_NAME = "git_blog_directory_collapsed"
+VISITOR_COOKIE_NAME = "git_blog_visitor"
 
 
 def _site(blog: dict) -> dict:
@@ -101,17 +105,54 @@ def _article_card(article: dict, base: str, *, show_meta: bool = True) -> str:
     return f'<li class="blog-card" data-href="{_esc(href)}" tabindex="0" role="link" aria-label="阅读：{_esc(article["title"])}"><div><h2><a href="{_esc(href)}">{_esc(article["title"])}</a></h2>{meta}<p class="blog-summary">{_esc(article["summary"])}</p></div>{image}</li>'
 
 
-def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False, article_theme: bool = False) -> HTMLResponse:
+def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False, article_theme: bool = False, include_nav: bool = True, noindex: bool = False, resource_base: str = "") -> HTMLResponse:
     site = _site(blog); base = f"/blog/{quote(blog['slug'])}"; css = "/tool-assets/git_blog"
-    template_css = f'<link rel="stylesheet" href="{base}/theme/style.css">' if site.get("customTemplate") else ""
-    typora_css = f'<link rel="stylesheet" href="{base}/custom-theme.css">' if article_theme and site.get("customThemeId") else ""
+    asset_base = resource_base or base
+    template_css = f'<link rel="stylesheet" href="{asset_base}/theme/style.css">' if site.get("customTemplate") else ""
+    typora_css = f'<link rel="stylesheet" href="{asset_base}/custom-theme.css">' if article_theme and site.get("customThemeId") else ""
     custom = template_css + typora_css
     body_theme = "custom" if article_theme and site.get("customThemeId") else str(site.get("theme", "auto"))
     page_kind = "blog-article-page" if article_theme else "blog-overview-page"
-    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}"><link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css?v={ASSET_VERSION}">{custom}<style>:root{{--blog-user-accent:{_esc(site.get('accentColor','#42b983'))};--blog-width:{int(site.get('contentWidth',860))}px;--blog-font:{_esc(site.get('fontFamily','Ubuntu, Source Sans Pro, sans-serif'))};}}</style></head>'''
+    robots = '<meta name="robots" content="noindex,nofollow">' if noindex else ""
+    head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}">{robots}<link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css?v={ASSET_VERSION}">{custom}<style>:root{{--blog-user-accent:{_esc(site.get('accentColor','#42b983'))};--blog-width:{int(site.get('contentWidth',860))}px;--blog-font:{_esc(site.get('fontFamily','Ubuntu, Source Sans Pro, sans-serif'))};}}</style></head>'''
     icons=f'<a class="blog-icon" title="RSS" href="{base}/feed.xml">◔</a><a class="blog-icon" title="Atom" href="{base}/atom.xml">◉</a>'
     nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span></header>'
-    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(body_theme)} {page_kind}"><main class="blog-shell">{nav}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
+    return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(body_theme)} {page_kind}"><main class="blog-shell">{nav if include_nav else ""}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
+
+
+def _visitor(request: Request) -> tuple[str, bool]:
+    existing = request.cookies.get(VISITOR_COOKIE_NAME, "")
+    if 20 <= len(existing) <= 200:
+        return existing, False
+    return secrets.token_urlsafe(32), True
+
+
+def _set_visitor(response: Response, token: str, created: bool, request: Request) -> Response:
+    if created:
+        response.set_cookie(VISITOR_COOKIE_NAME, token, max_age=service.VISITOR_DAYS * 86400, httponly=True, samesite="lax", secure=request.url.scheme == "https", path="/")
+    return response
+
+
+def _gate_page(request: Request, *, title: str, message: str, blog_slug: str = "", share_token: str = "", status_code: int = 401) -> HTMLResponse:
+    target = request.url.path + (f'?{request.url.query}' if request.url.query else '')
+    blog_form = f'''<form data-blog-unlock data-endpoint="/blog/{quote(blog_slug)}/unlock"><h2>使用博客访问密码</h2><input name="password" type="password" autocomplete="current-password" placeholder="访问密码" required><button>进入博客</button></form>''' if blog_slug else ""
+    share_form = f'''<form data-share-unlock data-endpoint="/blog/share/{quote(share_token)}/unlock"><h2>输入分享密码</h2><input name="password" type="password" autocomplete="current-password" placeholder="分享密码" required><button>打开文档</button></form>''' if share_token else ""
+    login_form = f'''<form data-platform-login><h2>使用平台账号</h2><input name="username" autocomplete="username" placeholder="用户名" required><input name="password" type="password" autocomplete="current-password" placeholder="密码" required><button>登录并继续</button></form>''' if blog_slug else ""
+    source = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{_esc(title)}</title><style>body{{margin:0;background:#f8fafc;color:#1e293b;font-family:system-ui}}main{{width:min(92%,520px);margin:8vh auto}}section{{padding:26px;border:1px solid #e2e8f0;border-radius:14px;background:white;box-shadow:0 16px 40px #0f172a12}}h1{{margin:0 0 8px;font-size:24px}}h2{{margin:18px 0 8px;font-size:14px}}p{{color:#64748b}}form{{display:grid;gap:9px}}input,button{{box-sizing:border-box;min-height:42px;padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}}button{{border-color:#4f46e5;background:#4f46e5;color:white;cursor:pointer}}[data-error]{{min-height:20px;color:#b91c1c;font-size:13px}}</style></head><body><main><section><h1>{_esc(title)}</h1><p>{_esc(message)}</p>{share_form}{blog_form}{login_form}<div data-error></div></section></main><script>const error=document.querySelector('[data-error]');for(const form of document.querySelectorAll('form'))form.addEventListener('submit',async event=>{{event.preventDefault();error.textContent='';const data=Object.fromEntries(new FormData(form));const endpoint=form.dataset.platformLogin?'/api/auth/login':form.dataset.endpoint;const response=await fetch(endpoint,{{method:'POST',credentials:'include',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}});if(response.ok)location.href={json.dumps(target)};else{{const body=await response.json().catch(()=>({{}}));error.textContent=body.error?.message||'认证失败';}}}});</script></body></html>'''
+    return HTMLResponse(source, status_code=status_code)
+
+
+def _article_body(blog: dict, item: dict, *, share_button: str = "") -> str:
+    article_class = "typora-export" if _site(blog).get("customThemeId") else "markdown-body typora-export"
+    return f'{share_button}<section class="blog-article-layout"><div class="blog-outline-rail"><button class="blog-outline-toggle" type="button" aria-label="显示目录" title="显示目录" aria-expanded="true" aria-controls="blog-outline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg></button><button class="blog-outline-backdrop" type="button" aria-label="点击页面收起目录" tabindex="-1"></button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="收起目录" title="收起目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg></button></div><nav class="blog-outline-list"></nav></aside></div><article id="write" class="{article_class}">{item["html"]}</article>{_back_to_top_button()}</section>'
+
+
+def _share_control(blog: dict, item: dict, principal: dict[str, object]) -> str:
+    if not blog.get("shareEnabled"):
+        return ""
+    can_share = "true" if principal.get("canShare") else "false"
+    default_expiry = (datetime.now().astimezone() + timedelta(days=7)).strftime('%Y-%m-%dT%H:%M')
+    return f'''<div class="blog-share" data-share-root data-can-share="{can_share}" data-endpoint="/blog/{quote(blog['slug'])}/shares" data-access-endpoint="/blog/{quote(blog['slug'])}/share-access" data-article="{_esc(item['slug'])}"><button class="blog-share-button" type="button" aria-label="分享文档" title="分享文档"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"></path></svg></button><dialog class="blog-share-dialog" data-share-dialog><form class="blog-share-form"><header><div><strong>分享文档</strong><small>设置链接的访问方式和有效范围</small></div><button type="button" data-share-close aria-label="关闭">×</button></header><label>展示方式<select name="mode"><option value="document">仅显示当前文档</option><option value="full">显示完整博客界面</option></select></label><label>有效期<input name="expiresAt" type="datetime-local" value="{default_expiry}"></label><label>浏览器打开上限<input name="maxViews" type="number" min="1" placeholder="留空表示不限"></label><label>分享密码（可选）<input name="password" type="password" autocomplete="new-password" placeholder="留空表示无需密码"></label><button type="submit" data-create-share>创建分享链接</button><div data-share-result></div></form></dialog><dialog class="blog-share-dialog blog-share-auth-dialog" data-share-auth-dialog><div class="blog-share-form"><header><div><strong>需要分享权限</strong><small>请选择一种认证方式继续</small></div><button type="button" data-share-auth-close aria-label="关闭">×</button></header><form data-share-blog-auth-form><label>博客访问密码<input name="password" type="password" autocomplete="current-password" placeholder="输入具有分享权限的访问密码" required></label><button>验证访问密码</button></form><div class="blog-share-divider"><span>或</span></div><form data-share-platform-auth-form><label>平台用户名<input name="username" autocomplete="username" required></label><label>平台密码<input name="password" type="password" autocomplete="current-password" required></label><button>登录平台账号</button></form><div data-share-auth-result></div></div></dialog></div>'''
 
 
 def _missing(request: Request, slug: str = "") -> HTMLResponse:
@@ -170,25 +211,71 @@ def mount_extra(app: FastAPI) -> None:
     def blog_about() -> HTMLResponse:
         return HTMLResponse('<!doctype html><title>Git 博客</title><main style="font-family:system-ui;max-width:720px;margin:4rem auto;padding:0 1rem"><h1>Git 博客</h1><p>这是由 Pansis Toolbox 托管的 Markdown 博客服务。</p></main>')
 
+    def normal_access(request: Request, blog_slug: str) -> tuple[dict | None, dict, str, bool]:
+        blog = service.public_blog(blog_slug)
+        visitor, created = _visitor(request)
+        principal = service.blog_access(blog, get_optional_user(request), visitor) if blog else {"allowed": False, "canShare": False}
+        return blog, principal, visitor, created
+
+    def protected_blog(request: Request, blog_slug: str) -> tuple[dict | None, Response | None, dict, str]:
+        blog, principal, visitor, created = normal_access(request, blog_slug)
+        if not blog:
+            return None, _missing(request), principal, visitor
+        if not principal["allowed"]:
+            gate = _gate_page(request, title="此博客为私密博客", message="请使用受邀平台账号或博客访问密码进入。", blog_slug=blog_slug)
+            return blog, _set_visitor(gate, visitor, created, request), principal, visitor
+        return blog, None, principal, visitor
+
+    @app.post("/blog/{blog_slug}/unlock", include_in_schema=False)
+    def unlock_blog(request: Request, blog_slug: str, payload: dict = Body(...)):
+        blog = service.public_blog(blog_slug)
+        if not blog:
+            raise ToolboxError("BLOG_NOT_FOUND", "博客不存在", status_code=404)
+        visitor, created = _visitor(request)
+        result = service.unlock_blog(blog, str(payload.get("password") or ""), visitor)
+        return _set_visitor(JSONResponse({"authenticated": True, **result}), visitor, created, request)
+
+    @app.post("/blog/{blog_slug}/shares", include_in_schema=False)
+    def create_share(request: Request, blog_slug: str, payload: dict = Body(...)):
+        visitor, created = _visitor(request)
+        item = service.create_share(blog_slug, str(payload.get("articleSlug") or ""), payload, get_optional_user(request), visitor)
+        return _set_visitor(JSONResponse({"share": item}), visitor, created, request)
+
+    @app.get("/blog/{blog_slug}/share-access", include_in_schema=False)
+    def share_access(request: Request, blog_slug: str):
+        blog = service.public_blog(blog_slug)
+        if not blog or not blog["shareEnabled"]:
+            raise ToolboxError("SHARING_DISABLED", "该博客尚未开启分享功能", status_code=403)
+        visitor, created = _visitor(request)
+        principal = service.blog_access(blog, get_optional_user(request), visitor)
+        response = JSONResponse({"canShare": bool(principal["canShare"])})
+        return _set_visitor(response, visitor, created, request)
+
+    @app.post("/blog/share/{share_token}/unlock", include_in_schema=False)
+    def unlock_share(request: Request, share_token: str, payload: dict = Body(...)):
+        visitor, created = _visitor(request)
+        service.unlock_share(share_token, str(payload.get("password") or ""), visitor)
+        return _set_visitor(JSONResponse({"authenticated": True}), visitor, created, request)
+
     @app.get("/blog/{blog_slug}", include_in_schema=False)
     def blog_home(request: Request, blog_slug: str):
-        blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return denied
         response = _list(request,blog); service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/directory", include_in_schema=False)
     def directory(request: Request, blog_slug: str):
-        blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return denied
         selected=request.query_params.get("path", "").strip().strip("/")
         response = _layout(request, blog, "目录", _directory_body(blog, selected, _collapsed_directories(request))); service.record_access(blog, request, status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/tags", include_in_schema=False)
     def tags(request: Request, blog_slug: str):
-        blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return denied
         base=f'/blog/{quote(blog_slug)}'; tags = service.public_tag_counts(blog["id"])
         body='<section class="blog-tags"><h2>标签</h2><div>'+''.join(f'<a href="{base}/tags/{quote(item["tag"])}">#{_esc(item["tag"])} <small>{item["count"]}</small></a>' for item in tags)+'</div></section>'
         response = _layout(request, blog, "标签", body); service.record_access(blog, request, status_code=response.status_code)
@@ -196,57 +283,59 @@ def mount_extra(app: FastAPI) -> None:
 
     @app.get("/blog/{blog_slug}/archive", include_in_schema=False)
     def archive(request: Request, blog_slug: str):
-        blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return denied
         response = _list(request,blog,archive=True); service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/tags/{tag}", include_in_schema=False)
     def tag(request: Request, blog_slug: str, tag: str):
-        blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return denied
         response = _list(request,blog,tag=tag); service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/posts/{article_slug:path}", include_in_schema=False)
     def article(request: Request, blog_slug: str, article_slug: str):
-        blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        blog, denied, principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return denied
         item=service.public_article(blog["id"],article_slug)
         if not item:
             response = _missing(request,blog_slug); service.record_access(blog,request,status_code=404,article_slug=article_slug)
             return response
-        article_class = "typora-export" if _site(blog).get("customThemeId") else "markdown-body typora-export"
-        article_body = f'<section class="blog-article-layout"><div class="blog-outline-rail"><button class="blog-outline-toggle" type="button" aria-label="显示目录" title="显示目录" aria-expanded="true" aria-controls="blog-outline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg></button><button class="blog-outline-backdrop" type="button" aria-label="点击页面收起目录" tabindex="-1"></button><aside class="blog-outline" id="blog-outline" aria-label="文章大纲"><div class="blog-outline-head"><strong>目录</strong><button type="button" class="blog-outline-close" aria-label="收起目录" title="收起目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg></button></div><nav class="blog-outline-list"></nav></aside></div><article id="write" class="{article_class}">{item["html"]}</article>{_back_to_top_button()}</section>'
+        article_body = _article_body(blog, item, share_button=_share_control(blog, item, principal))
         response = _layout(request,blog,item["title"],article_body,description=item["summary"],article_theme=True)
         service.record_access(blog,request,status_code=response.status_code,article_slug=article_slug)
         return response
 
     @app.get("/blog/{blog_slug}/assets/{asset_path:path}", include_in_schema=False)
     def asset(request: Request, blog_slug: str, asset_path: str):
-        blog=service.public_blog(blog_slug)
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return Response(status_code=404)
         path=service.public_asset(blog,asset_path) if blog else None
         response = FileResponse(path) if path else Response(status_code=404)
         if blog: service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/theme/{asset_path:path}", include_in_schema=False)
-    def theme_asset(blog_slug: str, asset_path: str):
-        blog=service.public_blog(blog_slug)
+    def theme_asset(request: Request, blog_slug: str, asset_path: str):
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return Response(status_code=404)
         if not blog or not _site(blog).get("customTemplate"): return Response(status_code=404)
         path=(service.template_dir(blog["id"]) / asset_path).resolve(); root=service.template_dir(blog["id"]).resolve()
         return FileResponse(path) if path.is_file() and root in path.parents else Response(status_code=404)
 
     @app.get("/blog/{blog_slug}/custom-theme.css", include_in_schema=False)
-    def custom_theme(blog_slug: str):
-        blog=service.public_blog(blog_slug)
+    def custom_theme(request: Request, blog_slug: str):
+        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        if denied: return Response(status_code=404)
         raw=service.public_theme_css(blog) if blog else None
         return Response(raw,media_type="text/css",headers={"X-Content-Type-Options":"nosniff"}) if raw is not None else Response(status_code=404)
 
     @app.get("/blog/{blog_slug}/feed.xml", include_in_schema=False)
     def rss(request: Request, blog_slug: str):
         blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        if not blog or blog["visibility"] == "private": return _missing(request)
         articles,_=service.public_articles(blog["id"]); base=f"/blog/{quote(blog_slug)}"; site=_site(blog)
         entries=''.join(f'<item><title>{_esc(a["title"])}</title><link>{_esc(_url(request,base+"/posts/"+quote(a["slug"])))}</link><description>{_esc(a["summary"])}</description><pubDate>{_esc(a["publishedAt"])}</pubDate></item>' for a in articles)
         return Response(f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>{_esc(site["title"])}</title><link>{_esc(_url(request,base))}</link><description>{_esc(site["description"])}</description>{entries}</channel></rss>',media_type="application/rss+xml")
@@ -254,7 +343,7 @@ def mount_extra(app: FastAPI) -> None:
     @app.get("/blog/{blog_slug}/atom.xml", include_in_schema=False)
     def atom(request: Request, blog_slug: str):
         blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        if not blog or blog["visibility"] == "private": return _missing(request)
         articles,_=service.public_articles(blog["id"]); base=f"/blog/{quote(blog_slug)}"; site=_site(blog)
         entries=''.join(f'<entry><title>{_esc(a["title"])}</title><id>{_esc(_url(request,base+"/posts/"+quote(a["slug"])))}</id><link href="{_esc(_url(request,base+"/posts/"+quote(a["slug"]))) }"/><updated>{_esc(a["updatedAt"])}</updated><summary>{_esc(a["summary"])}</summary></entry>' for a in articles)
         return Response(f'<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>{_esc(site["title"])}</title><id>{_esc(_url(request,base))}</id><updated>{_esc(blog.get("updated_at") or blog["created_at"])}</updated>{entries}</feed>',media_type="application/atom+xml")
@@ -262,7 +351,67 @@ def mount_extra(app: FastAPI) -> None:
     @app.get("/blog/{blog_slug}/sitemap.xml", include_in_schema=False)
     def sitemap(request: Request, blog_slug: str):
         blog=service.public_blog(blog_slug)
-        if not blog: return _missing(request)
+        if not blog or blog["visibility"] == "private": return _missing(request)
         items,_=service.public_articles(blog["id"]); base=f"/blog/{quote(blog_slug)}"
         urls=[_url(request,base),*[_url(request,base+"/posts/"+quote(a["slug"])) for a in items]]
         return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+''.join(f'<url><loc>{_esc(u)}</loc></url>' for u in urls)+'</urlset>',media_type="application/xml")
+
+    @app.get("/blog/share/{share_token}", include_in_schema=False)
+    def shared_article(request: Request, share_token: str):
+        visitor, created = _visitor(request)
+        try:
+            share, blog, item = service.open_share(share_token, get_optional_user(request), visitor)
+        except ToolboxError as exc:
+            if exc.code == "SHARE_PASSWORD_REQUIRED":
+                response = _gate_page(request, title="此分享受密码保护", message="请输入分享密码后查看文档。", share_token=share_token)
+            elif exc.code == "BLOG_LOGIN_REQUIRED":
+                try:
+                    _row, private_blog = service._share_row(share_token)
+                except ToolboxError:
+                    private_blog = None
+                response = _gate_page(request, title="此分享来自私密博客", message="请使用受邀平台账号或博客访问密码进入。", blog_slug=private_blog["slug"] if private_blog else "", status_code=401)
+            else:
+                response = HTMLResponse(f'<!doctype html><meta name="robots" content="noindex"><main style="font-family:system-ui;text-align:center;padding:5rem"><h1>分享不可用</h1><p>{_esc(exc.message)}</p></main>', status_code=exc.status_code)
+            return _set_visitor(response, visitor, created, request)
+        if share["mode"] == "document":
+            original = f'/blog/{quote(blog["slug"])}/assets/'
+            item = {**item, "html": item["html"].replace(original, f'/blog/share/{quote(share_token)}/assets/')}
+            body = _article_body(blog, item)
+            response = _layout(request, blog, item["title"], body, description=item["summary"], article_theme=True, include_nav=False, noindex=True, resource_base=f'/blog/share/{quote(share_token)}')
+        else:
+            response = _layout(request, blog, item["title"], _article_body(blog, item), description=item["summary"], article_theme=True, noindex=True)
+        service.record_access(blog, request, status_code=response.status_code, article_slug=item["slug"])
+        return _set_visitor(response, visitor, created, request)
+
+    @app.get("/blog/share/{share_token}/assets/{asset_path:path}", include_in_schema=False)
+    def shared_asset(request: Request, share_token: str, asset_path: str):
+        visitor, created = _visitor(request)
+        try:
+            _share, blog, _item = service.open_share(share_token, get_optional_user(request), visitor, count_view=False)
+        except ToolboxError:
+            return Response(status_code=404)
+        path = service.public_asset(blog, asset_path)
+        response = FileResponse(path) if path else Response(status_code=404)
+        return _set_visitor(response, visitor, created, request)
+
+    @app.get("/blog/share/{share_token}/custom-theme.css", include_in_schema=False)
+    def shared_custom_theme(request: Request, share_token: str):
+        visitor, created = _visitor(request)
+        try:
+            _share, blog, _item = service.open_share(share_token, get_optional_user(request), visitor, count_view=False)
+        except ToolboxError:
+            return Response(status_code=404)
+        raw = service.public_theme_css(blog)
+        response = Response(raw, media_type="text/css", headers={"X-Content-Type-Options":"nosniff"}) if raw is not None else Response(status_code=404)
+        return _set_visitor(response, visitor, created, request)
+
+    @app.get("/blog/share/{share_token}/theme/{asset_path:path}", include_in_schema=False)
+    def shared_template_asset(request: Request, share_token: str, asset_path: str):
+        visitor, created = _visitor(request)
+        try:
+            _share, blog, _item = service.open_share(share_token, get_optional_user(request), visitor, count_view=False)
+        except ToolboxError:
+            return Response(status_code=404)
+        path=(service.template_dir(blog["id"]) / asset_path).resolve(); root=service.template_dir(blog["id"]).resolve()
+        response = FileResponse(path) if path.is_file() and root in path.parents else Response(status_code=404)
+        return _set_visitor(response, visitor, created, request)

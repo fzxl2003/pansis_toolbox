@@ -13,6 +13,13 @@ class BlogPayload(BaseModel):
     name:str=""; slug:str; repoUrl:str; branch:str="main"; contentRoot:str=""; syncIntervalMinutes:int=15
     config:dict[str,Any]=Field(default_factory=dict); githubKeyId:str=""; enabled:bool=True; autoSyncEnabled:bool=True
 class ProbePayload(BaseModel): repoUrl:str; githubKeyId:str=""
+class VisibilityPayload(BaseModel): visibility:str
+class AccessUserPayload(BaseModel): username:str=""; canShare:bool=False
+class AccessPasswordPayload(BaseModel): label:str=""; password:str=""; canShare:bool=False; enabled:bool=True
+class SharingPayload(BaseModel): enabled:bool
+class ShareUpdatePayload(BaseModel):
+    mode:str="document"; expiresAt:str|None=None; maxViews:int|None=None; enabled:bool=True
+    passwordAction:str="keep"; password:str=""
 
 @router.get("/blogs")
 def blogs(request:Request)->dict[str,Any]: return {"blogs":service.list_blogs(require_user(request))}
@@ -50,6 +57,30 @@ def rollback(request:Request,blog_id:str,commit:str)->dict[str,Any]: return {"bl
 def runs(request:Request,blog_id:str)->dict[str,Any]: return {"runs":service.list_runs(blog_id,require_user(request))}
 @router.get("/blogs/{blog_id}/access-logs")
 def access_logs(request:Request,blog_id:str)->dict[str,Any]: return {"logs":service.list_access_logs(blog_id,require_user(request))}
+@router.get("/blogs/{blog_id}/access")
+def access_settings(request:Request,blog_id:str)->dict[str,Any]: return service.get_access_settings(blog_id,require_user(request))
+@router.put("/blogs/{blog_id}/access")
+def update_visibility(request:Request,blog_id:str,payload:VisibilityPayload)->dict[str,Any]: return service.set_blog_visibility(blog_id,payload.visibility,require_user(request))
+@router.post("/blogs/{blog_id}/access/users")
+def add_access_user(request:Request,blog_id:str,payload:AccessUserPayload)->dict[str,Any]: return service.add_access_user(blog_id,payload.username,payload.canShare,require_user(request))
+@router.put("/blogs/{blog_id}/access/users/{user_id}")
+def update_access_user(request:Request,blog_id:str,user_id:str,payload:AccessUserPayload)->dict[str,Any]: return service.update_access_user(blog_id,user_id,payload.canShare,require_user(request))
+@router.delete("/blogs/{blog_id}/access/users/{user_id}")
+def remove_access_user(request:Request,blog_id:str,user_id:str)->dict[str,Any]: return service.remove_access_user(blog_id,user_id,require_user(request))
+@router.post("/blogs/{blog_id}/access/passwords",status_code=201)
+def add_access_password(request:Request,blog_id:str,payload:AccessPasswordPayload)->dict[str,Any]: return {"password":service.add_access_password(blog_id,payload.label,payload.password,payload.canShare,require_user(request))}
+@router.put("/blogs/{blog_id}/access/passwords/{password_id}")
+def update_access_password(request:Request,blog_id:str,password_id:str,payload:AccessPasswordPayload)->dict[str,Any]: return {"password":service.update_access_password(blog_id,password_id,payload.model_dump(),require_user(request))}
+@router.delete("/blogs/{blog_id}/access/passwords/{password_id}")
+def remove_access_password(request:Request,blog_id:str,password_id:str)->dict[str,bool]: service.remove_access_password(blog_id,password_id,require_user(request)); return {"deleted":True}
+@router.get("/blogs/{blog_id}/sharing")
+def sharing_settings(request:Request,blog_id:str)->dict[str,Any]: return service.get_sharing_settings(blog_id,require_user(request))
+@router.put("/blogs/{blog_id}/sharing")
+def update_sharing(request:Request,blog_id:str,payload:SharingPayload)->dict[str,Any]: return service.set_sharing_enabled(blog_id,payload.enabled,require_user(request))
+@router.put("/blogs/{blog_id}/shares/{share_id}")
+def update_share(request:Request,blog_id:str,share_id:str,payload:ShareUpdatePayload)->dict[str,Any]: return {"share":service.update_share(blog_id,share_id,payload.model_dump(),require_user(request))}
+@router.delete("/blogs/{blog_id}/shares/{share_id}")
+def delete_share(request:Request,blog_id:str,share_id:str)->dict[str,bool]: service.delete_share(blog_id,share_id,require_user(request)); return {"deleted":True}
 @router.post("/blogs/{blog_id}/template")
 def upload_template(request: Request, blog_id: str, archive: UploadFile = File(...))->dict[str,bool]:
     service.save_template(blog_id, archive, require_user(request)); return {"uploaded": True}

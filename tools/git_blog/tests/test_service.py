@@ -57,6 +57,106 @@ def test_blog_crud_is_owner_isolated(isolated_storage, owner: User) -> None:
     assert service.list_blogs(owner) == []
 
 
+def _publish_test_article(blog: dict, slug: str = "guide/intro", title: str = "Intro") -> None:
+    with service._conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET current_commit=? WHERE id=?", ("a" * 40, blog["id"]))
+        conn.execute(
+            "INSERT INTO git_blog_articles(blog_id,slug,source_path,title,summary,author,published_at,updated_at,tags_json,html,plain_text) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (blog["id"], slug, f"{slug}.md", title, "Summary", "", service._now(), service._now(), "[]", f"<h1>{title}</h1>", "Summary"),
+        )
+        conn.commit()
+
+
+def test_blog_access_supports_invited_users_and_revocable_password_sessions(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    invited = User(id="reader", username="reader", display_name="Reader")
+    platform_admin = User(id="platform-admin", username="boss", display_name="Boss", role="admin")
+    monkeypatch.setattr(service, "list_users", lambda: [owner, invited, platform_admin])
+    blog = service.create_blog({"slug": "private-notes", "repoUrl": "https://github.com/acme/docs"}, owner)
+    service.set_blog_visibility(blog["id"], "private", owner)
+    private_blog = service.get_blog(blog["id"], owner)
+
+    assert service.blog_access(private_blog, owner)["canShare"] is True
+    assert service.blog_access(private_blog, platform_admin)["allowed"] is False
+
+    service.add_access_user(blog["id"], "reader", True, owner)
+    invited_access = service.blog_access(private_blog, invited)
+    assert invited_access == {"allowed": True, "canShare": True, "kind": "user", "label": "reader"}
+
+    password = service.add_access_password(blog["id"], "Team", "secret", False, owner)
+    service.unlock_blog(private_blog, "secret", "browser-one")
+    assert service.blog_access(private_blog, None, "browser-one")["allowed"] is True
+    service.update_access_password(blog["id"], password["id"], {"label": "Team", "password": "new-secret", "canShare": False, "enabled": True}, owner)
+    assert service.blog_access(private_blog, None, "browser-one")["allowed"] is False
+
+
+def test_document_share_bypasses_private_blog_but_full_share_requires_blog_access(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    blog = service.create_blog({"slug": "share-modes", "repoUrl": "https://github.com/acme/docs"}, owner)
+    _publish_test_article(blog)
+    service.set_blog_visibility(blog["id"], "private", owner)
+    service.set_sharing_enabled(blog["id"], True, owner)
+
+    document = service.create_share("share-modes", "guide/intro", {"mode": "document", "expiresAt": None}, owner, "owner-browser")
+    _share, _blog, item = service.open_share(document["token"], None, "anonymous-browser")
+    assert item["title"] == "Intro"
+
+    full = service.create_share("share-modes", "guide/intro", {"mode": "full", "expiresAt": None}, owner, "owner-browser")
+    with pytest.raises(ToolboxError) as error:
+        service.open_share(full["token"], None, "other-browser")
+    assert error.value.code == "BLOG_LOGIN_REQUIRED"
+    assert service.open_share(full["token"], owner, "owner-browser")[2]["slug"] == "guide/intro"
+
+
+def test_public_blog_allows_anonymous_visitors_to_create_shares(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    blog = service.create_blog({"slug": "public-sharing", "repoUrl": "https://github.com/acme/docs"}, owner)
+    _publish_test_article(blog)
+    service.set_sharing_enabled(blog["id"], True, owner)
+
+    public_blog = service.public_blog("public-sharing")
+    assert service.blog_access(public_blog, None)["canShare"] is True
+    shared = service.create_share("public-sharing", "guide/intro", {"expiresAt": None}, None, "anonymous-browser")
+    assert shared["createdByType"] == "anonymous"
+    assert shared["url"].startswith("/blog/share/")
+
+
+def test_share_view_limit_counts_each_browser_once_and_keeps_existing_visitors(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    blog = service.create_blog({"slug": "limited-share", "repoUrl": "https://github.com/acme/docs"}, owner)
+    _publish_test_article(blog)
+    service.set_sharing_enabled(blog["id"], True, owner)
+    shared = service.create_share("limited-share", "guide/intro", {"maxViews": 1, "expiresAt": None}, owner, "owner-browser")
+
+    service.open_share(shared["token"], None, "browser-a")
+    service.open_share(shared["token"], None, "browser-a")
+    with pytest.raises(ToolboxError) as error:
+        service.open_share(shared["token"], None, "browser-b")
+    assert error.value.code == "SHARE_VIEW_LIMIT"
+    assert service.get_sharing_settings(blog["id"], owner)["shares"][0]["views"] == 1
+
+
+def test_password_protected_share_unlock_is_invalidated_when_password_changes(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    blog = service.create_blog({"slug": "protected-share", "repoUrl": "https://github.com/acme/docs"}, owner)
+    _publish_test_article(blog)
+    service.set_sharing_enabled(blog["id"], True, owner)
+    shared = service.create_share("protected-share", "guide/intro", {"password": "first", "expiresAt": None}, owner, "owner-browser")
+
+    with pytest.raises(ToolboxError) as required:
+        service.open_share(shared["token"], None, "browser-a")
+    assert required.value.code == "SHARE_PASSWORD_REQUIRED"
+    service.unlock_share(shared["token"], "first", "browser-a")
+    service.open_share(shared["token"], None, "browser-a")
+    service.update_share(blog["id"], shared["id"], {"passwordAction": "replace", "password": "second"}, owner)
+    with pytest.raises(ToolboxError) as invalidated:
+        service.open_share(shared["token"], None, "browser-a")
+    assert invalidated.value.code == "SHARE_PASSWORD_REQUIRED"
+
+
 @pytest.mark.parametrize("value", ["git@github.com:a/b.git", "https://example.com/a/b", "https://github.com/a/b?token=x"])
 def test_repository_validation_rejects_non_github_https(value: str) -> None:
     with pytest.raises(ToolboxError):

@@ -132,6 +132,27 @@ html { min-height: 100%; background: var(--bg-color); scroll-behavior: smooth; }
 .blog-back-to-top:hover { background: var(--item-hover-bg-color); }
 .blog-back-to-top:focus-visible { outline: 2px solid var(--blog-accent); outline-offset: 2px; }
 .blog-back-to-top svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.9; }
+.blog-share { position: fixed; z-index: 9; right: 72px; bottom: 32px; }
+.blog-share-button { display: grid; width: 40px; height: 40px; padding: 0; place-items: center; border: 1px solid var(--window-border); border-radius: 50%; background: var(--bg-color); box-shadow: 0 3px 12px rgba(0, 0, 0, .14); color: var(--blog-accent); cursor: pointer; }
+.blog-share-button:hover { background: var(--item-hover-bg-color); }
+.blog-share-button:focus-visible { outline: 2px solid var(--blog-accent); outline-offset: 2px; }
+.blog-share-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.9; }
+.blog-share-dialog { width: min(460px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 10px; background: var(--bg-color); box-shadow: 0 20px 60px rgba(0,0,0,.28); color: var(--text-color); }
+.blog-share-dialog::backdrop { background: rgba(15,23,42,.58); }
+.blog-share-form { display: grid; gap: 11px; padding: 18px; }
+.blog-share-form header { display: flex; align-items: center; justify-content: space-between; font-size: 1.05rem; }
+.blog-share-form header > div { display: grid; gap: 3px; }
+.blog-share-form header small { color: var(--muted-color); font-size: .75rem; font-weight: 400; }
+.blog-share-form header button { width: 30px; height: 30px; padding: 0; border: 0; background: transparent; color: var(--muted-color); font-size: 1.4rem; }
+.blog-share-form label, .blog-share-auth-dialog form { display: grid; gap: 5px; font-size: .82rem; }
+.blog-share-auth-dialog form { gap: 9px; }
+.blog-share-form input, .blog-share-form select, .blog-share-form button { box-sizing: border-box; min-height: 38px; padding: 8px 10px; border: 1px solid var(--window-border); border-radius: 5px; background: var(--bg-color); color: var(--text-color); font: inherit; }
+.blog-share-form button { border-color: var(--blog-accent); background: var(--blog-accent); color: #fff; cursor: pointer; }
+[data-share-result], [data-share-auth-result] { display: flex; min-height: 18px; gap: 7px; color: #b91c1c; font-size: .82rem; }
+[data-share-result] input { min-width: 0; flex: 1; }
+[data-share-result] button { flex: 0 0 auto; }
+.blog-share-divider { display: flex; align-items: center; gap: 10px; color: var(--muted-color); font-size: .75rem; }
+.blog-share-divider::before, .blog-share-divider::after { height: 1px; flex: 1; background: var(--soft-border); content: ''; }
 .blog-article-layout.outline-hidden { grid-template-columns: 0 minmax(0, var(--blog-width)); column-gap: 0; }
 .blog-article-layout.outline-hidden .blog-outline { opacity: 0; pointer-events: none; transform: translateX(-14px); visibility: hidden; transition: opacity .16s ease, transform .24s ease, visibility 0s linear .24s; }
 .blog-article-layout.outline-hidden .blog-outline-toggle { opacity: 1; pointer-events: auto; transform: translateX(-127px) scale(1); visibility: visible; transition-delay: .1s, 0s, 0s; }
@@ -261,6 +282,7 @@ body.git-blog-page.theme-dark {
   .blog-outline-toggle, .blog-article-layout.outline-hidden .blog-outline-toggle { position: fixed; z-index: 11; top: auto; bottom: max(16px, env(safe-area-inset-bottom)); left: 12px; width: 40px; height: 40px; border: 1px solid var(--window-border); border-radius: 50%; background: var(--bg-color); box-shadow: 0 3px 12px rgba(0, 0, 0, .16); opacity: 1; pointer-events: auto; transform: scale(1); visibility: visible; }
   .blog-outline-backdrop { display: block; position: fixed; z-index: 9; inset: 0; padding: 0; border: 0; background: rgba(0, 0, 0, .08); cursor: default; opacity: 0; pointer-events: none; visibility: hidden; transition: opacity .18s ease, visibility 0s linear .24s; }
   .blog-back-to-top { right: auto; bottom: max(16px, env(safe-area-inset-bottom)); left: 60px; }
+  .blog-share { right: auto; bottom: max(16px, env(safe-area-inset-bottom)); left: 108px; }
   .blog-home-back-to-top { left: 12px; }
   .blog-article-layout.outline-visible .blog-outline { opacity: 1; pointer-events: auto; transform: translateX(0); visibility: visible; transition-delay: 0s; }
   .blog-article-layout.outline-visible .blog-outline-toggle { opacity: 0; pointer-events: none; transform: scale(.92); visibility: hidden; }

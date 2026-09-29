@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import shlex
 import sqlite3
@@ -23,7 +24,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
-from backend.app.services.auth_service import User, list_users
+from backend.app.services.auth_service import User, hash_password, hash_token, list_users, verify_password
 from backend.app.services import github_key_service
 from backend.app.services import proxy_service
 from backend.app.services.tool_access_service import can_access_tool
@@ -35,6 +36,8 @@ MAX_FILES, MAX_MARKDOWN_BYTES, MAX_ASSET_BYTES = 10_000, 2 * 1024 * 1024, 25 * 1
 MAX_TEMPLATE_FILES, MAX_TEMPLATE_BYTES = 200, 10 * 1024 * 1024
 MAX_THEME_BYTES = 2 * 1024 * 1024
 MAX_SNAPSHOTS = 5
+BLOG_ACCESS_DAYS = 30
+VISITOR_DAYS = 365
 RENDER_PIPELINE_VERSION = "1"
 SYNC_TIMEOUT = 300
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -106,11 +109,46 @@ def _init(conn: sqlite3.Connection) -> None:
         article_slug TEXT NOT NULL DEFAULT '', remote_address TEXT NOT NULL DEFAULT '',
         user_agent TEXT NOT NULL DEFAULT '', referrer TEXT NOT NULL DEFAULT ''
       );
+      CREATE TABLE IF NOT EXISTS git_blog_access_users (
+        blog_id TEXT NOT NULL, user_id TEXT NOT NULL, can_share INTEGER NOT NULL DEFAULT 0,
+        granted_at TEXT NOT NULL, PRIMARY KEY(blog_id, user_id)
+      );
+      CREATE TABLE IF NOT EXISTS git_blog_access_passwords (
+        id TEXT PRIMARY KEY, blog_id TEXT NOT NULL, label TEXT NOT NULL,
+        password_hash TEXT NOT NULL, password_salt TEXT NOT NULL,
+        can_share INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS git_blog_access_sessions (
+        blog_id TEXT NOT NULL, visitor_hash TEXT NOT NULL, password_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY(blog_id, visitor_hash)
+      );
+      CREATE TABLE IF NOT EXISTS git_blog_shares (
+        id TEXT PRIMARY KEY, token TEXT NOT NULL UNIQUE, blog_id TEXT NOT NULL,
+        article_slug TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'document',
+        password_hash TEXT NOT NULL DEFAULT '', password_salt TEXT NOT NULL DEFAULT '',
+        password_version INTEGER NOT NULL DEFAULT 0, expires_at TEXT, max_views INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1, created_by_type TEXT NOT NULL,
+        created_by_label TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS git_blog_share_visitors (
+        share_id TEXT NOT NULL, visitor_hash TEXT NOT NULL,
+        first_opened_at TEXT NOT NULL, last_opened_at TEXT NOT NULL,
+        PRIMARY KEY(share_id, visitor_hash)
+      );
+      CREATE TABLE IF NOT EXISTS git_blog_share_unlocks (
+        share_id TEXT NOT NULL, visitor_hash TEXT NOT NULL, password_version INTEGER NOT NULL,
+        expires_at TEXT NOT NULL, PRIMARY KEY(share_id, visitor_hash)
+      );
       CREATE INDEX IF NOT EXISTS idx_git_blog_articles_date ON git_blog_articles(blog_id, published_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_runs_blog ON git_blog_runs(blog_id, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_snapshots_blog ON git_blog_snapshots(blog_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_themes_owner ON git_blog_themes(owner_user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_git_blog_access_logs_blog ON git_blog_access_logs(blog_id, requested_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_git_blog_access_users_blog ON git_blog_access_users(blog_id);
+      CREATE INDEX IF NOT EXISTS idx_git_blog_access_passwords_blog ON git_blog_access_passwords(blog_id);
+      CREATE INDEX IF NOT EXISTS idx_git_blog_shares_blog ON git_blog_shares(blog_id, created_at DESC);
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(git_blog_blogs)").fetchall()}
     if "effective_config_json" not in columns:
@@ -121,6 +159,10 @@ def _init(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN auto_sync_enabled INTEGER NOT NULL DEFAULT 1")
     if "render_fingerprint" not in columns:
         conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN render_fingerprint TEXT NOT NULL DEFAULT ''")
+    if "visibility" not in columns:
+        conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'")
+    if "share_enabled" not in columns:
+        conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN share_enabled INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -215,6 +257,8 @@ def _row(row: sqlite3.Row) -> dict[str, Any]:
     data["renderFingerprint"] = data.pop("render_fingerprint")
     data["syncStatus"] = data.pop("sync_status")
     data["lastError"] = data.pop("last_error")
+    data["visibility"] = data.get("visibility", "public")
+    data["shareEnabled"] = bool(data.pop("share_enabled", 0))
     return data
 
 
@@ -232,6 +276,193 @@ def list_blogs(user: User) -> list[dict[str, Any]]:
 
 
 def get_blog(blog_id: str, user: User) -> dict[str, Any]: return _row(_owner_blog(blog_id, user))
+
+
+def _active_users() -> dict[str, User]:
+    return {item.id: item for item in list_users() if not item.disabled}
+
+
+def _visitor_hash(visitor_token: str) -> str:
+    return hash_token(f"git-blog:{visitor_token}") if visitor_token else ""
+
+
+def _access_password_public(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"], "label": row["label"], "canShare": bool(row["can_share"]),
+        "enabled": bool(row["enabled"]), "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+    }
+
+
+def get_access_settings(blog_id: str, user: User) -> dict[str, Any]:
+    blog = _owner_blog(blog_id, user)
+    users = _active_users()
+    with _conn() as conn:
+        grants = conn.execute(
+            "SELECT * FROM git_blog_access_users WHERE blog_id=? ORDER BY granted_at", (blog_id,)
+        ).fetchall()
+        passwords = conn.execute(
+            "SELECT * FROM git_blog_access_passwords WHERE blog_id=? ORDER BY created_at", (blog_id,)
+        ).fetchall()
+    return {
+        "visibility": blog["visibility"],
+        "users": [
+            {"userId": row["user_id"], "username": users[row["user_id"]].username,
+             "displayName": users[row["user_id"]].display_name, "canShare": bool(row["can_share"])}
+            for row in grants if row["user_id"] in users
+        ],
+        "passwords": [_access_password_public(row) for row in passwords],
+    }
+
+
+def set_blog_visibility(blog_id: str, visibility: str, user: User) -> dict[str, Any]:
+    _owner_blog(blog_id, user)
+    if visibility not in {"public", "private"}:
+        raise ToolboxError("INVALID_VISIBILITY", "博客可见性不合法", status_code=400)
+    with _conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET visibility=?,updated_at=? WHERE id=?", (visibility, _now(), blog_id))
+        conn.commit()
+    return get_access_settings(blog_id, user)
+
+
+def add_access_user(blog_id: str, username: str, can_share: bool, owner: User) -> dict[str, Any]:
+    _owner_blog(blog_id, owner)
+    username = username.strip()
+    target = next((item for item in _active_users().values() if item.username == username), None)
+    if target is None:
+        raise ToolboxError("USER_NOT_FOUND", "用户不存在或已被禁用", status_code=404)
+    if target.id == owner.id:
+        raise ToolboxError("OWNER_ALREADY_ALLOWED", "博客所有者始终拥有全部权限", status_code=400)
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO git_blog_access_users(blog_id,user_id,can_share,granted_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(blog_id,user_id) DO UPDATE SET can_share=excluded.can_share",
+            (blog_id, target.id, 1 if can_share else 0, _now()),
+        )
+        conn.commit()
+    return get_access_settings(blog_id, owner)
+
+
+def update_access_user(blog_id: str, user_id: str, can_share: bool, owner: User) -> dict[str, Any]:
+    _owner_blog(blog_id, owner)
+    with _conn() as conn:
+        changed = conn.execute(
+            "UPDATE git_blog_access_users SET can_share=? WHERE blog_id=? AND user_id=?",
+            (1 if can_share else 0, blog_id, user_id),
+        ).rowcount
+        conn.commit()
+    if not changed:
+        raise ToolboxError("ACCESS_USER_NOT_FOUND", "受邀用户不存在", status_code=404)
+    return get_access_settings(blog_id, owner)
+
+
+def remove_access_user(blog_id: str, user_id: str, owner: User) -> dict[str, Any]:
+    _owner_blog(blog_id, owner)
+    with _conn() as conn:
+        conn.execute("DELETE FROM git_blog_access_users WHERE blog_id=? AND user_id=?", (blog_id, user_id))
+        conn.commit()
+    return get_access_settings(blog_id, owner)
+
+
+def add_access_password(blog_id: str, label: str, password: str, can_share: bool, owner: User) -> dict[str, Any]:
+    _owner_blog(blog_id, owner)
+    label, password = label.strip()[:100], password[:256]
+    if not label or not password:
+        raise ToolboxError("INVALID_ACCESS_PASSWORD", "密码名称和密码不能为空", status_code=400)
+    salt = secrets.token_hex(16)
+    with _conn() as conn:
+        rows = conn.execute("SELECT password_hash,password_salt FROM git_blog_access_passwords WHERE blog_id=?", (blog_id,)).fetchall()
+        if any(verify_password(password, row["password_salt"], row["password_hash"]) for row in rows):
+            raise ToolboxError("DUPLICATE_ACCESS_PASSWORD", "该访问密码已存在", status_code=409)
+        now, password_id = _now(), uuid4().hex
+        conn.execute(
+            "INSERT INTO git_blog_access_passwords(id,blog_id,label,password_hash,password_salt,can_share,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)",
+            (password_id, blog_id, label, hash_password(password, salt), salt, 1 if can_share else 0, now, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM git_blog_access_passwords WHERE id=?", (password_id,)).fetchone()
+    return _access_password_public(row)
+
+
+def update_access_password(blog_id: str, password_id: str, payload: dict[str, Any], owner: User) -> dict[str, Any]:
+    _owner_blog(blog_id, owner)
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM git_blog_access_passwords WHERE id=? AND blog_id=?", (password_id, blog_id)).fetchone()
+        if row is None:
+            raise ToolboxError("ACCESS_PASSWORD_NOT_FOUND", "访问密码不存在", status_code=404)
+        label = str(payload.get("label", row["label"])).strip()[:100]
+        if not label:
+            raise ToolboxError("INVALID_ACCESS_PASSWORD", "密码名称不能为空", status_code=400)
+        can_share = 1 if payload.get("canShare", bool(row["can_share"])) else 0
+        enabled = 1 if payload.get("enabled", bool(row["enabled"])) else 0
+        new_password = str(payload.get("password") or "")[:256]
+        password_hash_value, salt = row["password_hash"], row["password_salt"]
+        revoke = not enabled
+        if new_password:
+            others = conn.execute("SELECT password_hash,password_salt FROM git_blog_access_passwords WHERE blog_id=? AND id<>?", (blog_id, password_id)).fetchall()
+            if any(verify_password(new_password, item["password_salt"], item["password_hash"]) for item in others):
+                raise ToolboxError("DUPLICATE_ACCESS_PASSWORD", "该访问密码已存在", status_code=409)
+            salt = secrets.token_hex(16)
+            password_hash_value = hash_password(new_password, salt)
+            revoke = True
+        conn.execute(
+            "UPDATE git_blog_access_passwords SET label=?,password_hash=?,password_salt=?,can_share=?,enabled=?,updated_at=? WHERE id=?",
+            (label, password_hash_value, salt, can_share, enabled, _now(), password_id),
+        )
+        if revoke:
+            conn.execute("DELETE FROM git_blog_access_sessions WHERE password_id=?", (password_id,))
+        conn.commit()
+        changed = conn.execute("SELECT * FROM git_blog_access_passwords WHERE id=?", (password_id,)).fetchone()
+    return _access_password_public(changed)
+
+
+def remove_access_password(blog_id: str, password_id: str, owner: User) -> None:
+    _owner_blog(blog_id, owner)
+    with _conn() as conn:
+        conn.execute("DELETE FROM git_blog_access_sessions WHERE password_id=?", (password_id,))
+        changed = conn.execute("DELETE FROM git_blog_access_passwords WHERE id=? AND blog_id=?", (password_id, blog_id)).rowcount
+        conn.commit()
+    if not changed:
+        raise ToolboxError("ACCESS_PASSWORD_NOT_FOUND", "访问密码不存在", status_code=404)
+
+
+def blog_access(blog: dict[str, Any], user: User | None, visitor_token: str = "") -> dict[str, Any]:
+    is_public = blog.get("visibility", "public") == "public"
+    if user and user.id == blog["ownerUserId"]:
+        return {"allowed": True, "canShare": True, "kind": "owner", "label": user.username}
+    if user:
+        with _conn() as conn:
+            grant = conn.execute("SELECT can_share FROM git_blog_access_users WHERE blog_id=? AND user_id=?", (blog["id"], user.id)).fetchone()
+        if grant:
+            return {"allowed": True, "canShare": is_public or bool(grant["can_share"]), "kind": "user", "label": user.username}
+    visitor_hash = _visitor_hash(visitor_token)
+    if visitor_hash:
+        with _conn() as conn:
+            grant = conn.execute(
+                "SELECT p.label,p.can_share FROM git_blog_access_sessions s JOIN git_blog_access_passwords p ON p.id=s.password_id "
+                "WHERE s.blog_id=? AND s.visitor_hash=? AND s.expires_at>? AND p.enabled=1",
+                (blog["id"], visitor_hash, _now()),
+            ).fetchone()
+        if grant:
+            return {"allowed": True, "canShare": is_public or bool(grant["can_share"]), "kind": "password", "label": grant["label"]}
+    return {"allowed": is_public, "canShare": is_public, "kind": "anonymous", "label": "匿名访客"}
+
+
+def unlock_blog(blog: dict[str, Any], password: str, visitor_token: str) -> dict[str, Any]:
+    if not password or not visitor_token:
+        raise ToolboxError("INVALID_BLOG_PASSWORD", "访问密码错误", status_code=401)
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM git_blog_access_passwords WHERE blog_id=? AND enabled=1", (blog["id"],)).fetchall()
+        matched = next((row for row in rows if verify_password(password, row["password_salt"], row["password_hash"])), None)
+        if matched is None:
+            raise ToolboxError("INVALID_BLOG_PASSWORD", "访问密码错误", status_code=401)
+        expires = (datetime.now(timezone.utc) + timedelta(days=BLOG_ACCESS_DAYS)).isoformat()
+        conn.execute(
+            "INSERT INTO git_blog_access_sessions(blog_id,visitor_hash,password_id,expires_at,created_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(blog_id,visitor_hash) DO UPDATE SET password_id=excluded.password_id,expires_at=excluded.expires_at,created_at=excluded.created_at",
+            (blog["id"], _visitor_hash(visitor_token), matched["id"], expires, _now()),
+        )
+        conn.commit()
+    return {"allowed": True, "canShare": bool(matched["can_share"]), "label": matched["label"]}
 
 
 def _theme_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -419,7 +650,13 @@ def update_blog(blog_id: str, payload: dict[str, Any], user: User) -> dict[str, 
 def delete_blog(blog_id: str, user: User) -> None:
     _owner_blog(blog_id,user)
     with _conn() as conn:
-        conn.execute("DELETE FROM git_blog_assets WHERE blog_id=?",(blog_id,)); conn.execute("DELETE FROM git_blog_articles WHERE blog_id=?",(blog_id,)); conn.execute("DELETE FROM git_blog_runs WHERE blog_id=?",(blog_id,)); conn.execute("DELETE FROM git_blog_snapshots WHERE blog_id=?",(blog_id,)); conn.execute("DELETE FROM git_blog_blogs WHERE id=?",(blog_id,)); conn.commit()
+        share_ids = [row[0] for row in conn.execute("SELECT id FROM git_blog_shares WHERE blog_id=?", (blog_id,)).fetchall()]
+        for share_id in share_ids:
+            conn.execute("DELETE FROM git_blog_share_unlocks WHERE share_id=?", (share_id,))
+            conn.execute("DELETE FROM git_blog_share_visitors WHERE share_id=?", (share_id,))
+        for table in ("git_blog_access_users", "git_blog_access_passwords", "git_blog_access_sessions", "git_blog_shares", "git_blog_access_logs", "git_blog_assets", "git_blog_articles", "git_blog_runs", "git_blog_snapshots"):
+            conn.execute(f"DELETE FROM {table} WHERE blog_id=?", (blog_id,))
+        conn.execute("DELETE FROM git_blog_blogs WHERE id=?",(blog_id,)); conn.commit()
     shutil.rmtree(_root()/"snapshots"/blog_id, ignore_errors=True)
 
 
@@ -707,11 +944,19 @@ def sync_due_blogs() -> None:
     now=_now()
     all_users={u.id:u for u in list_users()}
     with _conn() as conn:
+        conn.execute("DELETE FROM git_blog_access_sessions WHERE expires_at<=?", (now,))
+        conn.execute("DELETE FROM git_blog_share_unlocks WHERE expires_at<=?", (now,))
         orphan_ids=[row["id"] for row in conn.execute("SELECT id,owner_user_id FROM git_blog_blogs").fetchall() if row["owner_user_id"] not in all_users]
         rows=conn.execute("SELECT id FROM git_blog_blogs WHERE enabled=1 AND sync_status<>'syncing' AND sync_status NOT LIKE 'syncing_%' AND (sync_status='queued' OR (auto_sync_enabled=1 AND next_sync_at<=?)) ORDER BY next_sync_at LIMIT 3",(now,)).fetchall()
     for orphan_id in orphan_ids:
         with _conn() as conn:
-            conn.execute("DELETE FROM git_blog_assets WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_articles WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_runs WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_snapshots WHERE blog_id=?",(orphan_id,)); conn.execute("DELETE FROM git_blog_blogs WHERE id=?",(orphan_id,)); conn.commit()
+            share_ids = [item[0] for item in conn.execute("SELECT id FROM git_blog_shares WHERE blog_id=?", (orphan_id,)).fetchall()]
+            for share_id in share_ids:
+                conn.execute("DELETE FROM git_blog_share_unlocks WHERE share_id=?", (share_id,))
+                conn.execute("DELETE FROM git_blog_share_visitors WHERE share_id=?", (share_id,))
+            for table in ("git_blog_access_users", "git_blog_access_passwords", "git_blog_access_sessions", "git_blog_shares", "git_blog_access_logs", "git_blog_assets", "git_blog_articles", "git_blog_runs", "git_blog_snapshots"):
+                conn.execute(f"DELETE FROM {table} WHERE blog_id=?", (orphan_id,))
+            conn.execute("DELETE FROM git_blog_blogs WHERE id=?",(orphan_id,)); conn.commit()
         shutil.rmtree(_root()/"snapshots"/orphan_id, ignore_errors=True)
     users={user_id:user for user_id,user in all_users.items() if not user.disabled}
     for row in rows:
@@ -857,6 +1102,202 @@ def rollback_snapshot(blog_id: str, commit: str, user: User) -> dict[str, Any]:
         if isinstance(exc, ToolboxError):
             raise
         raise ToolboxError("ROLLBACK_FAILED", message, status_code=500) from exc
+
+
+def _share_public(row: sqlite3.Row, *, views: int = 0) -> dict[str, Any]:
+    return {
+        "id": row["id"], "token": row["token"], "url": f'/blog/share/{row["token"]}',
+        "articleSlug": row["article_slug"], "mode": row["mode"],
+        "passwordProtected": bool(row["password_hash"]), "expiresAt": row["expires_at"],
+        "maxViews": row["max_views"], "views": views, "enabled": bool(row["enabled"]),
+        "createdByType": row["created_by_type"], "createdByLabel": row["created_by_label"],
+        "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+    }
+
+
+def get_sharing_settings(blog_id: str, user: User) -> dict[str, Any]:
+    blog = _owner_blog(blog_id, user)
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT s.*,COUNT(v.visitor_hash) AS view_count FROM git_blog_shares s "
+            "LEFT JOIN git_blog_share_visitors v ON v.share_id=s.id WHERE s.blog_id=? GROUP BY s.id ORDER BY s.created_at DESC",
+            (blog_id,),
+        ).fetchall()
+    return {"enabled": bool(blog["share_enabled"]), "shares": [_share_public(row, views=int(row["view_count"])) for row in rows]}
+
+
+def set_sharing_enabled(blog_id: str, enabled: bool, user: User) -> dict[str, Any]:
+    _owner_blog(blog_id, user)
+    with _conn() as conn:
+        conn.execute("UPDATE git_blog_blogs SET share_enabled=?,updated_at=? WHERE id=?", (1 if enabled else 0, _now(), blog_id))
+        conn.commit()
+    return get_sharing_settings(blog_id, user)
+
+
+def _normalise_share_payload(payload: dict[str, Any], current: sqlite3.Row | None = None) -> dict[str, Any]:
+    mode = str(payload.get("mode", current["mode"] if current else "document"))
+    if mode not in {"document", "full"}:
+        raise ToolboxError("INVALID_SHARE_MODE", "分享展示模式不合法", status_code=400)
+    if "expiresAt" in payload:
+        expires_at = payload.get("expiresAt") or None
+    elif current:
+        expires_at = current["expires_at"]
+    else:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    if expires_at:
+        try:
+            parsed = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            expires_at = parsed.astimezone(timezone.utc).isoformat()
+        except ValueError as exc:
+            raise ToolboxError("INVALID_SHARE_EXPIRY", "分享有效时间不合法", status_code=400) from exc
+    max_views = payload.get("maxViews", current["max_views"] if current else None)
+    if max_views in (None, ""):
+        max_views = None
+    else:
+        max_views = int(max_views)
+        if not 1 <= max_views <= 1_000_000:
+            raise ToolboxError("INVALID_SHARE_VIEWS", "打开次数必须在 1 到 1000000 之间", status_code=400)
+    return {"mode": mode, "expiresAt": expires_at, "maxViews": max_views}
+
+
+def create_share(blog_slug: str, article_slug: str, payload: dict[str, Any], user: User | None, visitor_token: str) -> dict[str, Any]:
+    blog = public_blog(blog_slug)
+    if blog is None:
+        raise ToolboxError("BLOG_NOT_FOUND", "博客不存在", status_code=404)
+    if not blog["shareEnabled"]:
+        raise ToolboxError("SHARING_DISABLED", "该博客尚未开启分享功能", status_code=403)
+    principal = blog_access(blog, user, visitor_token)
+    if not principal["canShare"]:
+        raise ToolboxError("SHARE_PERMISSION_REQUIRED", "当前身份没有创建分享的权限", status_code=403)
+    article_slug = article_slug.strip().strip("/")
+    if public_article(blog["id"], article_slug) is None:
+        raise ToolboxError("ARTICLE_NOT_FOUND", "文档不存在或尚未发布", status_code=404)
+    options = _normalise_share_payload(payload)
+    password = str(payload.get("password") or "")[:256]
+    salt = secrets.token_hex(16) if password else ""
+    now, share_id, token = _now(), uuid4().hex, secrets.token_urlsafe(32)
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO git_blog_shares(id,token,blog_id,article_slug,mode,password_hash,password_salt,password_version,expires_at,max_views,enabled,created_by_type,created_by_label,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)",
+            (share_id, token, blog["id"], article_slug, options["mode"], hash_password(password, salt) if password else "", salt,
+             1 if password else 0, options["expiresAt"], options["maxViews"], principal["kind"], principal["label"], now, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM git_blog_shares WHERE id=?", (share_id,)).fetchone()
+    return _share_public(row)
+
+
+def update_share(blog_id: str, share_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
+    _owner_blog(blog_id, user)
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM git_blog_shares WHERE id=? AND blog_id=?", (share_id, blog_id)).fetchone()
+        if row is None:
+            raise ToolboxError("SHARE_NOT_FOUND", "分享链接不存在", status_code=404)
+        options = _normalise_share_payload(payload, row)
+        enabled = 1 if payload.get("enabled", bool(row["enabled"])) else 0
+        password_hash_value, salt, version = row["password_hash"], row["password_salt"], int(row["password_version"])
+        password_action = payload.get("passwordAction", "keep")
+        if password_action == "remove":
+            password_hash_value, salt, version = "", "", version + 1
+        elif password_action == "replace":
+            password = str(payload.get("password") or "")[:256]
+            if not password:
+                raise ToolboxError("INVALID_SHARE_PASSWORD", "新分享密码不能为空", status_code=400)
+            salt, version = secrets.token_hex(16), version + 1
+            password_hash_value = hash_password(password, salt)
+        elif password_action != "keep":
+            raise ToolboxError("INVALID_PASSWORD_ACTION", "分享密码操作不合法", status_code=400)
+        conn.execute(
+            "UPDATE git_blog_shares SET mode=?,password_hash=?,password_salt=?,password_version=?,expires_at=?,max_views=?,enabled=?,updated_at=? WHERE id=?",
+            (options["mode"], password_hash_value, salt, version, options["expiresAt"], options["maxViews"], enabled, _now(), share_id),
+        )
+        if version != int(row["password_version"]):
+            conn.execute("DELETE FROM git_blog_share_unlocks WHERE share_id=?", (share_id,))
+        conn.commit()
+        changed = conn.execute("SELECT * FROM git_blog_shares WHERE id=?", (share_id,)).fetchone()
+        views = conn.execute("SELECT COUNT(*) FROM git_blog_share_visitors WHERE share_id=?", (share_id,)).fetchone()[0]
+    return _share_public(changed, views=views)
+
+
+def delete_share(blog_id: str, share_id: str, user: User) -> None:
+    _owner_blog(blog_id, user)
+    with _conn() as conn:
+        conn.execute("DELETE FROM git_blog_share_unlocks WHERE share_id=?", (share_id,))
+        conn.execute("DELETE FROM git_blog_share_visitors WHERE share_id=?", (share_id,))
+        changed = conn.execute("DELETE FROM git_blog_shares WHERE id=? AND blog_id=?", (share_id, blog_id)).rowcount
+        conn.commit()
+    if not changed:
+        raise ToolboxError("SHARE_NOT_FOUND", "分享链接不存在", status_code=404)
+
+
+def _share_row(token: str) -> tuple[sqlite3.Row, dict[str, Any]]:
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM git_blog_shares WHERE token=?", (token,)).fetchone()
+        blog_row = conn.execute("SELECT * FROM git_blog_blogs WHERE id=? AND enabled=1 AND current_commit<>''", (row["blog_id"],)).fetchone() if row else None
+    if row is None or blog_row is None:
+        raise ToolboxError("SHARE_NOT_FOUND", "分享链接不存在", status_code=404)
+    blog = _row(blog_row)
+    owner = next((item for item in list_users() if item.id == blog["ownerUserId"] and not item.disabled), None)
+    if owner is None or not can_access_tool(TOOL_ID, owner):
+        raise ToolboxError("SHARE_NOT_FOUND", "分享链接不存在", status_code=404)
+    if not row["enabled"] or not blog["shareEnabled"]:
+        raise ToolboxError("SHARE_UNAVAILABLE", "分享链接已停用", status_code=410)
+    if row["expires_at"] and row["expires_at"] <= _now():
+        raise ToolboxError("SHARE_EXPIRED", "分享链接已过期", status_code=410)
+    return row, blog
+
+
+def unlock_share(token: str, password: str, visitor_token: str) -> None:
+    row, _blog = _share_row(token)
+    if not row["password_hash"] or not visitor_token or not verify_password(password, row["password_salt"], row["password_hash"]):
+        raise ToolboxError("INVALID_SHARE_PASSWORD", "分享密码错误", status_code=401)
+    expiry = datetime.now(timezone.utc) + timedelta(days=BLOG_ACCESS_DAYS)
+    if row["expires_at"]:
+        expiry = min(expiry, datetime.fromisoformat(row["expires_at"]))
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO git_blog_share_unlocks(share_id,visitor_hash,password_version,expires_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(share_id,visitor_hash) DO UPDATE SET password_version=excluded.password_version,expires_at=excluded.expires_at",
+            (row["id"], _visitor_hash(visitor_token), row["password_version"], expiry.isoformat()),
+        )
+        conn.commit()
+
+
+def open_share(token: str, user: User | None, visitor_token: str, *, count_view: bool = True) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    row, blog = _share_row(token)
+    visitor_hash = _visitor_hash(visitor_token)
+    if row["password_hash"]:
+        with _conn() as conn:
+            unlocked = conn.execute(
+                "SELECT 1 FROM git_blog_share_unlocks WHERE share_id=? AND visitor_hash=? AND password_version=? AND expires_at>?",
+                (row["id"], visitor_hash, row["password_version"], _now()),
+            ).fetchone()
+        if unlocked is None:
+            raise ToolboxError("SHARE_PASSWORD_REQUIRED", "请输入分享密码", status_code=401)
+    if row["mode"] == "full" and blog["visibility"] == "private" and not blog_access(blog, user, visitor_token)["allowed"]:
+        raise ToolboxError("BLOG_LOGIN_REQUIRED", "该私密博客需要认证", status_code=401)
+    article = public_article(blog["id"], row["article_slug"])
+    if article is None:
+        raise ToolboxError("SHARE_ARTICLE_UNAVAILABLE", "分享的文档已不存在或取消发布", status_code=410)
+    if count_view:
+        if not visitor_hash:
+            raise ToolboxError("VISITOR_REQUIRED", "无法建立浏览器访问标识", status_code=400)
+        with _conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT 1 FROM git_blog_share_visitors WHERE share_id=? AND visitor_hash=?", (row["id"], visitor_hash)).fetchone()
+            if existing:
+                conn.execute("UPDATE git_blog_share_visitors SET last_opened_at=? WHERE share_id=? AND visitor_hash=?", (_now(), row["id"], visitor_hash))
+            else:
+                views = conn.execute("SELECT COUNT(*) FROM git_blog_share_visitors WHERE share_id=?", (row["id"],)).fetchone()[0]
+                if row["max_views"] is not None and views >= row["max_views"]:
+                    raise ToolboxError("SHARE_VIEW_LIMIT", "分享链接的打开次数已用完", status_code=410)
+                now = _now()
+                conn.execute("INSERT INTO git_blog_share_visitors(share_id,visitor_hash,first_opened_at,last_opened_at) VALUES(?,?,?,?)", (row["id"], visitor_hash, now, now))
+            conn.commit()
+    return _share_public(row), blog, article
 
 
 def public_blog(slug: str) -> dict[str,Any] | None:

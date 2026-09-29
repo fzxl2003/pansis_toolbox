@@ -93,6 +93,12 @@ npm run frontend
 - 数据存储在个人目录中，其他用户不可见
 - 支持上传、列表查看、详情查看和删除
 
+### Git 博客
+
+拥有工具权限的用户可绑定自己的 GitHub 仓库，将 Markdown 同步为公开博客。博客管理页在工具箱内，公开页面为 `/blog/{blogSlug}`；仅带有 `published: true`（或由博客默认配置继承为发布状态）的文章会公开。
+
+私有 GitHub 仓库可使用设置页生成的 GitHub Deploy Key；将公开密钥添加到仓库 Deploy keys 并设置为只读即可。仓库根目录可使用 `.pansis-blog.yml` 覆盖博客主题和默认元数据，详见工具页面说明。
+
 ---
 
 ## 管理员功能

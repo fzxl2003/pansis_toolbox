@@ -1,0 +1,1 @@
+"""Git blog tool backend."""

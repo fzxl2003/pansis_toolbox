@@ -167,6 +167,19 @@ def init_database() -> None:
                 FOREIGN KEY(server_id) REFERENCES platform_ssh_servers(id) ON DELETE CASCADE,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS platform_github_keys (
+                id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                private_key_encrypted TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(owner_user_id, name),
+                FOREIGN KEY(owner_user_id) REFERENCES users(id)
+            );
+
             """
         )
         _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")

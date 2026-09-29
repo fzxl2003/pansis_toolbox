@@ -30,7 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates nodejs npm openssh-client \
+    && apt-get install -y --no-install-recommends curl ca-certificates git nodejs npm openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./

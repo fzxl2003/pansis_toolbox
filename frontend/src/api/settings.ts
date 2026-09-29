@@ -89,3 +89,14 @@ export function deleteSshServer(id: string): Promise<{ deleted: boolean }> {
 export function testSshServer(id: string): Promise<{ connected: boolean; message: string }> {
   return apiPost(`/api/settings/ssh-servers/${id}/test`, {});
 }
+
+export type GithubKey = { id: string; name: string; publicKey: string; createdAt: string; updatedAt: string };
+export function fetchGithubKeys(): Promise<{ keys: GithubKey[] }> { return apiGet('/api/settings/github-keys'); }
+export function createGithubKey(name: string): Promise<{ key: GithubKey }> { return apiPost('/api/settings/github-keys', { name }); }
+export function deleteGithubKey(id: string): Promise<{ deleted: boolean }> { return apiDelete(`/api/settings/github-keys/${id}`); }
+export function testGithubKey(id: string, repoUrl: string): Promise<{ repoUrl: string; branchCount: number }> { return apiPost(`/api/settings/github-keys/${id}/test`, { repoUrl }); }
+
+export type ProxySuggestedDomain = { domain: string; toolId: string; toolName: string; description: string };
+export type ProxySettings = { protocol: 'http' | 'https' | 'socks5' | 'socks5h'; host: string; port: number; selectedDomains: string[]; customDomains: string[]; suggestedDomains: ProxySuggestedDomain[] };
+export function fetchProxySettings(): Promise<ProxySettings> { return apiGet('/api/settings/proxy'); }
+export function saveProxySettings(payload: Omit<ProxySettings, 'suggestedDomains'>): Promise<ProxySettings> { return apiPut('/api/settings/proxy', payload); }

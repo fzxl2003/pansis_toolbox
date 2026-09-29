@@ -19,6 +19,8 @@ from backend.app.services.data_management import (
 )
 from backend.app.services.email_service import get_email_config, save_email_config, send_email
 from backend.app.services import ssh_server_service
+from backend.app.services import github_key_service
+from backend.app.services import proxy_service
 
 # Project-root relative file that holds the "About" information shown in the
 # settings page.  Edit this file to update version / developer / contact info
@@ -48,6 +50,55 @@ class SshServerPayload(BaseModel):
     privateKeyPassphrase: str = ""
     isPublic: bool = False
     allowedUserIds: list[str] = []
+
+class GithubKeyPayload(BaseModel):
+    name: str
+
+
+class GithubKeyTestPayload(BaseModel):
+    repoUrl: str
+
+
+class ProxySettingsPayload(BaseModel):
+    protocol: str = "http"
+    host: str
+    port: int
+    selectedDomains: list[str] = []
+    customDomains: list[str] = []
+
+@router.get("/settings/github-keys")
+def list_github_keys_route(request: Request) -> dict:
+    return {"keys": github_key_service.list_keys(require_user(request))}
+
+@router.post("/settings/github-keys")
+def create_github_key_route(request: Request, payload: GithubKeyPayload) -> dict:
+    return {"key": github_key_service.create_key(payload.name, require_user(request))}
+
+@router.delete("/settings/github-keys/{key_id}")
+def delete_github_key_route(request: Request, key_id: str) -> dict:
+    github_key_service.delete_key(key_id, require_user(request))
+    return {"deleted": True}
+
+
+@router.post("/settings/github-keys/{key_id}/test")
+def test_github_key_route(request: Request, key_id: str, payload: GithubKeyTestPayload) -> dict:
+    """Verify that this user's Deploy Key can read the specified repository."""
+    from tools.git_blog.backend import service as git_blog_service
+
+    result = git_blog_service.probe_repository(payload.repoUrl, require_user(request), key_id)
+    return {"repoUrl": result["repoUrl"], "branchCount": len(result["branches"])}
+
+
+@router.get("/settings/proxy")
+def get_proxy_route(request: Request) -> dict:
+    require_admin(request)
+    return proxy_service.get_settings()
+
+
+@router.put("/settings/proxy")
+def save_proxy_route(request: Request, payload: ProxySettingsPayload) -> dict:
+    require_admin(request)
+    return proxy_service.save_settings(payload.model_dump())
 
 
 @router.get("/settings/email-config")

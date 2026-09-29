@@ -27,6 +27,7 @@ storage/          本地数据库、上传文件和用户工具数据
 | `text_cleaner`       | 文本清洗           | `text`    | `/api/tools/text-cleaner`       | 无                             |
 | `url_navigator`      | 网址导航           | `network` | `/api/tools/url-navigator`      | 无                             |
 | `web_proxy`          | 网页代理           | `network` | `/web-proxy`                    | 内置 Rammerhead Node sidecar   |
+| `git_blog`           | Git 博客           | `text`    | `/api/tools/git-blog`           | Git、Node Markdown renderer    |
 
 ## 本地环境配置
 
@@ -37,6 +38,7 @@ conda create -n pansis_toolbox python=3.11 nodejs -c conda-forge
 conda activate pansis_toolbox
 python -m pip install -e ".[dev]"
 npm --prefix frontend install
+npm --prefix tools/git_blog install
 ```
 
 如果环境里没有通过 Conda 安装 Node.js，也可以使用系统 Node.js，但需要保证 `node` 和 `npm` 在当前 shell 中可用。
@@ -94,7 +96,7 @@ npm run frontend
 ```bash
 npm run generate:tools   # 根据 tools/*/manifest.json 生成前端懒加载注册表
 npm run check:tools      # 检查工具 manifest 和前后端入口
-npm run build            # 构建前端
+npm run build            # 准备工具静态资源并构建前端
 npm run test             # 运行 pytest
 ```
 

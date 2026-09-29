@@ -16,7 +16,7 @@ class ProbePayload(BaseModel): repoUrl:str; githubKeyId:str=""
 class VisibilityPayload(BaseModel): visibility:str
 class AccessUserPayload(BaseModel): username:str=""; canShare:bool=False
 class AccessPasswordPayload(BaseModel): label:str=""; password:str=""; canShare:bool=False; enabled:bool=True
-class SharingPayload(BaseModel): enabled:bool
+class SharingPayload(BaseModel): enabled:bool; everyoneCanShare:bool|None=None
 class ShareUpdatePayload(BaseModel):
     mode:str="document"; expiresAt:str|None=None; maxViews:int|None=None; enabled:bool=True
     passwordAction:str="keep"; password:str=""
@@ -76,7 +76,7 @@ def remove_access_password(request:Request,blog_id:str,password_id:str)->dict[st
 @router.get("/blogs/{blog_id}/sharing")
 def sharing_settings(request:Request,blog_id:str)->dict[str,Any]: return service.get_sharing_settings(blog_id,require_user(request))
 @router.put("/blogs/{blog_id}/sharing")
-def update_sharing(request:Request,blog_id:str,payload:SharingPayload)->dict[str,Any]: return service.set_sharing_enabled(blog_id,payload.enabled,require_user(request))
+def update_sharing(request:Request,blog_id:str,payload:SharingPayload)->dict[str,Any]: return service.set_sharing_enabled(blog_id,payload.enabled,require_user(request),payload.everyoneCanShare)
 @router.put("/blogs/{blog_id}/shares/{share_id}")
 def update_share(request:Request,blog_id:str,share_id:str,payload:ShareUpdatePayload)->dict[str,Any]: return {"share":service.update_share(blog_id,share_id,payload.model_dump(),require_user(request))}
 @router.delete("/blogs/{blog_id}/shares/{share_id}")

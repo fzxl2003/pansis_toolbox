@@ -219,6 +219,30 @@ if (articleLayout && outline && outlineList && outlineToggle && article) {
   }
 }
 
+const blogIdentity = document.querySelector('[data-blog-identity]');
+if (blogIdentity) {
+  const logoutButton = blogIdentity.querySelector('[data-blog-logout]');
+  const logoutStatus = blogIdentity.querySelector('[data-blog-logout-status]');
+  logoutButton?.addEventListener('click', async () => {
+    logoutButton.disabled = true;
+    logoutStatus.textContent = '正在退出…';
+    try {
+      const response = await fetch(blogIdentity.dataset.logoutEndpoint, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!response.ok) throw new Error('logout failed');
+      window.location.reload();
+    } catch {
+      logoutButton.disabled = false;
+      logoutStatus.textContent = '退出失败，请重试';
+    }
+  });
+  document.addEventListener('click', (event) => {
+    if (!blogIdentity.contains(event.target)) blogIdentity.removeAttribute('open');
+  });
+}
+
 const shareRoot = document.querySelector('[data-share-root]');
 if (shareRoot) {
   const shareDialog = shareRoot.querySelector('[data-share-dialog]');
@@ -226,6 +250,7 @@ if (shareRoot) {
   const shareForm = shareDialog?.querySelector('.blog-share-form');
   const result = shareRoot.querySelector('[data-share-result]');
   const authResult = shareRoot.querySelector('[data-share-auth-result]');
+  const shareButton = shareRoot.querySelector('.blog-share-button');
   let canShare = shareRoot.dataset.canShare === 'true';
   const showShare = () => {
     authDialog?.close();
@@ -237,17 +262,23 @@ if (shareRoot) {
   };
   const completeAuth = () => {
     canShare = true;
-    authResult.textContent = '';
+    if (authResult) authResult.textContent = '';
     showShare();
+  };
+  const rejectAuthenticatedIdentity = (message) => {
+    if (authResult) authResult.textContent = message;
+    shareButton?.setAttribute('hidden', '');
   };
   const checkAccess = async () => {
     const response = await fetch(shareRoot.dataset.accessEndpoint, { credentials: 'include' });
     const body = await response.json().catch(() => ({}));
     if (response.ok && body.canShare) return true;
-    authResult.textContent = response.ok ? '当前账号没有创建分享的权限' : (body.error?.message || '无法验证分享权限');
+    const message = response.ok ? '当前账号没有创建分享的权限' : (body.error?.message || '无法验证分享权限');
+    if (response.ok) rejectAuthenticatedIdentity(message);
+    else if (authResult) authResult.textContent = message;
     return false;
   };
-  shareRoot.querySelector('.blog-share-button')?.addEventListener('click', () => canShare ? showShare() : showAuth());
+  shareButton?.addEventListener('click', () => canShare ? showShare() : showAuth());
   shareRoot.querySelector('[data-share-close]')?.addEventListener('click', () => shareDialog?.close());
   shareRoot.querySelector('[data-share-auth-close]')?.addEventListener('click', () => authDialog?.close());
   shareForm?.addEventListener('submit', async (event) => {
@@ -267,8 +298,7 @@ if (shareRoot) {
     if (!response.ok) {
       result.textContent = body.error?.message || '创建分享失败';
       if (response.status === 403) {
-        canShare = false;
-        showAuth();
+        shareButton?.setAttribute('hidden', '');
       }
       return;
     }
@@ -288,23 +318,24 @@ if (shareRoot) {
   });
   shareRoot.querySelector('[data-share-blog-auth-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    authResult.textContent = '正在验证…';
+    if (authResult) authResult.textContent = '正在验证…';
     const password = new FormData(event.currentTarget).get('password') || '';
     const endpoint = shareRoot.dataset.endpoint.replace(/\/shares$/, '/unlock');
     const response = await fetch(endpoint, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
     const body = await response.json().catch(() => ({}));
     if (response.ok && body.canShare) completeAuth();
-    else authResult.textContent = response.ok ? '该访问密码没有创建分享的权限' : (body.error?.message || '认证失败');
+    else if (response.ok) rejectAuthenticatedIdentity('该访问密码没有创建分享的权限');
+    else if (authResult) authResult.textContent = body.error?.message || '认证失败';
   });
   shareRoot.querySelector('[data-share-platform-auth-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    authResult.textContent = '正在登录…';
+    if (authResult) authResult.textContent = '正在登录…';
     const data = new FormData(event.currentTarget);
     const response = await fetch('/api/auth/login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: data.get('username'), password: data.get('password') }) });
     const body = await response.json().catch(() => ({}));
     if (response.ok) {
       if (await checkAccess()) completeAuth();
-    } else authResult.textContent = body.error?.message || '登录失败';
+    } else if (authResult) authResult.textContent = body.error?.message || '登录失败';
   });
 }
 

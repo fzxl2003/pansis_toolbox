@@ -13,7 +13,7 @@ from backend.app.core.errors import ToolboxError
 from backend.app.core.security import get_optional_user
 from tools.git_blog.backend import service
 
-ASSET_VERSION = "access-sharing-ui-20260929"
+ASSET_VERSION = "public-share-auth-20260929"
 DIRECTORY_COOKIE_NAME = "git_blog_directory_collapsed"
 VISITOR_COOKIE_NAME = "git_blog_visitor"
 
@@ -105,7 +105,18 @@ def _article_card(article: dict, base: str, *, show_meta: bool = True) -> str:
     return f'<li class="blog-card" data-href="{_esc(href)}" tabindex="0" role="link" aria-label="阅读：{_esc(article["title"])}"><div><h2><a href="{_esc(href)}">{_esc(article["title"])}</a></h2>{meta}<p class="blog-summary">{_esc(article["summary"])}</p></div>{image}</li>'
 
 
-def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False, article_theme: bool = False, include_nav: bool = True, noindex: bool = False, resource_base: str = "") -> HTMLResponse:
+def _identity_control(blog: dict, principal: dict[str, object]) -> str:
+    kind = str(principal.get("kind") or "anonymous")
+    if kind not in {"owner", "user", "password"}:
+        return ""
+    is_password = kind == "password"
+    label = "Guest" if is_password else str(principal.get("label") or "")
+    endpoint = f'/blog/{quote(blog["slug"])}/logout' if is_password else "/api/auth/logout"
+    action = "退出认证" if is_password else "退出登录"
+    return f'''<details class="blog-identity" data-blog-identity data-logout-endpoint="{_esc(endpoint)}"><summary aria-label="当前访问身份：{_esc(label)}"><span class="blog-identity-avatar" aria-hidden="true">{_esc(label[:1].upper())}</span><span>{_esc(label)}</span></summary><div class="blog-identity-menu"><button type="button" data-blog-logout>{action}</button><small data-blog-logout-status></small></div></details>'''
+
+
+def _layout(request: Request, blog: dict, title: str, body: str, *, description: str = "", not_found: bool = False, article_theme: bool = False, include_nav: bool = True, noindex: bool = False, resource_base: str = "", principal: dict[str, object] | None = None) -> HTMLResponse:
     site = _site(blog); base = f"/blog/{quote(blog['slug'])}"; css = "/tool-assets/git_blog"
     asset_base = resource_base or base
     template_css = f'<link rel="stylesheet" href="{asset_base}/theme/style.css">' if site.get("customTemplate") else ""
@@ -116,7 +127,10 @@ def _layout(request: Request, blog: dict, title: str, body: str, *, description:
     robots = '<meta name="robots" content="noindex,nofollow">' if noindex else ""
     head = f'''<!doctype html><html lang="{_esc(site.get('language','zh-CN'))}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)} · {_esc(site['title'])}</title><meta name="description" content="{_esc(description or site['description'])}">{robots}<link rel="canonical" href="{_esc(_url(request, request.url.path))}"><meta property="og:title" content="{_esc(title)}"><meta property="og:description" content="{_esc(description or site['description'])}"><link rel="stylesheet" href="{css}/vendor/github-markdown.css"><link rel="stylesheet" href="{css}/vendor/katex.min.css"><link rel="stylesheet" href="{css}/vendor/highlight.css"><link rel="stylesheet" href="{css}/blog.css?v={ASSET_VERSION}">{custom}<style>:root{{--blog-user-accent:{_esc(site.get('accentColor','#42b983'))};--blog-width:{int(site.get('contentWidth',860))}px;--blog-font:{_esc(site.get('fontFamily','Ubuntu, Source Sans Pro, sans-serif'))};}}</style></head>'''
     icons=f'<a class="blog-icon" title="RSS" href="{base}/feed.xml">◔</a><a class="blog-icon" title="Atom" href="{base}/atom.xml">◉</a>'
-    nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span></header>'
+    if principal is None:
+        principal = service.blog_access(blog, get_optional_user(request), request.cookies.get(VISITOR_COOKIE_NAME, ""))
+    identity = _identity_control(blog, principal)
+    nav=f'<header class="blog-head"><a href="{base}" class="blog-brand">{_esc(site["title"])}</a><nav class="blog-nav"><a href="{base}">首页</a><a href="{base}/directory">目录</a><a href="{base}/tags">标签</a></nav><span class="blog-subscribe">{icons}</span>{identity}</header>'
     return HTMLResponse(head+f'<body class="git-blog-page theme-{_esc(body_theme)} {page_kind}"><main class="blog-shell">{nav if include_nav else ""}{body}</main><script type="module" src="{css}/public.js?v={ASSET_VERSION}"></script></body></html>', status_code=404 if not_found else 200)
 
 
@@ -138,7 +152,7 @@ def _gate_page(request: Request, *, title: str, message: str, blog_slug: str = "
     blog_form = f'''<form data-blog-unlock data-endpoint="/blog/{quote(blog_slug)}/unlock"><h2>使用博客访问密码</h2><input name="password" type="password" autocomplete="current-password" placeholder="访问密码" required><button>进入博客</button></form>''' if blog_slug else ""
     share_form = f'''<form data-share-unlock data-endpoint="/blog/share/{quote(share_token)}/unlock"><h2>输入分享密码</h2><input name="password" type="password" autocomplete="current-password" placeholder="分享密码" required><button>打开文档</button></form>''' if share_token else ""
     login_form = f'''<form data-platform-login><h2>使用平台账号</h2><input name="username" autocomplete="username" placeholder="用户名" required><input name="password" type="password" autocomplete="current-password" placeholder="密码" required><button>登录并继续</button></form>''' if blog_slug else ""
-    source = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{_esc(title)}</title><style>body{{margin:0;background:#f8fafc;color:#1e293b;font-family:system-ui}}main{{width:min(92%,520px);margin:8vh auto}}section{{padding:26px;border:1px solid #e2e8f0;border-radius:14px;background:white;box-shadow:0 16px 40px #0f172a12}}h1{{margin:0 0 8px;font-size:24px}}h2{{margin:18px 0 8px;font-size:14px}}p{{color:#64748b}}form{{display:grid;gap:9px}}input,button{{box-sizing:border-box;min-height:42px;padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}}button{{border-color:#4f46e5;background:#4f46e5;color:white;cursor:pointer}}[data-error]{{min-height:20px;color:#b91c1c;font-size:13px}}</style></head><body><main><section><h1>{_esc(title)}</h1><p>{_esc(message)}</p>{share_form}{blog_form}{login_form}<div data-error></div></section></main><script>const error=document.querySelector('[data-error]');for(const form of document.querySelectorAll('form'))form.addEventListener('submit',async event=>{{event.preventDefault();error.textContent='';const data=Object.fromEntries(new FormData(form));const endpoint=form.dataset.platformLogin?'/api/auth/login':form.dataset.endpoint;const response=await fetch(endpoint,{{method:'POST',credentials:'include',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}});if(response.ok)location.href={json.dumps(target)};else{{const body=await response.json().catch(()=>({{}}));error.textContent=body.error?.message||'认证失败';}}}});</script></body></html>'''
+    source = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>{_esc(title)}</title><style>body{{margin:0;background:#f8fafc;color:#1e293b;font-family:system-ui}}main{{width:min(92%,520px);margin:8vh auto}}section{{padding:26px;border:1px solid #e2e8f0;border-radius:14px;background:white;box-shadow:0 16px 40px #0f172a12}}h1{{margin:0 0 8px;font-size:24px}}h2{{margin:18px 0 8px;font-size:14px}}p{{color:#64748b}}form{{display:grid;gap:9px}}input,button{{box-sizing:border-box;min-height:42px;padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}}button{{border-color:#4f46e5;background:#4f46e5;color:white;cursor:pointer}}[data-error]{{min-height:20px;color:#b91c1c;font-size:13px}}</style></head><body><main><section><h1>{_esc(title)}</h1><p>{_esc(message)}</p>{share_form}{blog_form}{login_form}<div data-error></div></section></main><script>const error=document.querySelector('[data-error]');for(const form of document.querySelectorAll('form'))form.addEventListener('submit',async event=>{{event.preventDefault();error.textContent='';const data=Object.fromEntries(new FormData(form));const endpoint=form.hasAttribute('data-platform-login')?'/api/auth/login':form.dataset.endpoint;const response=await fetch(endpoint,{{method:'POST',credentials:'include',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}});if(response.ok)location.href={json.dumps(target)};else{{const body=await response.json().catch(()=>({{}}));error.textContent=body.error?.message||'认证失败';}}}});</script></body></html>'''
     return HTMLResponse(source, status_code=status_code)
 
 
@@ -150,9 +164,15 @@ def _article_body(blog: dict, item: dict, *, share_button: str = "") -> str:
 def _share_control(blog: dict, item: dict, principal: dict[str, object]) -> str:
     if not blog.get("shareEnabled"):
         return ""
-    can_share = "true" if principal.get("canShare") else "false"
+    can_share = bool(principal.get("canShare"))
+    needs_auth = not can_share and blog.get("visibility") == "public" and principal.get("kind") == "anonymous"
+    if not can_share and not needs_auth:
+        return ""
+    auth_dialog = ""
+    if needs_auth:
+        auth_dialog = '''<dialog class="blog-share-dialog blog-share-auth-dialog" data-share-auth-dialog><div class="blog-share-form"><header><div><strong>需要分享权限</strong><small>请选择一种认证方式继续</small></div><button type="button" data-share-auth-close aria-label="关闭">×</button></header><form data-share-blog-auth-form><label>博客访问密码<input name="password" type="password" autocomplete="current-password" placeholder="输入具有分享权限的访问密码" required></label><button>验证访问密码</button></form><div class="blog-share-divider"><span>或</span></div><form data-share-platform-auth-form><label>平台用户名<input name="username" autocomplete="username" required></label><label>平台密码<input name="password" type="password" autocomplete="current-password" required></label><button>登录平台账号</button></form><div data-share-auth-result></div></div></dialog>'''
     default_expiry = (datetime.now().astimezone() + timedelta(days=7)).strftime('%Y-%m-%dT%H:%M')
-    return f'''<div class="blog-share" data-share-root data-can-share="{can_share}" data-endpoint="/blog/{quote(blog['slug'])}/shares" data-access-endpoint="/blog/{quote(blog['slug'])}/share-access" data-article="{_esc(item['slug'])}"><button class="blog-share-button" type="button" aria-label="分享文档" title="分享文档"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"></path></svg></button><dialog class="blog-share-dialog" data-share-dialog><form class="blog-share-form"><header><div><strong>分享文档</strong><small>设置链接的访问方式和有效范围</small></div><button type="button" data-share-close aria-label="关闭">×</button></header><label>展示方式<select name="mode"><option value="document">仅显示当前文档</option><option value="full">显示完整博客界面</option></select></label><label>有效期<input name="expiresAt" type="datetime-local" value="{default_expiry}"></label><label>浏览器打开上限<input name="maxViews" type="number" min="1" placeholder="留空表示不限"></label><label>分享密码（可选）<input name="password" type="password" autocomplete="new-password" placeholder="留空表示无需密码"></label><button type="submit" data-create-share>创建分享链接</button><div data-share-result></div></form></dialog><dialog class="blog-share-dialog blog-share-auth-dialog" data-share-auth-dialog><div class="blog-share-form"><header><div><strong>需要分享权限</strong><small>请选择一种认证方式继续</small></div><button type="button" data-share-auth-close aria-label="关闭">×</button></header><form data-share-blog-auth-form><label>博客访问密码<input name="password" type="password" autocomplete="current-password" placeholder="输入具有分享权限的访问密码" required></label><button>验证访问密码</button></form><div class="blog-share-divider"><span>或</span></div><form data-share-platform-auth-form><label>平台用户名<input name="username" autocomplete="username" required></label><label>平台密码<input name="password" type="password" autocomplete="current-password" required></label><button>登录平台账号</button></form><div data-share-auth-result></div></div></dialog></div>'''
+    return f'''<div class="blog-share" data-share-root data-can-share="{str(can_share).lower()}" data-endpoint="/blog/{quote(blog['slug'])}/shares" data-access-endpoint="/blog/{quote(blog['slug'])}/share-access" data-article="{_esc(item['slug'])}"><button class="blog-share-button" type="button" aria-label="分享文档" title="分享文档"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"></path></svg></button><dialog class="blog-share-dialog" data-share-dialog><form class="blog-share-form"><header><div><strong>分享文档</strong><small>设置链接的访问方式和有效范围</small></div><button type="button" data-share-close aria-label="关闭">×</button></header><label>展示方式<select name="mode"><option value="document">仅显示当前文档</option><option value="full">显示完整博客界面</option></select></label><label>有效期<input name="expiresAt" type="datetime-local" value="{default_expiry}"></label><label>浏览器打开上限<input name="maxViews" type="number" min="1" placeholder="留空表示不限"></label><label>分享密码（可选）<input name="password" type="password" autocomplete="new-password" placeholder="留空表示无需密码"></label><button type="submit" data-create-share>创建分享链接</button><div data-share-result></div></form></dialog>{auth_dialog}</div>'''
 
 
 def _missing(request: Request, slug: str = "") -> HTMLResponse:
@@ -161,7 +181,7 @@ def _missing(request: Request, slug: str = "") -> HTMLResponse:
     return HTMLResponse('<!doctype html><title>博客不存在</title><main style="font-family:system-ui;text-align:center;padding:5rem"><h1>404</h1><p>博客不存在或暂不可访问。</p></main>',status_code=404)
 
 
-def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False) -> HTMLResponse:
+def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False, principal: dict[str, object] | None = None) -> HTMLResponse:
     page=max(1,int(request.query_params.get("page","1") or 1)); query=request.query_params.get("q","").strip()[:100]
     articles,total=service.public_articles(blog["id"],page=page,tag=tag,query=query)
     base=f"/blog/{quote(blog['slug'])}"; items=[]
@@ -173,7 +193,7 @@ def _list(request: Request, blog: dict, *, tag: str = "", archive: bool = False)
     heading=f'<h2>{_esc(title)}</h2>' if title else ''
     back_to_top = _back_to_top_button("blog-home-back-to-top") if not tag and not archive else ""
     body=f'{heading}{search}<p class="blog-meta">{tags}</p><ul class="blog-list">{"".join(items) or "<li>暂无已发布文章。</li>"}</ul>{_pagination(request,page,total)}{back_to_top}'
-    return _layout(request,blog,title,body,description=_site(blog)["description"])
+    return _layout(request,blog,title,body,description=_site(blog)["description"],principal=principal)
 
 
 def _collapsed_directories(request: Request) -> set[str]:
@@ -235,6 +255,15 @@ def mount_extra(app: FastAPI) -> None:
         result = service.unlock_blog(blog, str(payload.get("password") or ""), visitor)
         return _set_visitor(JSONResponse({"authenticated": True, **result}), visitor, created, request)
 
+    @app.post("/blog/{blog_slug}/logout", include_in_schema=False)
+    def logout_blog(request: Request, blog_slug: str):
+        blog = service.public_blog(blog_slug)
+        if not blog:
+            raise ToolboxError("BLOG_NOT_FOUND", "博客不存在", status_code=404)
+        visitor, created = _visitor(request)
+        service.lock_blog(blog, visitor)
+        return _set_visitor(JSONResponse({"authenticated": False}), visitor, created, request)
+
     @app.post("/blog/{blog_slug}/shares", include_in_schema=False)
     def create_share(request: Request, blog_slug: str, payload: dict = Body(...)):
         visitor, created = _visitor(request)
@@ -259,40 +288,40 @@ def mount_extra(app: FastAPI) -> None:
 
     @app.get("/blog/{blog_slug}", include_in_schema=False)
     def blog_home(request: Request, blog_slug: str):
-        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        blog, denied, principal, _visitor_token = protected_blog(request, blog_slug)
         if denied: return denied
-        response = _list(request,blog); service.record_access(blog,request,status_code=response.status_code)
+        response = _list(request,blog,principal=principal); service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/directory", include_in_schema=False)
     def directory(request: Request, blog_slug: str):
-        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        blog, denied, principal, _visitor_token = protected_blog(request, blog_slug)
         if denied: return denied
         selected=request.query_params.get("path", "").strip().strip("/")
-        response = _layout(request, blog, "目录", _directory_body(blog, selected, _collapsed_directories(request))); service.record_access(blog, request, status_code=response.status_code)
+        response = _layout(request, blog, "目录", _directory_body(blog, selected, _collapsed_directories(request)), principal=principal); service.record_access(blog, request, status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/tags", include_in_schema=False)
     def tags(request: Request, blog_slug: str):
-        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        blog, denied, principal, _visitor_token = protected_blog(request, blog_slug)
         if denied: return denied
         base=f'/blog/{quote(blog_slug)}'; tags = service.public_tag_counts(blog["id"])
         body='<section class="blog-tags"><h2>标签</h2><div>'+''.join(f'<a href="{base}/tags/{quote(item["tag"])}">#{_esc(item["tag"])} <small>{item["count"]}</small></a>' for item in tags)+'</div></section>'
-        response = _layout(request, blog, "标签", body); service.record_access(blog, request, status_code=response.status_code)
+        response = _layout(request, blog, "标签", body, principal=principal); service.record_access(blog, request, status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/archive", include_in_schema=False)
     def archive(request: Request, blog_slug: str):
-        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        blog, denied, principal, _visitor_token = protected_blog(request, blog_slug)
         if denied: return denied
-        response = _list(request,blog,archive=True); service.record_access(blog,request,status_code=response.status_code)
+        response = _list(request,blog,archive=True,principal=principal); service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/tags/{tag}", include_in_schema=False)
     def tag(request: Request, blog_slug: str, tag: str):
-        blog, denied, _principal, _visitor_token = protected_blog(request, blog_slug)
+        blog, denied, principal, _visitor_token = protected_blog(request, blog_slug)
         if denied: return denied
-        response = _list(request,blog,tag=tag); service.record_access(blog,request,status_code=response.status_code)
+        response = _list(request,blog,tag=tag,principal=principal); service.record_access(blog,request,status_code=response.status_code)
         return response
 
     @app.get("/blog/{blog_slug}/posts/{article_slug:path}", include_in_schema=False)
@@ -304,7 +333,7 @@ def mount_extra(app: FastAPI) -> None:
             response = _missing(request,blog_slug); service.record_access(blog,request,status_code=404,article_slug=article_slug)
             return response
         article_body = _article_body(blog, item, share_button=_share_control(blog, item, principal))
-        response = _layout(request,blog,item["title"],article_body,description=item["summary"],article_theme=True)
+        response = _layout(request,blog,item["title"],article_body,description=item["summary"],article_theme=True,principal=principal)
         service.record_access(blog,request,status_code=response.status_code,article_slug=article_slug)
         return response
 

@@ -109,17 +109,52 @@ def test_document_share_bypasses_private_blog_but_full_share_requires_blog_acces
 
 
 def test_public_blog_allows_anonymous_visitors_to_create_shares(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
-    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    reader = User(id="public-reader", username="reader", display_name="Reader")
+    monkeypatch.setattr(service, "list_users", lambda: [owner, reader])
     monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
     blog = service.create_blog({"slug": "public-sharing", "repoUrl": "https://github.com/acme/docs"}, owner)
     _publish_test_article(blog)
     service.set_sharing_enabled(blog["id"], True, owner)
 
     public_blog = service.public_blog("public-sharing")
+    assert service.get_access_settings(blog["id"], owner)["everyoneCanShare"] is True
+    assert service.get_sharing_settings(blog["id"], owner)["everyoneCanShare"] is True
     assert service.blog_access(public_blog, None)["canShare"] is True
+    assert service.blog_access(public_blog, reader) == {"allowed": True, "canShare": True, "kind": "user", "label": "reader"}
+
+    reader_share = service.create_share("public-sharing", "guide/intro", {"expiresAt": None}, reader, "reader-browser")
+    assert reader_share["createdByType"] == "user"
     shared = service.create_share("public-sharing", "guide/intro", {"expiresAt": None}, None, "anonymous-browser")
     assert shared["createdByType"] == "anonymous"
     assert shared["url"].startswith("/blog/share/")
+
+    service.set_sharing_enabled(blog["id"], True, owner, False)
+    public_blog = service.public_blog("public-sharing")
+    assert service.get_sharing_settings(blog["id"], owner)["everyoneCanShare"] is False
+    assert service.blog_access(public_blog, None)["canShare"] is False
+    assert service.blog_access(public_blog, reader)["canShare"] is False
+    with pytest.raises(ToolboxError) as error:
+        service.create_share("public-sharing", "guide/intro", {"expiresAt": None}, None, "another-browser")
+    assert error.value.code == "SHARE_PERMISSION_REQUIRED"
+
+
+def test_everyone_can_share_overrides_private_user_and_password_permissions(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:
+    reader = User(id="private-reader", username="reader", display_name="Reader")
+    monkeypatch.setattr(service, "list_users", lambda: [owner, reader])
+    blog = service.create_blog({"slug": "private-sharing", "repoUrl": "https://github.com/acme/docs"}, owner)
+    service.set_blog_visibility(blog["id"], "private", owner)
+    service.set_sharing_enabled(blog["id"], True, owner, False)
+    service.add_access_user(blog["id"], "reader", False, owner)
+    service.add_access_password(blog["id"], "Guests", "secret", False, owner)
+
+    private_blog = service.get_blog(blog["id"], owner)
+    assert service.blog_access(private_blog, reader)["canShare"] is False
+    assert service.unlock_blog(private_blog, "secret", "guest-browser")["canShare"] is False
+
+    service.set_sharing_enabled(blog["id"], True, owner, True)
+    private_blog = service.get_blog(blog["id"], owner)
+    assert service.blog_access(private_blog, reader)["canShare"] is True
+    assert service.blog_access(private_blog, None, "guest-browser")["canShare"] is True
 
 
 def test_share_view_limit_counts_each_browser_once_and_keeps_existing_visitors(monkeypatch: pytest.MonkeyPatch, isolated_storage, owner: User) -> None:

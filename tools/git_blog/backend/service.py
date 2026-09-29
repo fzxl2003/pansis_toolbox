@@ -74,6 +74,8 @@ def _init(conn: sqlite3.Connection) -> None:
         content_root TEXT NOT NULL DEFAULT '', sync_interval_minutes INTEGER NOT NULL,
         config_json TEXT NOT NULL DEFAULT '{}', effective_config_json TEXT NOT NULL DEFAULT '{}', token_encrypted TEXT NOT NULL DEFAULT '', github_key_id TEXT NOT NULL DEFAULT '',
         enabled INTEGER NOT NULL DEFAULT 1, auto_sync_enabled INTEGER NOT NULL DEFAULT 1,
+        visibility TEXT NOT NULL DEFAULT 'public', share_enabled INTEGER NOT NULL DEFAULT 0,
+        everyone_can_share INTEGER NOT NULL DEFAULT 1,
         current_commit TEXT NOT NULL DEFAULT '',
         render_fingerprint TEXT NOT NULL DEFAULT '',
         sync_status TEXT NOT NULL DEFAULT 'pending', last_error TEXT NOT NULL DEFAULT '',
@@ -163,6 +165,9 @@ def _init(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'")
     if "share_enabled" not in columns:
         conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN share_enabled INTEGER NOT NULL DEFAULT 0")
+    if "everyone_can_share" not in columns:
+        conn.execute("ALTER TABLE git_blog_blogs ADD COLUMN everyone_can_share INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE git_blog_blogs SET everyone_can_share=1 WHERE visibility='public'")
     conn.commit()
 
 
@@ -259,6 +264,7 @@ def _row(row: sqlite3.Row) -> dict[str, Any]:
     data["lastError"] = data.pop("last_error")
     data["visibility"] = data.get("visibility", "public")
     data["shareEnabled"] = bool(data.pop("share_enabled", 0))
+    data["everyoneCanShare"] = bool(data.pop("everyone_can_share", 0))
     return data
 
 
@@ -305,6 +311,7 @@ def get_access_settings(blog_id: str, user: User) -> dict[str, Any]:
         ).fetchall()
     return {
         "visibility": blog["visibility"],
+        "everyoneCanShare": bool(blog["everyone_can_share"]),
         "users": [
             {"userId": row["user_id"], "username": users[row["user_id"]].username,
              "displayName": users[row["user_id"]].display_name, "canShare": bool(row["can_share"])}
@@ -427,13 +434,16 @@ def remove_access_password(blog_id: str, password_id: str, owner: User) -> None:
 
 def blog_access(blog: dict[str, Any], user: User | None, visitor_token: str = "") -> dict[str, Any]:
     is_public = blog.get("visibility", "public") == "public"
+    everyone_can_share = bool(blog.get("everyoneCanShare", False))
     if user and user.id == blog["ownerUserId"]:
         return {"allowed": True, "canShare": True, "kind": "owner", "label": user.username}
     if user:
         with _conn() as conn:
             grant = conn.execute("SELECT can_share FROM git_blog_access_users WHERE blog_id=? AND user_id=?", (blog["id"], user.id)).fetchone()
         if grant:
-            return {"allowed": True, "canShare": is_public or bool(grant["can_share"]), "kind": "user", "label": user.username}
+            return {"allowed": True, "canShare": everyone_can_share or bool(grant["can_share"]), "kind": "user", "label": user.username}
+        if is_public:
+            return {"allowed": True, "canShare": everyone_can_share, "kind": "user", "label": user.username}
     visitor_hash = _visitor_hash(visitor_token)
     if visitor_hash:
         with _conn() as conn:
@@ -443,8 +453,8 @@ def blog_access(blog: dict[str, Any], user: User | None, visitor_token: str = ""
                 (blog["id"], visitor_hash, _now()),
             ).fetchone()
         if grant:
-            return {"allowed": True, "canShare": is_public or bool(grant["can_share"]), "kind": "password", "label": grant["label"]}
-    return {"allowed": is_public, "canShare": is_public, "kind": "anonymous", "label": "匿名访客"}
+            return {"allowed": True, "canShare": everyone_can_share or bool(grant["can_share"]), "kind": "password", "label": grant["label"]}
+    return {"allowed": is_public, "canShare": is_public and everyone_can_share, "kind": "anonymous", "label": "匿名访客"}
 
 
 def unlock_blog(blog: dict[str, Any], password: str, visitor_token: str) -> dict[str, Any]:
@@ -462,7 +472,19 @@ def unlock_blog(blog: dict[str, Any], password: str, visitor_token: str) -> dict
             (blog["id"], _visitor_hash(visitor_token), matched["id"], expires, _now()),
         )
         conn.commit()
-    return {"allowed": True, "canShare": bool(matched["can_share"]), "label": matched["label"]}
+    return {"allowed": True, "canShare": bool(blog.get("everyoneCanShare")) or bool(matched["can_share"]), "label": matched["label"]}
+
+
+def lock_blog(blog: dict[str, Any], visitor_token: str) -> None:
+    visitor_hash = _visitor_hash(visitor_token)
+    if not visitor_hash:
+        return
+    with _conn() as conn:
+        conn.execute(
+            "DELETE FROM git_blog_access_sessions WHERE blog_id=? AND visitor_hash=?",
+            (blog["id"], visitor_hash),
+        )
+        conn.commit()
 
 
 def _theme_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -1123,13 +1145,21 @@ def get_sharing_settings(blog_id: str, user: User) -> dict[str, Any]:
             "LEFT JOIN git_blog_share_visitors v ON v.share_id=s.id WHERE s.blog_id=? GROUP BY s.id ORDER BY s.created_at DESC",
             (blog_id,),
         ).fetchall()
-    return {"enabled": bool(blog["share_enabled"]), "shares": [_share_public(row, views=int(row["view_count"])) for row in rows]}
+    return {
+        "enabled": bool(blog["share_enabled"]),
+        "everyoneCanShare": bool(blog["everyone_can_share"]),
+        "shares": [_share_public(row, views=int(row["view_count"])) for row in rows],
+    }
 
 
-def set_sharing_enabled(blog_id: str, enabled: bool, user: User) -> dict[str, Any]:
-    _owner_blog(blog_id, user)
+def set_sharing_enabled(blog_id: str, enabled: bool, user: User, everyone_can_share: bool | None = None) -> dict[str, Any]:
+    blog = _owner_blog(blog_id, user)
+    everyone = bool(blog["everyone_can_share"]) if everyone_can_share is None else everyone_can_share
     with _conn() as conn:
-        conn.execute("UPDATE git_blog_blogs SET share_enabled=?,updated_at=? WHERE id=?", (1 if enabled else 0, _now(), blog_id))
+        conn.execute(
+            "UPDATE git_blog_blogs SET share_enabled=?,everyone_can_share=?,updated_at=? WHERE id=?",
+            (1 if enabled else 0, 1 if everyone else 0, _now(), blog_id),
+        )
         conn.commit()
     return get_sharing_settings(blog_id, user)
 

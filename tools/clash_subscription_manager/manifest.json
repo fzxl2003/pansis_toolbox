@@ -6,7 +6,7 @@
   "enabled": true,
   "category": "network",
   "icon": {"type": "lucide", "name": "radio-tower"},
-  "displayMode": "flexible",
+  "displayMode": "standard",
   "entry": {"frontend": "frontend/index.tsx", "backend": "backend/router.py"},
   "api": {"prefix": "/api/tools/clash-subscription-manager"},
   "widgets": [],

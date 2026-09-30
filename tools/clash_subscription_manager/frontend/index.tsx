@@ -1,15 +1,19 @@
-import './style.css';
+import "./style.css";
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   BarChart3,
   Check,
   Clipboard,
   Eye,
   FileCode2,
+  FolderOpen,
   Gauge,
+  Link,
   Pencil,
   Plus,
   RefreshCw,
@@ -20,241 +24,3682 @@ import {
   ShieldAlert,
   Trash2,
   Upload,
-} from 'lucide-react';
+} from "lucide-react";
 
-import { ApiError, apiDelete, apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
-import { Alert, Badge, EmptyState, Field, Modal, Spin, useConfirm } from './components';
+import {
+  ApiError,
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPut,
+} from "../../../frontend/src/api/client";
+import {
+  Alert,
+  Badge,
+  EmptyState,
+  Field,
+  Modal,
+  Spin,
+  useConfirm,
+} from "./components";
 
-const API = '/api/tools/clash-subscription-manager';
-type View = 'dashboard' | 'sources' | 'nodes' | 'profiles' | 'rules';
-type Kernel = 'mihomo' | 'clash';
+const API = "/api/tools/clash-subscription-manager";
+type View = "dashboard" | "nodes" | "profiles" | "rules" | "providers";
 type ValidationMessage = { level: string; code?: string; message: string };
 type Source = {
-  id: string; name: string; url: string; userAgent: string; refreshSeconds: number; enabled: boolean;
-  status: string; lastSuccessAt?: string; lastAttemptAt?: string; nextRefreshAt?: string; lastError?: string;
+  id: string;
+  name: string;
+  url: string;
+  userAgent: string;
+  refreshSeconds: number;
+  enabled: boolean;
+  status: string;
+  lastSuccessAt?: string;
+  lastAttemptAt?: string;
+  nextRefreshAt?: string;
+  lastError?: string;
 };
 type Node = {
-  id: string; stableIdentity: string; name: string; protocol: string; server: string; port?: number;
-  sources: string[]; supportedOutput: boolean; lastSeenAt: string;
-  tcp?: { reachable: boolean; latencyMs?: number; error?: string; checkedAt?: string };
+  id: string;
+  stableIdentity: string;
+  name: string;
+  alias: string;
+  displayName: string;
+  protocol: string;
+  server: string;
+  port?: number;
+  sources: string[];
+  sourceIds: string[];
+  supportedOutput: boolean;
+  isCustom: boolean;
+  lastSeenAt: string;
+  config: Record<string, unknown>;
+  tcp?: {
+    reachable: boolean;
+    latencyMs?: number;
+    error?: string;
+    checkedAt?: string;
+  };
 };
-type ProfileSettings = { mixedPort?: number; allowLan?: boolean; mode?: string; ipv6?: boolean; dns?: unknown };
+type ProfileSettings = {
+  mixedPort?: number;
+  allowLan?: boolean;
+  mode?: string;
+  ipv6?: boolean;
+  dns?: unknown;
+};
 type Profile = {
-  id: string; name: string; targetKernel: Kernel; settings: ProfileSettings; ruleSetId?: string;
-  selectedStableIdentities?: string[]; publishedAt?: string; publishedStatus: string;
-  validation: ValidationMessage[]; subscriptionToken?: string;
+  id: string;
+  name: string;
+  settings: ProfileSettings;
+  ruleSetId?: string;
+  selectedStableIdentities?: string[];
+  publishedAt?: string;
+  publishedStatus: string;
+  validation: ValidationMessage[];
+  subscriptionToken?: string;
 };
 type RuleSet = {
-  id: string; name: string; rules: unknown[]; providers: Record<string, unknown>;
-  groups: Record<string, unknown>[]; importMeta?: Record<string, unknown>; updatedAt?: string;
+  id: string;
+  name: string;
+  rules: unknown[];
+  providers: Record<string, unknown>;
+  groups: Record<string, unknown>[];
+  importMeta?: Record<string, unknown>;
+  updatedAt?: string;
+};
+type RuleProviderLibraryItem = {
+  id: string;
+  name: string;
+  providerKey: string;
+  description: string;
+  config: Record<string, unknown>;
+  builtin: boolean;
+  updatedAt?: string;
+};
+type RuleGroupDraft = {
+  id: string;
+  name: string;
+  type: string;
+  proxies: string[];
+  providerIds: string[];
+  extra: Record<string, unknown>;
+  fallback?: boolean;
 };
 type RefreshRun = {
-  id: string; sourceId: string; sourceName: string; status: string; startedAt: string; finishedAt?: string;
-  durationMs?: number; nodesBefore: number; nodesAfter: number; error?: string;
+  id: string;
+  sourceId: string;
+  sourceName: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  nodesBefore: number;
+  nodesAfter: number;
+  error?: string;
 };
 type Dashboard = {
-  metrics: Record<string, number>; protocolDistribution: { name: string; value: number }[];
-  sources: Source[]; profiles: Profile[]; alerts: { kind?: string; message: string }[];
+  metrics: Record<string, number>;
+  protocolDistribution: { name: string; value: number }[];
+  sources: Source[];
+  profiles: Profile[];
+  alerts: { kind?: string; message: string }[];
 };
-type PreviewState = { profile: Profile; yaml: string; valid: boolean; messages: ValidationMessage[] };
+type PreviewState = {
+  profile: Profile;
+  yaml: string;
+  valid: boolean;
+  messages: ValidationMessage[];
+};
 
 export default function ClashSubscriptionManager() {
-  const [view, setView] = useState<View>('dashboard');
+  const [view, setView] = useState<View>("dashboard");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [ruleSets, setRuleSets] = useState<RuleSet[]>([]);
+  const [providerLibrary, setProviderLibrary] = useState<
+    RuleProviderLibraryItem[]
+  >([]);
   const [runs, setRuns] = useState<RefreshRun[]>([]);
   const [sourceModal, setSourceModal] = useState<Source | null | false>(false);
-  const [profileModal, setProfileModal] = useState<Profile | null | false>(false);
-  const [ruleModal, setRuleModal] = useState<RuleSet | 'import' | null>(null);
+  const [profileModal, setProfileModal] = useState<Profile | null | false>(
+    false,
+  );
+  const [ruleModal, setRuleModal] = useState<{
+    mode: "edit" | "import" | "create";
+    ruleSet?: RuleSet;
+  } | null>(null);
+  const [providerModal, setProviderModal] = useState<
+    RuleProviderLibraryItem | null | false
+  >(false);
+  const [providerCopy, setProviderCopy] = useState<RuleProviderLibraryItem | null>(
+    null,
+  );
+  const [addNodeOpen, setAddNodeOpen] = useState(false);
+  const [customNodeModal, setCustomNodeModal] = useState<Node | null | false>(
+    false,
+  );
+  const [aliasNode, setAliasNode] = useState<Node | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState('');
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [pending, setPending] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
 
   async function loadAll() {
     setLoading(true);
     try {
-      const [dashboardData, sourceData, nodeData, profileData, ruleData, runData] = await Promise.all([
+      const [
+        dashboardData,
+        sourceData,
+        nodeData,
+        profileData,
+        ruleData,
+        providerData,
+        runData,
+      ] = await Promise.all([
         apiGet<Dashboard>(`${API}/dashboard`),
         apiGet<{ sources: Source[] }>(`${API}/sources`),
         apiGet<{ nodes: Node[] }>(`${API}/nodes`),
         apiGet<{ profiles: Profile[] }>(`${API}/profiles`),
         apiGet<{ ruleSets: RuleSet[] }>(`${API}/rule-sets`),
+        apiGet<{ providers: RuleProviderLibraryItem[] }>(
+          `${API}/rule-providers`,
+        ),
         apiGet<{ runs: RefreshRun[] }>(`${API}/refresh-runs?limit=100`),
       ]);
-      setDashboard(dashboardData); setSources(sourceData.sources); setNodes(nodeData.nodes);
-      setProfiles(profileData.profiles); setRuleSets(ruleData.ruleSets); setRuns(runData.runs); setError('');
-    } catch (caught) { setError(message(caught)); }
-    finally { setLoading(false); }
+      setDashboard(dashboardData);
+      setSources(sourceData.sources);
+      setNodes(nodeData.nodes);
+      setProfiles(profileData.profiles);
+      setRuleSets(ruleData.ruleSets);
+      setProviderLibrary(providerData.providers);
+      setRuns(runData.runs);
+      setError("");
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setLoading(false);
+    }
   }
 
-  useEffect(() => { void loadAll(); }, []);
+  useEffect(() => {
+    void loadAll();
+  }, []);
 
-  async function action(key: string, work: () => Promise<unknown>, success: string, reload = true) {
-    setPending(key); setError('');
+  async function action(
+    key: string,
+    work: () => Promise<unknown>,
+    success: string,
+    reload = true,
+  ) {
+    setPending(key);
+    setError("");
     try {
-      await work(); setNotice(success);
+      await work();
+      setNotice(success);
       if (reload) await loadAll();
       return true;
-    } catch (caught) { setError(message(caught)); return false; }
-    finally { setPending(''); }
+    } catch (caught) {
+      setError(message(caught));
+      return false;
+    } finally {
+      setPending("");
+    }
   }
 
   function removeSource(source: Source) {
-    confirm({ title: '删除订阅源', message: <>确认删除「{source.name}」及其刷新历史？已发布订阅不会因此被立即覆盖。</>, onConfirm: async () => { await action(`source-delete-${source.id}`, () => apiDelete(`${API}/sources/${source.id}`), '订阅源已删除'); } });
+    confirm({
+      title: "删除订阅源",
+      message: (
+        <>
+          确认删除「{source.name}」及其刷新历史？已发布订阅不会因此被立即覆盖。
+        </>
+      ),
+      onConfirm: async () => {
+        await action(
+          `source-delete-${source.id}`,
+          () => apiDelete(`${API}/sources/${source.id}`),
+          "订阅源已删除",
+        );
+      },
+    });
+  }
+  function removeCustomNode(node: Node) {
+    confirm({
+      title: "删除自定义节点",
+      message: (
+        <>
+          确认删除「{node.displayName || node.name}
+          」？聚合配置中对该节点的选择会失效。
+        </>
+      ),
+      onConfirm: async () => {
+        await action(
+          `node-delete-${node.id}`,
+          () => apiDelete(`${API}/nodes/${node.id}`),
+          "自定义节点已删除",
+        );
+      },
+    });
+  }
+  async function copySubscriptionNode(node: Node) {
+    setPending(`node-copy-${node.id}`);
+    setError("");
+    try {
+      const result = await apiPost<{ node: Node }>(
+        `${API}/nodes/${node.id}/copy`,
+        {},
+      );
+      setNotice("已复制为自定义节点，可以直接编辑");
+      await loadAll();
+      setCustomNodeModal(result.node);
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setPending("");
+    }
   }
   function removeProfile(profile: Profile) {
-    confirm({ title: '删除聚合配置', message: <>确认删除「{profile.name}」？对应公开订阅链接将立即失效。</>, onConfirm: async () => { await action(`profile-delete-${profile.id}`, () => apiDelete(`${API}/profiles/${profile.id}`), '聚合配置已删除'); } });
+    confirm({
+      title: "删除聚合配置",
+      message: <>确认删除「{profile.name}」？对应公开订阅链接将立即失效。</>,
+      onConfirm: async () => {
+        await action(
+          `profile-delete-${profile.id}`,
+          () => apiDelete(`${API}/profiles/${profile.id}`),
+          "聚合配置已删除",
+        );
+      },
+    });
   }
   function removeRuleSet(ruleSet: RuleSet) {
-    confirm({ title: '删除规则库', message: <>确认删除「{ruleSet.name}」？引用它的聚合配置需要重新选择规则库。</>, onConfirm: async () => { await action(`rule-delete-${ruleSet.id}`, () => apiDelete(`${API}/rule-sets/${ruleSet.id}`), '规则库已删除'); } });
+    confirm({
+      title: "删除规则库",
+      message: (
+        <>确认删除「{ruleSet.name}」？引用它的聚合配置需要重新选择规则库。</>
+      ),
+      onConfirm: async () => {
+        await action(
+          `rule-delete-${ruleSet.id}`,
+          () => apiDelete(`${API}/rule-sets/${ruleSet.id}`),
+          "规则库已删除",
+        );
+      },
+    });
+  }
+  function removeRuleProvider(provider: RuleProviderLibraryItem) {
+    if (provider.builtin) return;
+    confirm({
+      title: "删除 Rule Provider",
+      message: (
+        <>
+          确认删除「{provider.name}
+          」？如果仍被策略组使用，需要先在规则库中取消选择。
+        </>
+      ),
+      onConfirm: async () => {
+        await action(
+          `provider-delete-${provider.id}`,
+          () => apiDelete(`${API}/rule-providers/${provider.id}`),
+          "Rule Provider 已删除",
+        );
+      },
+    });
+  }
+  function copyRuleProvider(provider: RuleProviderLibraryItem) {
+    if (String(provider.config.type ?? "") !== "manual") {
+      setProviderCopy(provider);
+      return;
+    }
+    void action(
+      `provider-copy-${provider.id}`,
+      () => apiPost(`${API}/rule-providers/${provider.id}/copy`, { mode: "original" }),
+      "Rule Provider 已复制",
+    );
   }
   async function openPreview(profile: Profile) {
-    setPending(`preview-${profile.id}`); setError('');
+    setPending(`preview-${profile.id}`);
+    setError("");
     try {
-      const result = await apiPost<{ yaml: string; valid: boolean; messages: ValidationMessage[] }>(`${API}/profiles/${profile.id}/preview`, {});
+      const result = await apiPost<{
+        yaml: string;
+        valid: boolean;
+        messages: ValidationMessage[];
+      }>(`${API}/profiles/${profile.id}/preview`, {});
       setPreview({ profile, ...result });
-    } catch (caught) { setError(message(caught)); }
-    finally { setPending(''); }
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setPending("");
+    }
   }
   async function copy(value: string, success: string) {
-    try { await navigator.clipboard.writeText(value); setNotice(success); }
-    catch { setError('浏览器拒绝了剪贴板访问，请手动复制。'); }
+    try {
+      await navigator.clipboard.writeText(value);
+      setNotice(success);
+    } catch {
+      setError("浏览器拒绝了剪贴板访问，请手动复制。");
+    }
   }
-  const subscriptionUrl = (profile: Profile) => profile.subscriptionToken ? `${window.location.origin}/sub/clash/${profile.subscriptionToken}` : '';
+  const subscriptionUrl = (profile: Profile) =>
+    profile.subscriptionToken
+      ? `${window.location.origin}/sub/clash/${profile.subscriptionToken}`
+      : "";
 
-  return <div className="tool-page csm-tool">
-    <header className="tool-header">
-      <div><h1 className="tool-title">Clash 订阅聚合器</h1><p className="tool-subtitle">订阅解析、节点去重、规则校验与双内核安全发布</p></div>
-      <button className="csm-btn csm-btn-secondary" type="button" disabled={loading} onClick={() => void loadAll()}><RefreshCw size={14} className={loading ? 'csm-spin' : ''} />刷新</button>
-    </header>
-    <nav className="csm-topnav" aria-label="工具视图">
-      <Tab active={view === 'dashboard'} icon={<Gauge size={14} />} onClick={() => setView('dashboard')}>运营总览</Tab>
-      <Tab active={view === 'sources'} icon={<Server size={14} />} onClick={() => setView('sources')}>订阅源</Tab>
-      <Tab active={view === 'nodes'} icon={<Activity size={14} />} onClick={() => setView('nodes')}>节点池</Tab>
-      <Tab active={view === 'profiles'} icon={<Send size={14} />} onClick={() => setView('profiles')}>聚合配置</Tab>
-      <Tab active={view === 'rules'} icon={<FileCode2 size={14} />} onClick={() => setView('rules')}>规则库与刷新记录</Tab>
-    </nav>
-    <div className="csm-body">
-      {error && <Alert type="error">{error}</Alert>}
-      {notice && <Alert type="success">{notice}</Alert>}
-      {view === 'dashboard' && <DashboardView data={dashboard} loading={loading} onNavigate={setView} />}
-      {view === 'sources' && <SourcesView sources={sources} loading={loading} pending={pending} onReload={() => void loadAll()} onAdd={() => setSourceModal(null)} onEdit={setSourceModal} onRemove={removeSource} onRefresh={(source) => void action(`source-refresh-${source.id}`, () => apiPost(`${API}/sources/${source.id}/refresh`, {}), '订阅源刷新完成')} />}
-      {view === 'nodes' && <NodesView nodes={nodes} loading={loading} pending={pending} onProbe={(ids) => void action('nodes-probe', () => apiPost(`${API}/nodes/probe`, { nodeIds: ids }), 'TCP 探测完成')} />}
-      {view === 'profiles' && <ProfilesView profiles={profiles} loading={loading} pending={pending} subscriptionUrl={subscriptionUrl} onAdd={() => setProfileModal(null)} onEdit={setProfileModal} onRemove={removeProfile} onValidate={(profile) => void action(`validate-${profile.id}`, () => apiPost(`${API}/profiles/${profile.id}/validate`, {}), '配置校验完成')} onPreview={(profile) => void openPreview(profile)} onCopy={(profile) => void copy(subscriptionUrl(profile), '订阅链接已复制')} onRotate={(profile) => confirm({ title: '轮换订阅令牌', message: <>轮换后「{profile.name}」的旧链接将立即失效，确认继续？</>, onConfirm: async () => { await action(`rotate-${profile.id}`, () => apiPost(`${API}/profiles/${profile.id}/rotate-token`, {}), '订阅令牌已轮换'); } })} />}
-      {view === 'rules' && <RulesAndRunsView ruleSets={ruleSets} runs={runs} loading={loading} onImport={() => setRuleModal('import')} onEdit={setRuleModal} onRemove={removeRuleSet} />}
+  return (
+    <div className="tool-page csm-tool">
+      <header className="tool-header">
+        <div>
+          <h1 className="tool-title">Clash 订阅聚合器</h1>
+          <p className="tool-subtitle">
+            订阅解析、自定义节点、规则校验与 Clash Meta 安全发布
+          </p>
+        </div>
+        <button
+          className="csm-btn csm-btn-secondary"
+          type="button"
+          disabled={loading}
+          onClick={() => void loadAll()}
+        >
+          <RefreshCw size={14} className={loading ? "csm-spin" : ""} />
+          刷新
+        </button>
+      </header>
+      <nav className="csm-topnav" aria-label="工具视图">
+        <Tab
+          active={view === "dashboard"}
+          icon={<Gauge size={14} />}
+          onClick={() => setView("dashboard")}
+        >
+          运营总览
+        </Tab>
+        <Tab
+          active={view === "nodes"}
+          icon={<Activity size={14} />}
+          onClick={() => setView("nodes")}
+        >
+          节点池
+        </Tab>
+        <Tab
+          active={view === "profiles"}
+          icon={<Send size={14} />}
+          onClick={() => setView("profiles")}
+        >
+          聚合配置
+        </Tab>
+        <Tab
+          active={view === "rules"}
+          icon={<FileCode2 size={14} />}
+          onClick={() => setView("rules")}
+        >
+          规则库
+        </Tab>
+        <Tab
+          active={view === "providers"}
+          icon={<FolderOpen size={14} />}
+          onClick={() => setView("providers")}
+        >
+          Rule Provider
+        </Tab>
+      </nav>
+      <div className="csm-body">
+        {error && <Alert type="error">{error}</Alert>}
+        {notice && <Alert type="success">{notice}</Alert>}
+        {view === "dashboard" && (
+          <DashboardView
+            data={dashboard}
+            runs={runs}
+            loading={loading}
+            onNavigate={setView}
+          />
+        )}
+        {view === "nodes" && (
+          <NodesView
+            sources={sources}
+            nodes={nodes}
+            loading={loading}
+            pending={pending}
+            onAdd={() => setAddNodeOpen(true)}
+            onEditSource={setSourceModal}
+            onRemoveSource={removeSource}
+            onRefreshSource={(source) =>
+              void action(
+                `source-refresh-${source.id}`,
+                () => apiPost(`${API}/sources/${source.id}/refresh`, {}),
+                "订阅源刷新完成",
+              )
+            }
+            onEditCustom={setCustomNodeModal}
+            onRemoveCustom={removeCustomNode}
+            onCopy={(node) => void copySubscriptionNode(node)}
+            onAlias={setAliasNode}
+            onProbe={(ids) =>
+              void action(
+                "nodes-probe",
+                () => apiPost(`${API}/nodes/probe`, { nodeIds: ids }),
+                "TCP 探测完成",
+              )
+            }
+          />
+        )}
+        {view === "profiles" && (
+          <ProfilesView
+            profiles={profiles}
+            loading={loading}
+            pending={pending}
+            subscriptionUrl={subscriptionUrl}
+            onAdd={() => setProfileModal(null)}
+            onEdit={setProfileModal}
+            onRemove={removeProfile}
+            onValidate={(profile) =>
+              void action(
+                `validate-${profile.id}`,
+                () => apiPost(`${API}/profiles/${profile.id}/validate`, {}),
+                "配置校验完成",
+              )
+            }
+            onPreview={(profile) => void openPreview(profile)}
+            onCopy={(profile) =>
+              void copy(subscriptionUrl(profile), "订阅链接已复制")
+            }
+            onRotate={(profile) =>
+              confirm({
+                title: "轮换订阅令牌",
+                message: (
+                  <>轮换后「{profile.name}」的旧链接将立即失效，确认继续？</>
+                ),
+                onConfirm: async () => {
+                  await action(
+                    `rotate-${profile.id}`,
+                    () =>
+                      apiPost(`${API}/profiles/${profile.id}/rotate-token`, {}),
+                    "订阅令牌已轮换",
+                  );
+                },
+              })
+            }
+          />
+        )}
+        {view === "providers" && (
+          <RuleProvidersView
+            providers={providerLibrary}
+            loading={loading}
+            pending={pending}
+            onAdd={() => setProviderModal(null)}
+            onEdit={setProviderModal}
+            onCopy={copyRuleProvider}
+            onRemove={removeRuleProvider}
+          />
+        )}
+        {view === "rules" && (
+          <RulesView
+            ruleSets={ruleSets}
+            loading={loading}
+            onImport={() => setRuleModal({ mode: "import" })}
+            onCreate={() => setRuleModal({ mode: "create" })}
+            onEdit={(ruleSet) => setRuleModal({ mode: "edit", ruleSet })}
+            onRemove={removeRuleSet}
+          />
+        )}
+      </div>
+      {addNodeOpen && (
+        <AddNodeModal
+          onClose={() => setAddNodeOpen(false)}
+          onAddSource={() => {
+            setAddNodeOpen(false);
+            setSourceModal(null);
+          }}
+          onAddCustom={() => {
+            setAddNodeOpen(false);
+            setCustomNodeModal(null);
+          }}
+        />
+      )}
+      {sourceModal !== false && (
+        <SourceModal
+          source={sourceModal}
+          onClose={() => setSourceModal(false)}
+          onSaved={async (text) => {
+            setSourceModal(false);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {profileModal !== false && (
+        <ProfileModal
+          profile={profileModal}
+          nodes={nodes}
+          ruleSets={ruleSets}
+          onClose={() => setProfileModal(false)}
+          onSaved={async (text) => {
+            setProfileModal(false);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {customNodeModal !== false && (
+        <CustomNodeModal
+          node={customNodeModal}
+          onClose={() => setCustomNodeModal(false)}
+          onSaved={async (text) => {
+            setCustomNodeModal(false);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {aliasNode && (
+        <NodeAliasModal
+          node={aliasNode}
+          onClose={() => setAliasNode(null)}
+          onSaved={async () => {
+            setAliasNode(null);
+            setNotice("节点别名已保存");
+            await loadAll();
+          }}
+        />
+      )}
+      {ruleModal && (
+        <RuleSetModal
+          mode={ruleModal.mode}
+          ruleSet={ruleModal.ruleSet}
+          nodes={nodes}
+          providerLibrary={providerLibrary}
+          onClose={() => setRuleModal(null)}
+          onSaved={async (text) => {
+            setRuleModal(null);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {providerModal !== false && (
+        <RuleProviderModal
+          provider={providerModal}
+          onClose={() => setProviderModal(false)}
+          onSaved={async (text) => {
+            setProviderModal(false);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {providerCopy && (
+        <RuleProviderCopyModal
+          provider={providerCopy}
+          onClose={() => setProviderCopy(null)}
+          onSaved={async (text) => {
+            setProviderCopy(null);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {preview && (
+        <PreviewModal
+          state={preview}
+          publishing={pending === `publish-${preview.profile.id}`}
+          onClose={() => setPreview(null)}
+          onCopy={() => void copy(preview.yaml, "YAML 已复制")}
+          onPublish={() =>
+            void action(
+              `publish-${preview.profile.id}`,
+              () =>
+                apiPost(`${API}/profiles/${preview.profile.id}/publish`, {}),
+              "配置已发布",
+            ).then((ok) => {
+              if (ok) setPreview(null);
+            })
+          }
+        />
+      )}
+      {dialog}
     </div>
-    {sourceModal !== false && <SourceModal source={sourceModal} onClose={() => setSourceModal(false)} onSaved={async (text) => { setSourceModal(false); setNotice(text); await loadAll(); }} />}
-    {profileModal !== false && <ProfileModal profile={profileModal} nodes={nodes} ruleSets={ruleSets} onClose={() => setProfileModal(false)} onSaved={async (text) => { setProfileModal(false); setNotice(text); await loadAll(); }} />}
-    {ruleModal && <RuleSetModal ruleSet={ruleModal === 'import' ? null : ruleModal} onClose={() => setRuleModal(null)} onSaved={async (text) => { setRuleModal(null); setNotice(text); await loadAll(); }} />}
-    {preview && <PreviewModal state={preview} publishing={pending === `publish-${preview.profile.id}`} onClose={() => setPreview(null)} onCopy={() => void copy(preview.yaml, 'YAML 已复制')} onPublish={() => void action(`publish-${preview.profile.id}`, () => apiPost(`${API}/profiles/${preview.profile.id}/publish`, {}), '配置已发布').then((ok) => { if (ok) setPreview(null); })} />}
-    {dialog}
-  </div>;
+  );
 }
 
-function Tab({ active, icon, onClick, children }: { active: boolean; icon: React.ReactNode; onClick: () => void; children: React.ReactNode }) {
-  return <button className={active ? 'active' : ''} type="button" onClick={onClick}>{icon}{children}</button>;
+function Tab({
+  active,
+  icon,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button className={active ? "active" : ""} type="button" onClick={onClick}>
+      {icon}
+      {children}
+    </button>
+  );
 }
 
-function DashboardView({ data, loading, onNavigate }: { data: Dashboard | null; loading: boolean; onNavigate: (view: View) => void }) {
+function refreshRunStatus(run: RefreshRun) {
+  return run.status === "success"
+    ? "成功"
+    : run.status === "failed"
+      ? "失败"
+      : "进行中";
+}
+
+function RefreshRunLog({
+  title,
+  runs,
+}: {
+  title: string;
+  runs: RefreshRun[];
+}) {
+  if (!runs.length) return null;
+  return (
+    <div className="csm-dashboard-log">
+      <div className="csm-dashboard-log-title">
+        <RefreshCw size={13} />
+        <strong>{title}</strong>
+      </div>
+      <div className="csm-dashboard-log-list">
+        {runs.map((run) => (
+          <div className="csm-dashboard-log-row" key={run.id}>
+            <Badge
+              color={
+                run.status === "success"
+                  ? "green"
+                  : run.status === "failed"
+                    ? "red"
+                    : "blue"
+              }
+            >
+              {refreshRunStatus(run)}
+            </Badge>
+            <span>
+              <strong>{run.sourceName}</strong>
+              <small>
+                节点 {run.nodesBefore} → {run.nodesAfter}
+                {run.durationMs == null ? "" : ` · ${run.durationMs} ms`}
+                {run.error ? ` · ${run.error}` : ""}
+              </small>
+            </span>
+            <time>{stamp(run.startedAt)}</time>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DashboardView({
+  data,
+  runs,
+  loading,
+  onNavigate,
+}: {
+  data: Dashboard | null;
+  runs: RefreshRun[];
+  loading: boolean;
+  onNavigate: (view: View) => void;
+}) {
   if (loading && !data) return <Loading text="加载运营总览…" />;
   const metrics = data?.metrics ?? {};
+  const orderedRuns = [...runs].sort(
+    (left, right) =>
+      (Date.parse(right.startedAt) || 0) - (Date.parse(left.startedAt) || 0),
+  );
+  const successfulRuns = orderedRuns
+    .filter((run) => run.status === "success")
+    .slice(0, 4);
+  const failedRuns = orderedRuns
+    .filter((run) => run.status === "failed")
+    .slice(0, 4);
+  const latestRunBySource = new Map<string, RefreshRun>();
+  for (const run of orderedRuns) {
+    if (!latestRunBySource.has(run.sourceId))
+      latestRunBySource.set(run.sourceId, run);
+  }
   const cards: Array<[string, number, string, View]> = [
-    ['订阅源', metrics.sources ?? 0, `${metrics.healthySources ?? 0} 个正常`, 'sources'],
-    ['去重后节点', metrics.nodes ?? 0, `去重前 ${metrics.nodesBeforeDedupe ?? 0}`, 'nodes'],
-    ['TCP 可达', metrics.tcpReachable ?? 0, '仅表示端口连通', 'nodes'],
-    ['已发布配置', metrics.publishedProfiles ?? 0, '最后有效版本持续可用', 'profiles'],
-    ['待处理告警', metrics.alerts ?? 0, '来源与配置异常', 'profiles'],
+    [
+      "订阅源",
+      metrics.sources ?? 0,
+      `${metrics.healthySources ?? 0} 个正常`,
+      "nodes",
+    ],
+    [
+      "去重后节点",
+      metrics.nodes ?? 0,
+      `去重前 ${metrics.nodesBeforeDedupe ?? 0}`,
+      "nodes",
+    ],
+    ["TCP 可达", metrics.tcpReachable ?? 0, "仅表示端口连通", "nodes"],
+    [
+      "已发布配置",
+      metrics.publishedProfiles ?? 0,
+      "最后有效版本持续可用",
+      "profiles",
+    ],
+    ["待处理告警", metrics.alerts ?? 0, "来源与配置异常", "profiles"],
   ];
-  return <div className="csm-stack">
-    <section className="csm-metrics">{cards.map(([label, value, note, target]) => <button type="button" className="csm-metric" key={label} onClick={() => onNavigate(target)}><span>{label}</span><strong>{value}</strong><small>{note}</small></button>)}</section>
-    <section className="csm-grid-two">
-      <div className="csm-panel"><PanelTitle icon={<BarChart3 size={18} />} title="节点协议分布" />{data?.protocolDistribution.length ? <div className="csm-bars">{data.protocolDistribution.map((item) => <div key={item.name}><code>{item.name}</code><span><i style={{ width: `${Math.max(5, item.value / Math.max(...data.protocolDistribution.map((entry) => entry.value)) * 100)}%` }} /></span><b>{item.value}</b></div>)}</div> : <EmptyState title="暂无节点数据" hint="成功刷新订阅源后显示协议分布" />}</div>
-      <div className="csm-panel"><PanelTitle icon={<ShieldAlert size={18} />} title="告警中心" />{data?.alerts.length ? <div className="csm-alert-list">{data.alerts.map((alert, index) => <div key={`${alert.message}-${index}`}><AlertTriangle size={15} /><span>{alert.message}</span></div>)}</div> : <EmptyState icon={<Check size={28} />} title="没有待处理告警" hint="订阅源和已发布配置状态正常" />}</div>
-    </section>
-    <section className="csm-grid-two">
-      <div className="csm-panel"><PanelTitle icon={<Server size={18} />} title="订阅源健康" />{data?.sources.length ? <div className="csm-summary-list">{data.sources.map((source) => <div key={source.id}><StatusDot status={source.status} /><strong>{source.name}</strong><span>{source.lastError || stamp(source.lastSuccessAt)}</span></div>)}</div> : <EmptyState title="暂无订阅源" />}</div>
-      <div className="csm-panel"><PanelTitle icon={<Send size={18} />} title="聚合配置" />{data?.profiles.length ? <div className="csm-summary-list">{data.profiles.map((profile) => <div key={profile.id}><Send size={14} /><strong>{profile.name}</strong><span>{kernelName(profile.targetKernel)} · {publishLabel(profile)}</span></div>)}</div> : <EmptyState title="暂无聚合配置" />}</div>
-    </section>
-  </div>;
+  return (
+    <div className="csm-stack">
+      <section className="csm-metrics">
+        {cards.map(([label, value, note, target]) => (
+          <button
+            type="button"
+            className="csm-metric"
+            key={label}
+            onClick={() => onNavigate(target)}
+          >
+            <span>{label}</span>
+            <strong>{value}</strong>
+            <small>{note}</small>
+          </button>
+        ))}
+      </section>
+      <section className="csm-grid-two">
+        <div className="csm-panel">
+          <PanelTitle icon={<BarChart3 size={18} />} title="节点协议分布" />
+          {data?.protocolDistribution.length ? (
+            <div className="csm-bars">
+              {data.protocolDistribution.map((item) => (
+                <div key={item.name}>
+                  <code>{item.name}</code>
+                  <span>
+                    <i
+                      style={{
+                        width: `${Math.max(5, (item.value / Math.max(...data.protocolDistribution.map((entry) => entry.value))) * 100)}%`,
+                      }}
+                    />
+                  </span>
+                  <b>{item.value}</b>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="暂无节点数据"
+              hint="成功刷新订阅源后显示协议分布"
+            />
+          )}
+          <RefreshRunLog title="最近节点更新日志" runs={successfulRuns} />
+        </div>
+        <div className="csm-panel">
+          <PanelTitle icon={<ShieldAlert size={18} />} title="告警中心" />
+          {data?.alerts.length || failedRuns.length ? (
+            <>
+              {!!data?.alerts.length && (
+                <div className="csm-alert-list">
+                  {data.alerts.map((alert, index) => (
+                    <div key={`${alert.message}-${index}`}>
+                      <AlertTriangle size={15} />
+                      <span>{alert.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <RefreshRunLog title="失败刷新日志" runs={failedRuns} />
+            </>
+          ) : (
+            <EmptyState
+              icon={<Check size={28} />}
+              title="没有待处理告警"
+              hint="订阅源和已发布配置状态正常"
+            />
+          )}
+        </div>
+      </section>
+      <section className="csm-grid-two">
+        <div className="csm-panel">
+          <PanelTitle icon={<Server size={18} />} title="订阅源健康" />
+          {data?.sources.length ? (
+            <div className="csm-source-health-list">
+              {data.sources.map((source) => {
+                const run = latestRunBySource.get(source.id);
+                return (
+                  <div className="csm-source-health-row" key={source.id}>
+                    <StatusDot status={source.status} />
+                    <span>
+                      <strong>{source.name}</strong>
+                      <small>
+                        {run
+                          ? `最近刷新：${refreshRunStatus(run)} · 节点 ${run.nodesBefore} → ${run.nodesAfter}${run.durationMs == null ? "" : ` · ${run.durationMs} ms`}`
+                          : "暂无刷新日志"}
+                      </small>
+                    </span>
+                    <time>{run ? stamp(run.startedAt) : "—"}</time>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <EmptyState title="暂无订阅源" />
+          )}
+        </div>
+        <div className="csm-panel">
+          <PanelTitle icon={<Send size={18} />} title="聚合配置" />
+          {data?.profiles.length ? (
+            <div className="csm-summary-list">
+              {data.profiles.map((profile) => (
+                <div key={profile.id}>
+                  <Send size={14} />
+                  <strong>{profile.name}</strong>
+                  <span>Clash Meta · {publishLabel(profile)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="暂无聚合配置" />
+          )}
+        </div>
+      </section>
+    </div>
+  );
 }
 
-function SourcesView({ sources, loading, pending, onReload, onAdd, onEdit, onRemove, onRefresh }: { sources: Source[]; loading: boolean; pending: string; onReload: () => void; onAdd: () => void; onEdit: (source: Source) => void; onRemove: (source: Source) => void; onRefresh: (source: Source) => void }) {
-  return <div className="csm-panel"><Toolbar title="订阅源" icon={<Server size={18} />} actions={<><button className="csm-btn csm-btn-secondary" type="button" disabled={loading} onClick={onReload}><RefreshCw size={14} />刷新列表</button><button className="csm-btn csm-btn-primary" type="button" onClick={onAdd}><Plus size={14} />添加订阅源</button></>} />
-    {loading ? <Loading text="加载订阅源…" /> : !sources.length ? <EmptyState icon={<Server size={32} />} title="暂无订阅源" hint="点击“添加订阅源”开始导入节点" /> : <Table><thead><tr><th>名称</th><th>状态</th><th>刷新周期</th><th>上次成功</th><th>下次刷新</th><th>操作</th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><strong>{source.name}</strong><small className="csm-cell-note">{source.url}</small>{source.lastError && <small className="csm-cell-error">{source.lastError}</small>}</td><td><SourceBadge status={source.status} enabled={source.enabled} /></td><td>{duration(source.refreshSeconds)}</td><td>{stamp(source.lastSuccessAt)}</td><td>{source.enabled ? stamp(source.nextRefreshAt) : '已停用'}</td><td><Actions><button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="立即刷新" disabled={pending === `source-refresh-${source.id}`} onClick={() => onRefresh(source)}>{pending === `source-refresh-${source.id}` ? <Spin size={13} /> : <RefreshCw size={13} />}</button><button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="编辑" onClick={() => onEdit(source)}><Pencil size={13} /></button><button className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text" type="button" title="删除" onClick={() => onRemove(source)}><Trash2 size={13} /></button></Actions></td></tr>)}</tbody></Table>}
-  </div>;
+function NodesView({
+  sources,
+  nodes,
+  loading,
+  pending,
+  onAdd,
+  onEditSource,
+  onRemoveSource,
+  onRefreshSource,
+  onEditCustom,
+  onRemoveCustom,
+  onCopy,
+  onAlias,
+  onProbe,
+}: {
+  sources: Source[];
+  nodes: Node[];
+  loading: boolean;
+  pending: string;
+  onAdd: () => void;
+  onEditSource: (source: Source) => void;
+  onRemoveSource: (source: Source) => void;
+  onRefreshSource: (source: Source) => void;
+  onEditCustom: (node: Node) => void;
+  onRemoveCustom: (node: Node) => void;
+  onCopy: (node: Node) => void;
+  onAlias: (node: Node) => void;
+  onProbe: (ids: string[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [protocol, setProtocol] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [probeClock, setProbeClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setProbeClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const protocols = useMemo(
+    () => Array.from(new Set(nodes.map((node) => node.protocol))).sort(),
+    [nodes],
+  );
+  const filtered = useMemo(
+    () =>
+      nodes.filter(
+        (node) =>
+          (!protocol || node.protocol === protocol) &&
+          `${node.name} ${node.alias} ${node.server} ${node.sources.join(" ")}`
+            .toLowerCase()
+            .includes(search.trim().toLowerCase()),
+      ),
+    [nodes, protocol, search],
+  );
+  const sourceNodeCount = (sourceId: string) =>
+    nodes.filter((node) => !node.isCustom && node.sourceIds.includes(sourceId))
+      .length;
+  const nodesForSource = (sourceId: string) =>
+    filtered.filter(
+      (node) => !node.isCustom && node.sourceIds.includes(sourceId),
+    );
+  const customNodes = filtered.filter((node) => node.isCustom);
+  const visibleNodeIds = Array.from(
+    new Set([
+      ...sources.flatMap((source) =>
+        nodesForSource(source.id).map((node) => node.id),
+      ),
+      ...customNodes.map((node) => node.id),
+    ]),
+  );
+  const recentProbe = (node: Node) => {
+    if (!node.tcp?.checkedAt) return false;
+    const checkedAt = new Date(node.tcp.checkedAt).valueOf();
+    return Number.isFinite(checkedAt) && probeClock - checkedAt < 15000;
+  };
+
+  function toggleGroup(groupNodes: Node[], checked: boolean) {
+    const ids = new Set(groupNodes.map((node) => node.id));
+    setSelected((current) =>
+      checked
+        ? Array.from(new Set([...current, ...ids]))
+        : current.filter((id) => !ids.has(id)),
+    );
+  }
+
+  function nodeTable(groupNodes: Node[], emptyHint: string) {
+    if (!groupNodes.length)
+      return (
+        <EmptyState
+          icon={<Activity size={26} />}
+          title="暂无节点"
+          hint={emptyHint}
+        />
+      );
+    const allGroupSelected = groupNodes.every((node) =>
+      selected.includes(node.id),
+    );
+    return (
+      <Table>
+        <thead>
+          <tr>
+            <th>
+              <input
+                aria-label="选择本组节点"
+                type="checkbox"
+                checked={allGroupSelected}
+                onChange={(event) =>
+                  toggleGroup(groupNodes, event.target.checked)
+                }
+              />
+            </th>
+            <th className="csm-node-name-col">节点</th>
+            <th>协议</th>
+            <th>端点</th>
+            <th>兼容性</th>
+            <th className="csm-node-actions-col">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {groupNodes.map((node) => (
+            <tr key={node.id}>
+              <td>
+                <input
+                  aria-label={`选择节点 ${node.displayName || node.name}`}
+                  type="checkbox"
+                  checked={selected.includes(node.id)}
+                  onChange={(event) =>
+                    setSelected(
+                      event.target.checked
+                        ? Array.from(new Set([...selected, node.id]))
+                        : selected.filter((id) => id !== node.id),
+                    )
+                  }
+                />
+              </td>
+              <td className="csm-node-name-col">
+                <strong title={node.displayName || node.name}>
+                  {node.displayName || node.name}
+                </strong>
+                {node.alias && (
+                  <small className="csm-cell-note" title={`原名：${node.name}`}>
+                    原名：{node.name}
+                  </small>
+                )}
+                <small className="csm-cell-note">
+                  最后更新：{stamp(node.lastSeenAt)}
+                </small>
+                {recentProbe(node) && node.tcp && (
+                  <small
+                    className={`csm-probe-feedback ${node.tcp.reachable ? "reachable" : "failed"}`}
+                    title={node.tcp.error || undefined}
+                  >
+                    {node.tcp.reachable
+                      ? `TCP 可达 · ${node.tcp.latencyMs ?? "—"} ms`
+                      : `TCP 失败${node.tcp.error ? ` · ${node.tcp.error}` : ""}`}
+                  </small>
+                )}
+              </td>
+              <td>
+                <code className="csm-code">{node.protocol}</code>
+              </td>
+              <td>
+                <code className="csm-code">
+                  {node.server}:{node.port ?? "—"}
+                </code>
+              </td>
+              <td>
+                {node.supportedOutput ? (
+                  <Badge color="green">可输出</Badge>
+                ) : (
+                  <Badge color="red">Clash Meta 不支持</Badge>
+                )}
+              </td>
+              <td className="csm-node-actions-col">
+                <Actions>
+                  {node.isCustom ? (
+                    <>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square"
+                        type="button"
+                        title="编辑自定义节点配置和别名"
+                        aria-label="编辑自定义节点配置和别名"
+                        onClick={() => onEditCustom(node)}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square csm-danger-text"
+                        type="button"
+                        title="删除自定义节点"
+                        aria-label="删除自定义节点"
+                        disabled={pending === `node-delete-${node.id}`}
+                        onClick={() => onRemoveCustom(node)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square"
+                        type="button"
+                        title="编辑订阅节点别名"
+                        aria-label="编辑订阅节点别名"
+                        onClick={() => onAlias(node)}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square"
+                        type="button"
+                        title="复制为自定义节点"
+                        aria-label="复制为自定义节点"
+                        disabled={pending === `node-copy-${node.id}`}
+                        onClick={() => onCopy(node)}
+                      >
+                        {pending === `node-copy-${node.id}` ? (
+                          <Spin size={13} />
+                        ) : (
+                          <Clipboard size={13} />
+                        )}
+                      </button>
+                    </>
+                  )}
+                </Actions>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    );
+  }
+
+  return (
+    <div className="csm-panel">
+      <Toolbar
+        title="节点池"
+        icon={<Activity size={18} />}
+        actions={
+          <>
+            <button
+              className="csm-btn csm-btn-secondary"
+              type="button"
+              disabled={
+                pending === "nodes-probe" ||
+                (!selected.length && !visibleNodeIds.length)
+              }
+              onClick={() =>
+                onProbe(selected.length ? selected : visibleNodeIds)
+              }
+            >
+              {pending === "nodes-probe" ? (
+                <Spin size={14} />
+              ) : (
+                <Activity size={14} />
+              )}
+              探测{selected.length ? `（${selected.length}）` : "当前结果"}
+            </button>
+            <button
+              className="csm-btn csm-btn-primary"
+              type="button"
+              onClick={onAdd}
+            >
+              <Plus size={14} />
+              添加
+            </button>
+          </>
+        }
+      />
+      <div className="csm-filterbar csm-node-library-filter">
+        <label className="csm-search">
+          <Search size={15} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="按名称、别名、地址或订阅源搜索"
+          />
+        </label>
+        <select
+          className="csm-select csm-compact"
+          value={protocol}
+          onChange={(event) => setProtocol(event.target.value)}
+        >
+          <option value="">全部协议</option>
+          {protocols.map((item) => (
+            <option key={item}>{item}</option>
+          ))}
+        </select>
+      </div>
+      {loading ? (
+        <Loading text="加载订阅源与节点…" />
+      ) : (
+        <div className="csm-node-groups">
+          {!sources.length && (
+            <EmptyState
+              icon={<Server size={28} />}
+              title="暂无订阅源"
+              hint="点击右上角“添加”可导入订阅源"
+            />
+          )}
+          {sources.map((source) => {
+            const groupNodes = nodesForSource(source.id);
+            const total = sourceNodeCount(source.id);
+            return (
+              <section className="csm-node-group" key={source.id}>
+                <div className="csm-node-group-head">
+                  <div className="csm-node-group-title">
+                    <h3>
+                      <Server size={16} />
+                      {source.name}
+                    </h3>
+                    <span title={source.url}>{source.url}</span>
+                    <small>
+                      刷新周期：{duration(source.refreshSeconds)} · 上次成功：
+                      {stamp(source.lastSuccessAt)} · 下次刷新：
+                      {source.enabled ? stamp(source.nextRefreshAt) : "已停用"}
+                    </small>
+                    {source.lastError && (
+                      <small className="csm-cell-error">
+                        {source.lastError}
+                      </small>
+                    )}
+                  </div>
+                  <div className="csm-node-group-actions">
+                    <SourceBadge
+                      status={source.status}
+                      enabled={source.enabled}
+                    />
+                    <Badge color="blue">
+                      {groupNodes.length === total
+                        ? total
+                        : `${groupNodes.length} / ${total}`}{" "}
+                      个节点
+                    </Badge>
+                    <Actions>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square"
+                        type="button"
+                        title="立即刷新"
+                        aria-label={`立即刷新订阅源 ${source.name}`}
+                        disabled={pending === `source-refresh-${source.id}`}
+                        onClick={() => onRefreshSource(source)}
+                      >
+                        {pending === `source-refresh-${source.id}` ? (
+                          <Spin size={13} />
+                        ) : (
+                          <RefreshCw size={13} />
+                        )}
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square"
+                        type="button"
+                        title="编辑订阅源"
+                        aria-label={`编辑订阅源 ${source.name}`}
+                        onClick={() => onEditSource(source)}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-btn-square csm-danger-text"
+                        type="button"
+                        title="删除订阅源"
+                        aria-label={`删除订阅源 ${source.name}`}
+                        onClick={() => onRemoveSource(source)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </Actions>
+                  </div>
+                </div>
+                {nodeTable(
+                  groupNodes,
+                  total
+                    ? "没有符合当前筛选条件的节点"
+                    : "刷新订阅源后，节点会显示在这里",
+                )}
+              </section>
+            );
+          })}
+          <section className="csm-node-group csm-custom-node-group">
+            <div className="csm-node-group-head">
+              <div className="csm-node-group-title">
+                <h3>
+                  <FileCode2 size={16} />
+                  自定义节点
+                </h3>
+                <span>自行添加或从订阅节点复制，可完整编辑节点配置</span>
+              </div>
+              <Badge color="blue">
+                {customNodes.length ===
+                nodes.filter((node) => node.isCustom).length
+                  ? customNodes.length
+                  : `${customNodes.length} / ${nodes.filter((node) => node.isCustom).length}`}{" "}
+                个节点
+              </Badge>
+            </div>
+            {nodeTable(
+              customNodes,
+              nodes.some((node) => node.isCustom)
+                ? "没有符合当前筛选条件的节点"
+                : "点击右上角“添加”可创建自定义节点",
+            )}
+          </section>
+        </div>
+      )}
+      <p className="csm-footnote">
+        同一节点属于多个订阅源时会显示在对应的每个分组中。别名用于最终输出；规则库同时接受节点原名和别名。探测结果会在节点名称下短暂显示，TCP
+        可达仅表示目标地址和端口能够建立连接。
+      </p>
+    </div>
+  );
 }
 
-function NodesView({ nodes, loading, pending, onProbe }: { nodes: Node[]; loading: boolean; pending: string; onProbe: (ids: string[]) => void }) {
-  const [search, setSearch] = useState(''); const [protocol, setProtocol] = useState(''); const [selected, setSelected] = useState<string[]>([]);
-  const protocols = useMemo(() => Array.from(new Set(nodes.map((node) => node.protocol))).sort(), [nodes]);
-  const filtered = useMemo(() => nodes.filter((node) => (!protocol || node.protocol === protocol) && `${node.name} ${node.server} ${node.sources.join(' ')}`.toLowerCase().includes(search.trim().toLowerCase())), [nodes, protocol, search]);
-  const allSelected = filtered.length > 0 && filtered.every((node) => selected.includes(node.id));
-  return <div className="csm-panel"><Toolbar title="节点池" icon={<Activity size={18} />} actions={<button className="csm-btn csm-btn-primary" type="button" disabled={pending === 'nodes-probe' || (!selected.length && !filtered.length)} onClick={() => onProbe(selected.length ? selected : filtered.map((node) => node.id))}>{pending === 'nodes-probe' ? <Spin size={14} /> : <Activity size={14} />}探测{selected.length ? `（${selected.length}）` : '当前结果'}</button>} />
-    <div className="csm-filterbar"><label className="csm-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="按名称、地址或来源搜索" /></label><select className="csm-select csm-compact" value={protocol} onChange={(event) => setProtocol(event.target.value)}><option value="">全部协议</option>{protocols.map((item) => <option key={item}>{item}</option>)}</select><span className="csm-muted">共 {filtered.length} 个节点</span></div>
-    {loading ? <Loading text="加载节点…" /> : !filtered.length ? <EmptyState icon={<Activity size={32} />} title="没有符合条件的节点" hint="调整筛选条件或刷新订阅源" /> : <Table><thead><tr><th><input aria-label="选择当前结果" type="checkbox" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? Array.from(new Set([...selected, ...filtered.map((node) => node.id)])) : selected.filter((id) => !filtered.some((node) => node.id === id)))} /></th><th>节点</th><th>协议</th><th>端点</th><th>来源</th><th>兼容性</th><th>TCP 状态</th></tr></thead><tbody>{filtered.map((node) => <tr key={node.id}><td><input type="checkbox" checked={selected.includes(node.id)} onChange={(event) => setSelected(event.target.checked ? [...selected, node.id] : selected.filter((id) => id !== node.id))} /></td><td><strong>{node.name}</strong><small className="csm-cell-note">最后出现：{stamp(node.lastSeenAt)}</small></td><td><code className="csm-code">{node.protocol}</code></td><td><code className="csm-code">{node.server}:{node.port ?? '—'}</code></td><td>{node.sources.join('、') || '未知'}</td><td>{node.supportedOutput ? <Badge color="green">可输出</Badge> : <Badge color="red">不支持输出</Badge>}</td><td>{!node.tcp ? <Badge>未探测</Badge> : node.tcp.reachable ? <><Badge color="green">可达</Badge><small className="csm-cell-note">{node.tcp.latencyMs ?? '—'} ms</small></> : <><Badge color="red">失败</Badge><small className="csm-cell-error">{node.tcp.error}</small></>}</td></tr>)}</tbody></Table>}
-    <p className="csm-footnote">TCP 可达仅表示目标地址和端口能够建立连接，不代表代理真实可用或实际延迟。</p>
-  </div>;
+function AddNodeModal({
+  onClose,
+  onAddSource,
+  onAddCustom,
+}: {
+  onClose: () => void;
+  onAddSource: () => void;
+  onAddCustom: () => void;
+}) {
+  return (
+    <Modal title="添加到节点池" onClose={onClose} width={680}>
+      <div className="csm-add-node-options">
+        <button type="button" onClick={onAddSource}>
+          <span className="csm-add-node-icon">
+            <Server size={24} />
+          </span>
+          <strong>添加订阅源</strong>
+          <small>通过 HTTP(S) 订阅链接批量导入节点，并按设置自动刷新。</small>
+        </button>
+        <button type="button" onClick={onAddCustom}>
+          <span className="csm-add-node-icon">
+            <FileCode2 size={24} />
+          </span>
+          <strong>添加自定义节点</strong>
+          <small>直接编写一个 Clash Meta 节点，可随时编辑或删除。</small>
+        </button>
+      </div>
+    </Modal>
+  );
 }
 
-function ProfilesView({ profiles, loading, pending, subscriptionUrl, onAdd, onEdit, onRemove, onValidate, onPreview, onCopy, onRotate }: { profiles: Profile[]; loading: boolean; pending: string; subscriptionUrl: (profile: Profile) => string; onAdd: () => void; onEdit: (profile: Profile) => void; onRemove: (profile: Profile) => void; onValidate: (profile: Profile) => void; onPreview: (profile: Profile) => void; onCopy: (profile: Profile) => void; onRotate: (profile: Profile) => void }) {
-  return <div className="csm-panel"><Toolbar title="聚合配置" icon={<Send size={18} />} actions={<button className="csm-btn csm-btn-primary" type="button" onClick={onAdd}><Plus size={14} />新建聚合配置</button>} />
-    {loading ? <Loading text="加载聚合配置…" /> : !profiles.length ? <EmptyState icon={<Send size={32} />} title="暂无聚合配置" hint="创建配置后选择节点、关联规则并校验发布" /> : <Table><thead><tr><th>名称</th><th>目标内核</th><th>节点</th><th>规则库</th><th>发布状态</th><th>订阅链接</th><th>操作</th></tr></thead><tbody>{profiles.map((profile) => { const errors = profile.validation.filter((item) => item.level === 'error').length; return <tr key={profile.id}><td><strong>{profile.name}</strong>{errors > 0 && <small className="csm-cell-error">{errors} 个校验问题</small>}</td><td><Badge color={profile.targetKernel === 'mihomo' ? 'blue' : 'default'}>{kernelName(profile.targetKernel)}</Badge></td><td>{profile.selectedStableIdentities?.length ?? 0}</td><td>{profile.ruleSetId ? '已关联' : '未关联'}</td><td><PublishBadge profile={profile} /></td><td>{profile.subscriptionToken ? <button className="csm-link-button" type="button" title={subscriptionUrl(profile)} onClick={() => onCopy(profile)}><Clipboard size={13} />复制链接</button> : '—'}</td><td><Actions><button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="编辑" onClick={() => onEdit(profile)}><Pencil size={13} /></button><button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="校验" disabled={pending === `validate-${profile.id}`} onClick={() => onValidate(profile)}>{pending === `validate-${profile.id}` ? <Spin size={13} /> : <Check size={13} />}</button><button className="csm-btn csm-btn-sm csm-btn-primary" type="button" disabled={pending === `preview-${profile.id}`} onClick={() => onPreview(profile)}>{pending === `preview-${profile.id}` ? <Spin size={13} /> : <Eye size={13} />}预览 / 发布</button><button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="轮换令牌" onClick={() => onRotate(profile)}><RotateCw size={13} /></button><button className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text" type="button" title="删除" onClick={() => onRemove(profile)}><Trash2 size={13} /></button></Actions></td></tr>; })}</tbody></Table>}
-  </div>;
+const CUSTOM_NODE_TEMPLATE = `name: 我的 VLESS 节点
+type: vless
+server: example.com
+port: 443
+uuid: 00000000-0000-0000-0000-000000000000
+tls: true
+servername: example.com
+network: tcp`;
+
+function CustomNodeModal({
+  node,
+  onClose,
+  onSaved,
+}: {
+  node: Node | null;
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const [content, setContent] = useState(() =>
+    node ? JSON.stringify(node.config, null, 2) : CUSTOM_NODE_TEMPLATE,
+  );
+  const [alias, setAlias] = useState(node?.alias ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function save() {
+    setSaving(true);
+    setError("");
+    try {
+      if (node) await apiPut(`${API}/nodes/${node.id}`, { content, alias });
+      else await apiPost(`${API}/nodes`, { content, alias });
+      await onSaved(node ? "自定义节点已更新" : "自定义节点已添加");
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Modal
+      title={node ? `编辑自定义节点：${node.name}` : "添加自定义节点"}
+      width={760}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <>
+                <Spin size={14} />
+                保存中
+              </>
+            ) : (
+              "保存节点"
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-stack">
+        {error && <Alert type="error">{error}</Alert>}
+        <Alert type="info">
+          填写一个 Clash Meta <code>proxies</code> 列表中的节点对象，支持 YAML
+          或 JSON。必须包含 <code>name</code>、<code>type</code>、
+          <code>server</code> 和 <code>port</code>。
+        </Alert>
+        <Field label="节点别名（可选）">
+          <input
+            className="csm-input"
+            value={alias}
+            maxLength={120}
+            onChange={(event) => setAlias(event.target.value)}
+            placeholder="留空时使用配置中的 name"
+          />
+          <small className="csm-muted">
+            别名用于最终输出，规则库仍可使用配置原名。
+          </small>
+        </Field>
+        <Field label="节点配置">
+          <textarea
+            className="csm-textarea csm-code-editor csm-custom-node-editor"
+            rows={18}
+            spellCheck={false}
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+          />
+        </Field>
+        {!node && (
+          <div className="csm-custom-node-help">
+            <span>
+              当前已填入 VLESS 示例，可直接修改；也可以粘贴 Clash Meta YAML
+              中的单个节点对象。
+            </span>
+            <button
+              className="csm-btn csm-btn-sm csm-btn-secondary"
+              type="button"
+              onClick={() => setContent(CUSTOM_NODE_TEMPLATE)}
+            >
+              恢复示例
+            </button>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
 }
 
-function RulesAndRunsView({ ruleSets, runs, loading, onImport, onEdit, onRemove }: { ruleSets: RuleSet[]; runs: RefreshRun[]; loading: boolean; onImport: () => void; onEdit: (rule: RuleSet) => void; onRemove: (rule: RuleSet) => void }) {
-  return <div className="csm-stack"><div className="csm-panel"><Toolbar title="规则库" icon={<FileCode2 size={18} />} actions={<button className="csm-btn csm-btn-primary" type="button" onClick={onImport}><Upload size={14} />导入规则</button>} />
-    {loading ? <Loading text="加载规则库…" /> : !ruleSets.length ? <EmptyState icon={<FileCode2 size={32} />} title="暂无规则库" hint="规则不会随节点订阅自动导入" /> : <Table><thead><tr><th>名称</th><th>规则</th><th>策略组</th><th>Rule Provider</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{ruleSets.map((rule) => <tr key={rule.id}><td><strong>{rule.name}</strong></td><td>{rule.rules.length}</td><td>{rule.groups.length}</td><td>{Object.keys(rule.providers).length}</td><td>{stamp(rule.updatedAt)}</td><td><Actions><button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="编辑" onClick={() => onEdit(rule)}><Pencil size={13} /></button><button className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text" type="button" title="删除" onClick={() => onRemove(rule)}><Trash2 size={13} /></button></Actions></td></tr>)}</tbody></Table>}
-  </div><div className="csm-panel"><Toolbar title="刷新记录" icon={<RefreshCw size={18} />} />{loading ? <Loading text="加载刷新记录…" /> : !runs.length ? <EmptyState title="暂无刷新记录" /> : <Table><thead><tr><th>订阅源</th><th>状态</th><th>开始时间</th><th>耗时</th><th>节点变化</th><th>错误</th></tr></thead><tbody>{runs.map((run) => <tr key={run.id}><td><strong>{run.sourceName}</strong></td><td><Badge color={run.status === 'success' ? 'green' : run.status === 'failed' ? 'red' : 'blue'}>{run.status === 'success' ? '成功' : run.status === 'failed' ? '失败' : '进行中'}</Badge></td><td>{stamp(run.startedAt)}</td><td>{run.durationMs == null ? '—' : `${run.durationMs} ms`}</td><td>{run.nodesBefore} → {run.nodesAfter}</td><td><span className="csm-error-text">{run.error || '—'}</span></td></tr>)}</tbody></Table>}</div></div>;
+function NodeAliasModal({
+  node,
+  onClose,
+  onSaved,
+}: {
+  node: Node;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [alias, setAlias] = useState(node.alias || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function save() {
+    setSaving(true);
+    setError("");
+    try {
+      await apiPut(`${API}/nodes/${node.id}/alias`, { alias });
+      await onSaved();
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Modal
+      title={`编辑订阅节点：${node.name}`}
+      width={620}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <>
+                <Spin size={14} />
+                保存中
+              </>
+            ) : (
+              "保存修改"
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid">
+        {error && (
+          <div className="csm-full-col">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+        <div className="csm-full-col">
+          <Alert type="info">
+            订阅节点的连接配置由订阅源管理，此处只能修改别名。清空后恢复使用订阅原名。
+          </Alert>
+        </div>
+        <Field label="订阅原名" full>
+          <input className="csm-input" value={node.name} disabled />
+        </Field>
+        <Field label="协议">
+          <input
+            className="csm-input csm-code-editor"
+            value={node.protocol}
+            disabled
+          />
+        </Field>
+        <Field label="服务器">
+          <input
+            className="csm-input csm-code-editor"
+            value={`${node.server}:${node.port ?? "—"}`}
+            disabled
+          />
+        </Field>
+        <Field label="节点别名" full>
+          <input
+            className="csm-input"
+            value={alias}
+            maxLength={120}
+            onChange={(event) => setAlias(event.target.value)}
+            placeholder="留空恢复使用订阅原名"
+          />
+          <small className="csm-muted">
+            别名不会被订阅刷新覆盖，规则库可同时使用订阅原名和别名。
+          </small>
+        </Field>
+      </div>
+    </Modal>
+  );
 }
 
-function SourceModal({ source, onClose, onSaved }: { source: Source | null; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
-  const [form, setForm] = useState({ name: source?.name ?? '', url: '', userAgent: source?.userAgent ?? '', refreshSeconds: source?.refreshSeconds ?? 21600, enabled: source?.enabled ?? true });
-  const [saving, setSaving] = useState(false); const [error, setError] = useState('');
-  async function save() { if (!source && !form.url.trim()) { setError('请输入订阅地址。'); return; } setSaving(true); setError(''); try { if (source) await apiPut(`${API}/sources/${source.id}`, { ...form, url: form.url.trim() || undefined }); else await apiPost(`${API}/sources`, form); await onSaved(source ? '订阅源已更新' : '订阅源已添加'); } catch (caught) { setError(message(caught)); } finally { setSaving(false); } }
-  return <Modal title={source ? '编辑订阅源' : '添加订阅源'} width={620} onClose={() => !saving && onClose()} foot={<><button className="csm-btn csm-btn-secondary" type="button" disabled={saving} onClick={onClose}>取消</button><button className="csm-btn csm-btn-primary" type="button" disabled={saving} onClick={() => void save()}>{saving ? <><Spin size={14} />保存中</> : '保存'}</button></>}><div className="csm-form-grid">{error && <div className="csm-full-col"><Alert type="error">{error}</Alert></div>}<Field label="名称"><input className="csm-input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：主订阅" /></Field><Field label="刷新周期"><select className="csm-select" value={form.refreshSeconds} onChange={(event) => setForm({ ...form, refreshSeconds: Number(event.target.value) })}><option value={3600}>每小时</option><option value={21600}>每 6 小时</option><option value={43200}>每 12 小时</option><option value={86400}>每天</option></select></Field><Field label={source ? '订阅地址（留空保持不变）' : '订阅地址'} full><input className="csm-input" type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} placeholder={source ? source.url : 'https://example.com/subscription'} /></Field><Field label="User-Agent" full><input className="csm-input" value={form.userAgent} onChange={(event) => setForm({ ...form, userAgent: event.target.value })} placeholder="留空使用工具默认值" /></Field><Field label="状态" full><label className="csm-check"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />启用定时刷新</label></Field></div></Modal>;
+function ProfilesView({
+  profiles,
+  loading,
+  pending,
+  subscriptionUrl,
+  onAdd,
+  onEdit,
+  onRemove,
+  onValidate,
+  onPreview,
+  onCopy,
+  onRotate,
+}: {
+  profiles: Profile[];
+  loading: boolean;
+  pending: string;
+  subscriptionUrl: (profile: Profile) => string;
+  onAdd: () => void;
+  onEdit: (profile: Profile) => void;
+  onRemove: (profile: Profile) => void;
+  onValidate: (profile: Profile) => void;
+  onPreview: (profile: Profile) => void;
+  onCopy: (profile: Profile) => void;
+  onRotate: (profile: Profile) => void;
+}) {
+  return (
+    <div className="csm-panel">
+      <Toolbar
+        title="聚合配置"
+        icon={<Send size={18} />}
+        actions={
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            onClick={onAdd}
+          >
+            <Plus size={14} />
+            新建聚合配置
+          </button>
+        }
+      />
+      {loading ? (
+        <Loading text="加载聚合配置…" />
+      ) : !profiles.length ? (
+        <EmptyState
+          icon={<Send size={32} />}
+          title="暂无聚合配置"
+          hint="创建配置后选择节点、关联规则并校验发布"
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>输出格式</th>
+              <th>节点</th>
+              <th>规则库</th>
+              <th>发布状态</th>
+              <th>订阅链接</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {profiles.map((profile) => {
+              const errors = profile.validation.filter(
+                (item) => item.level === "error",
+              ).length;
+              return (
+                <tr key={profile.id}>
+                  <td>
+                    <strong>{profile.name}</strong>
+                    {errors > 0 && (
+                      <small className="csm-cell-error">
+                        {errors} 个校验问题
+                      </small>
+                    )}
+                  </td>
+                  <td>
+                    <Badge color="blue">Clash Meta YAML</Badge>
+                  </td>
+                  <td>{profile.selectedStableIdentities?.length ?? 0}</td>
+                  <td>{profile.ruleSetId ? "已关联" : "未关联"}</td>
+                  <td>
+                    <PublishBadge profile={profile} />
+                  </td>
+                  <td>
+                    {profile.subscriptionToken ? (
+                      <button
+                        className="csm-link-button"
+                        type="button"
+                        title={subscriptionUrl(profile)}
+                        onClick={() => onCopy(profile)}
+                      >
+                        <Clipboard size={13} />
+                        复制链接
+                      </button>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td>
+                    <Actions>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost"
+                        type="button"
+                        title="编辑"
+                        onClick={() => onEdit(profile)}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost"
+                        type="button"
+                        title="校验"
+                        disabled={pending === `validate-${profile.id}`}
+                        onClick={() => onValidate(profile)}
+                      >
+                        {pending === `validate-${profile.id}` ? (
+                          <Spin size={13} />
+                        ) : (
+                          <Check size={13} />
+                        )}
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-primary"
+                        type="button"
+                        disabled={pending === `preview-${profile.id}`}
+                        onClick={() => onPreview(profile)}
+                      >
+                        {pending === `preview-${profile.id}` ? (
+                          <Spin size={13} />
+                        ) : (
+                          <Eye size={13} />
+                        )}
+                        预览 / 发布
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost"
+                        type="button"
+                        title="轮换令牌"
+                        onClick={() => onRotate(profile)}
+                      >
+                        <RotateCw size={13} />
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
+                        type="button"
+                        title="删除"
+                        onClick={() => onRemove(profile)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </Actions>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      )}
+    </div>
+  );
 }
 
-function ProfileModal({ profile, nodes, ruleSets, onClose, onSaved }: { profile: Profile | null; nodes: Node[]; ruleSets: RuleSet[]; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
-  const [name, setName] = useState(profile?.name ?? ''); const [kernel, setKernel] = useState<Kernel>(profile?.targetKernel ?? 'mihomo');
-  const [ruleSetId, setRuleSetId] = useState(profile?.ruleSetId ?? ''); const [selected, setSelected] = useState(profile?.selectedStableIdentities ?? []);
-  const [settings, setSettings] = useState<ProfileSettings>({ mixedPort: 7890, allowLan: false, mode: 'rule', ipv6: false, ...(profile?.settings ?? {}) });
-  const [search, setSearch] = useState(''); const [saving, setSaving] = useState(false); const [error, setError] = useState('');
-  const visibleNodes = useMemo(() => nodes.filter((node) => `${node.name} ${node.protocol} ${node.server}`.toLowerCase().includes(search.toLowerCase())), [nodes, search]);
-  const compatible = (node: Node) => node.supportedOutput && (kernel === 'mihomo' || !['vless', 'hysteria', 'hysteria2', 'tuic', 'wireguard'].includes(node.protocol));
-  async function save() { if (!name.trim()) { setError('请输入配置名称。'); return; } setSaving(true); setError(''); try { const payload = { name: name.trim(), targetKernel: kernel, settings, ruleSetId: ruleSetId || null }; const saved = profile ? (await apiPut<{ profile: Profile }>(`${API}/profiles/${profile.id}`, payload)).profile : (await apiPost<{ profile: Profile }>(`${API}/profiles`, payload)).profile; await apiPut(`${API}/profiles/${saved.id}/selections`, { stableIdentities: selected }); await onSaved(profile ? '聚合配置已更新' : '聚合配置已创建'); } catch (caught) { setError(message(caught)); } finally { setSaving(false); } }
-  return <Modal title={profile ? '编辑聚合配置' : '新建聚合配置'} width={900} onClose={() => !saving && onClose()} foot={<><button className="csm-btn csm-btn-secondary" type="button" disabled={saving} onClick={onClose}>取消</button><button className="csm-btn csm-btn-primary" type="button" disabled={saving} onClick={() => void save()}>{saving ? <><Spin size={14} />保存中</> : '保存配置'}</button></>}><div className="csm-form-grid">{error && <div className="csm-full-col"><Alert type="error">{error}</Alert></div>}<Field label="配置名称"><input className="csm-input" value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="目标内核"><select className="csm-select" value={kernel} onChange={(event) => setKernel(event.target.value as Kernel)}><option value="mihomo">Mihomo / Clash Meta</option><option value="clash">传统 Clash Premium</option></select></Field><Field label="规则库"><select className="csm-select" value={ruleSetId} onChange={(event) => setRuleSetId(event.target.value)}><option value="">不使用规则库</option>{ruleSets.map((rule) => <option value={rule.id} key={rule.id}>{rule.name}</option>)}</select></Field><Field label="运行模式"><select className="csm-select" value={settings.mode ?? 'rule'} onChange={(event) => setSettings({ ...settings, mode: event.target.value })}><option value="rule">Rule</option><option value="global">Global</option><option value="direct">Direct</option></select></Field><Field label="Mixed Port"><input className="csm-input" type="number" min={1} max={65535} value={settings.mixedPort ?? 7890} onChange={(event) => setSettings({ ...settings, mixedPort: Number(event.target.value) })} /></Field><Field label="网络选项"><div className="csm-inline-checks"><label className="csm-check"><input type="checkbox" checked={Boolean(settings.allowLan)} onChange={(event) => setSettings({ ...settings, allowLan: event.target.checked })} />允许局域网</label><label className="csm-check"><input type="checkbox" checked={Boolean(settings.ipv6)} onChange={(event) => setSettings({ ...settings, ipv6: event.target.checked })} />启用 IPv6</label></div></Field><Field label={`选择节点（已选 ${selected.length}）`} full><div className="csm-node-picker"><label className="csm-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索节点" /></label><div className="csm-node-options">{visibleNodes.map((node) => { const disabled = !compatible(node); return <label key={node.id} className={disabled ? 'disabled' : ''}><input type="checkbox" disabled={disabled} checked={selected.includes(node.stableIdentity)} onChange={(event) => setSelected(event.target.checked ? [...selected, node.stableIdentity] : selected.filter((identity) => identity !== node.stableIdentity))} /><span><strong>{node.name}</strong><small>{node.protocol} · {node.server}:{node.port ?? '—'}{disabled ? ' · 与目标内核不兼容' : ''}</small></span></label>; })}</div></div><small className="csm-muted">新出现的节点不会自动加入；已选节点消失时发布校验会给出告警。</small></Field></div></Modal>;
+function RuleProvidersView({
+  providers,
+  loading,
+  pending,
+  onAdd,
+  onEdit,
+  onCopy,
+  onRemove,
+}: {
+  providers: RuleProviderLibraryItem[];
+  loading: boolean;
+  pending: string;
+  onAdd: () => void;
+  onEdit: (provider: RuleProviderLibraryItem) => void;
+  onCopy: (provider: RuleProviderLibraryItem) => void;
+  onRemove: (provider: RuleProviderLibraryItem) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const filtered = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+    return providers.filter(
+      (provider) =>
+        !keyword ||
+        `${provider.name} ${provider.providerKey} ${provider.description} ${String(provider.config.url ?? "")} ${stringList(provider.config.payload).join(" ")}`
+          .toLowerCase()
+          .includes(keyword),
+    );
+  }, [providers, search]);
+
+  return (
+    <div className="csm-panel">
+      <Toolbar
+        title="Rule Provider"
+        icon={<FolderOpen size={18} />}
+        actions={
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            onClick={onAdd}
+          >
+            <Plus size={14} />
+            新增 Provider
+          </button>
+        }
+      />
+      <Alert type="info">
+        Rule Provider 支持规则订阅和自定义两种方式。规则订阅由服务器下载并保存具体内容；绑定到策略组后会展开为通用 Clash 规则，最终订阅中不会出现该规则订阅 URL。
+      </Alert>
+      <div className="csm-filterbar csm-provider-filter">
+        <label className="csm-search">
+          <Search size={15} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="搜索名称、Provider Key、规则或地址"
+          />
+        </label>
+        <span className="csm-muted">共 {filtered.length} 个 Provider</span>
+      </div>
+      {loading ? (
+        <Loading text="加载 Rule Provider…" />
+      ) : !filtered.length ? (
+        <EmptyState
+          icon={<FolderOpen size={32} />}
+          title="没有符合条件的 Rule Provider"
+          hint="调整搜索条件，或新建规则订阅、自定义 Provider"
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>Provider Key</th>
+              <th>来源 / Behavior</th>
+              <th>内容</th>
+              <th>属性</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((provider) => {
+              const payload = stringList(provider.config.payload);
+              const handwritten = String(provider.config.type ?? "") === "manual";
+              const source = handwritten
+                ? `自定义 ${payload.length} 条规则`
+                : String(
+                    provider.config.sourceUrl ??
+                      provider.config.url ??
+                      provider.config.path ??
+                      "—",
+                  );
+              return (
+                <tr key={provider.id}>
+                  <td>
+                    <strong>{provider.name}</strong>
+                    {provider.description && (
+                      <small className="csm-cell-note">
+                        {provider.description}
+                      </small>
+                    )}
+                  </td>
+                  <td>
+                    <code className="csm-code">{providerKeyText(provider)}</code>
+                  </td>
+                  <td>
+                    <code className="csm-code">
+                      {handwritten ? "自定义" : "规则订阅"} /{" "}
+                      {String(provider.config.behavior ?? "—")}
+                    </code>
+                  </td>
+                  <td>
+                    <span className="csm-provider-source" title={source}>
+                      {source}
+                    </span>
+                  </td>
+                  <td>
+                    {provider.builtin ? (
+                      <Badge color="blue">内置</Badge>
+                    ) : (
+                      <Badge>自定义</Badge>
+                    )}
+                  </td>
+                  <td>
+                    <Actions>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost"
+                        type="button"
+                        title="编辑"
+                        onClick={() => onEdit(provider)}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost"
+                        type="button"
+                        title="复制"
+                        disabled={pending === `provider-copy-${provider.id}`}
+                        onClick={() => onCopy(provider)}
+                      >
+                        {pending === `provider-copy-${provider.id}` ? (
+                          <Spin size={13} />
+                        ) : (
+                          <Clipboard size={13} />
+                        )}
+                      </button>
+                      {!provider.builtin && (
+                        <button
+                          className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
+                          type="button"
+                          title="删除"
+                          onClick={() => onRemove(provider)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </Actions>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      )}
+    </div>
+  );
 }
 
-function RuleSetModal({ ruleSet, onClose, onSaved }: { ruleSet: RuleSet | null; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
-  const [name, setName] = useState(ruleSet?.name ?? ''); const [yamlContent, setYamlContent] = useState('');
-  const [rules, setRules] = useState(JSON.stringify(ruleSet?.rules ?? [], null, 2)); const [groups, setGroups] = useState(JSON.stringify(ruleSet?.groups ?? [], null, 2)); const [providers, setProviders] = useState(JSON.stringify(ruleSet?.providers ?? {}, null, 2));
-  const [saving, setSaving] = useState(false); const [error, setError] = useState('');
-  async function save() { if (!name.trim()) { setError('请输入规则库名称。'); return; } setSaving(true); setError(''); try { if (!ruleSet) { if (!yamlContent.trim()) throw new Error('请粘贴 Clash YAML 内容。'); await apiPost(`${API}/rule-sets/import`, { name: name.trim(), content: yamlContent }); } else { await apiPut(`${API}/rule-sets/${ruleSet.id}`, { name: name.trim(), rules: JSON.parse(rules), groups: JSON.parse(groups), providers: JSON.parse(providers), importMeta: ruleSet.importMeta ?? {} }); } await onSaved(ruleSet ? '规则库已更新' : '规则库已导入'); } catch (caught) { setError(caught instanceof SyntaxError ? `JSON 格式错误：${caught.message}` : message(caught)); } finally { setSaving(false); } }
-  return <Modal title={ruleSet ? '编辑规则库' : '导入 Clash 规则'} width={880} onClose={() => !saving && onClose()} foot={<><button className="csm-btn csm-btn-secondary" type="button" disabled={saving} onClick={onClose}>取消</button><button className="csm-btn csm-btn-primary" type="button" disabled={saving} onClick={() => void save()}>{saving ? <><Spin size={14} />保存中</> : ruleSet ? '保存规则库' : '导入为独立副本'}</button></>}><div className="csm-form-grid">{error && <div className="csm-full-col"><Alert type="error">{error}</Alert></div>}<Field label="名称" full><input className="csm-input" value={name} onChange={(event) => setName(event.target.value)} /></Field>{ruleSet ? <><Field label="规则（JSON 数组）" full><textarea className="csm-textarea csm-code-editor" rows={12} spellCheck={false} value={rules} onChange={(event) => setRules(event.target.value)} /></Field><Field label="策略组（JSON 数组）" full><textarea className="csm-textarea csm-code-editor" rows={12} spellCheck={false} value={groups} onChange={(event) => setGroups(event.target.value)} /></Field><Field label="Rule Provider（JSON 对象）" full><textarea className="csm-textarea csm-code-editor" rows={10} spellCheck={false} value={providers} onChange={(event) => setProviders(event.target.value)} /></Field></> : <Field label="Clash YAML" full><textarea className="csm-textarea csm-code-editor" rows={24} spellCheck={false} value={yamlContent} onChange={(event) => setYamlContent(event.target.value)} placeholder={'proxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY'} /><small className="csm-muted">仅导入 rules、proxy-groups 和 rule-providers，导入后成为独立可编辑副本。</small></Field>}</div></Modal>;
+function RuleProviderCopyModal({
+  provider,
+  onClose,
+  onSaved,
+}: {
+  provider: RuleProviderLibraryItem;
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const [saving, setSaving] = useState<"original" | "manual" | "">("");
+  const [error, setError] = useState("");
+
+  async function copy(mode: "original" | "manual") {
+    setSaving(mode);
+    setError("");
+    try {
+      await apiPost(`${API}/rule-providers/${provider.id}/copy`, { mode });
+      await onSaved(
+        mode === "manual"
+          ? "已复制并转换为自定义规则"
+          : "规则订阅已原样复制",
+      );
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving("");
+    }
+  }
+
+  return (
+    <Modal
+      title={`复制 Rule Provider：${provider.name}`}
+      width={640}
+      onClose={() => !saving && onClose()}
+      foot={
+        <button
+          className="csm-btn csm-btn-secondary"
+          type="button"
+          disabled={Boolean(saving)}
+          onClick={onClose}
+        >
+          取消
+        </button>
+      }
+    >
+      <div className="csm-provider-copy-options">
+        {error && <Alert type="error">{error}</Alert>}
+        <button
+          className="csm-provider-copy-option"
+          type="button"
+          disabled={Boolean(saving)}
+          onClick={() => void copy("original")}
+        >
+          <span>
+            <strong>原样复制规则订阅</strong>
+            <small>保留原订阅链接、Behavior 和内容来源，创建一个独立副本。</small>
+          </span>
+          {saving === "original" ? <Spin size={16} /> : <Clipboard size={16} />}
+        </button>
+        <button
+          className="csm-provider-copy-option"
+          type="button"
+          disabled={Boolean(saving)}
+          onClick={() => void copy("manual")}
+        >
+          <span>
+            <strong>下载并转为自定义规则</strong>
+            <small>服务器重新下载链接内容，将规则保存到副本中；副本不再保留订阅链接。</small>
+          </span>
+          {saving === "manual" ? <Spin size={16} /> : <FileCode2 size={16} />}
+        </button>
+      </div>
+    </Modal>
+  );
 }
 
-function PreviewModal({ state, publishing, onClose, onCopy, onPublish }: { state: PreviewState; publishing: boolean; onClose: () => void; onCopy: () => void; onPublish: () => void }) {
-  const errors = state.messages.filter((item) => item.level === 'error');
-  return <Modal title={`配置预览：${state.profile.name}`} width={920} onClose={() => !publishing && onClose()} foot={<><button className="csm-btn csm-btn-secondary" type="button" disabled={publishing} onClick={onCopy}><Clipboard size={14} />复制 YAML</button><button className="csm-btn csm-btn-secondary" type="button" disabled={publishing} onClick={onClose}>关闭</button><button className="csm-btn csm-btn-primary" type="button" disabled={!state.valid || publishing} onClick={onPublish}>{publishing ? <><Spin size={14} />发布中</> : <><Upload size={14} />发布有效配置</>}</button></>}><div className="csm-preview">{state.valid ? <Alert type="success">校验通过，可以发布并替换当前有效版本。</Alert> : <Alert type="error">存在 {errors.length} 个错误，当前已发布版本不会被覆盖。</Alert>}{state.messages.length > 0 && <div className="csm-validation-list">{state.messages.map((item, index) => <div className={item.level === 'error' ? 'error' : 'info'} key={`${item.code}-${index}`}><AlertTriangle size={14} /><span>{item.message}</span></div>)}</div>}<pre>{state.yaml}</pre></div></Modal>;
+function RuleProviderModal({
+  provider,
+  onClose,
+  onSaved,
+}: {
+  provider: RuleProviderLibraryItem | null;
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const defaultConfig: Record<string, unknown> = {
+    type: "cached",
+    behavior: "domain",
+    url: "",
+  };
+  const initialConfig = provider?.config ?? defaultConfig;
+  const initialPayload = stringList(initialConfig.payload);
+  const [name, setName] = useState(provider?.name ?? "自定义 Provider");
+  const [providerKey, setProviderKey] = useState(
+    provider?.providerKey ?? "",
+  );
+  const [description, setDescription] = useState(provider?.description ?? "");
+  const [config, setConfig] = useState<Record<string, unknown>>(initialConfig);
+  const [sourceMode, setSourceMode] = useState<"subscription" | "manual">(
+    String(initialConfig.type ?? "") === "manual"
+      ? "manual"
+      : "subscription",
+  );
+  const [manualContent, setManualContent] = useState(initialPayload.join("\n"));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const behavior = String(config.behavior ?? "domain");
+  const autoGeneratedProviderKey = /^rp-[0-9a-f]{32}$/.test(providerKey);
+
+  function setConfigField(key: string, value: unknown) {
+    setConfig((current) => ({ ...current, [key]: value }));
+  }
+  function visualConfig(): Record<string, unknown> {
+    if (sourceMode === "manual")
+      return {
+        type: "manual",
+        behavior,
+        payload: manualContent
+          .split(/\r?\n/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      };
+    return {
+      type: "cached",
+      behavior,
+      url: config.sourceUrl ?? config.url ?? "",
+    };
+  }
+  async function save() {
+    if (!name.trim()) {
+      setError("请输入名称。");
+      return;
+    }
+    if (/[,\r\n]/.test(providerKey)) {
+      setError("Provider Key 不能包含逗号或换行。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const material = visualConfig();
+      if (material.type === "manual" && !stringList(material.payload).length)
+        throw new Error("请至少填写一条自定义规则。");
+      const payload = {
+        name: name.trim(),
+        providerKey: providerKey.trim(),
+        description: description.trim(),
+        config: material,
+      };
+      if (provider)
+        await apiPut(`${API}/rule-providers/${provider.id}`, payload);
+      else await apiPost(`${API}/rule-providers`, payload);
+      await onSaved(provider ? "Rule Provider 已更新" : "Rule Provider 已创建");
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={
+        provider ? `编辑 Rule Provider：${provider.name}` : "新增 Rule Provider"
+      }
+      width={820}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <>
+                <Spin size={14} />
+                保存中
+              </>
+            ) : (
+              "保存 Provider"
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid">
+        {error && (
+          <div className="csm-full-col">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+        {provider?.builtin && (
+          <div className="csm-full-col">
+            <Alert type="info">
+              这是内置 Provider，可以修改但不能删除。被策略组使用时，配置和
+              Provider Key 的修改会自动生效。
+            </Alert>
+          </div>
+        )}
+        <Field label="名称">
+          <input
+            className="csm-input"
+            value={name}
+            maxLength={120}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </Field>
+        <Field label="Provider Key（可选）">
+          <input
+            className="csm-input csm-code-editor"
+            value={autoGeneratedProviderKey ? "" : providerKey}
+            maxLength={120}
+            onChange={(event) => setProviderKey(event.target.value)}
+            placeholder={
+              autoGeneratedProviderKey
+                ? "已自动生成"
+                : "留空时由服务器自动生成"
+            }
+          />
+          <small className="csm-muted">
+            可留空；自动生成的内部 Key 不会在界面中显示。
+          </small>
+        </Field>
+        <Field label="描述" full>
+          <input
+            className="csm-input"
+            value={description}
+            maxLength={500}
+            onChange={(event) => setDescription(event.target.value)}
+          />
+        </Field>
+        <div
+          className="csm-full-col csm-provider-source-switch"
+          role="group"
+          aria-label="Provider 内容来源"
+        >
+          <span>内容来源</span>
+          <button
+            className={`csm-btn csm-btn-sm ${sourceMode === "subscription" ? "csm-btn-primary" : "csm-btn-secondary"}`}
+            type="button"
+            onClick={() => setSourceMode("subscription")}
+          >
+            规则订阅
+          </button>
+          <button
+            className={`csm-btn csm-btn-sm ${sourceMode === "manual" ? "csm-btn-primary" : "csm-btn-secondary"}`}
+            type="button"
+            onClick={() => setSourceMode("manual")}
+          >
+            自定义
+          </button>
+        </div>
+        <Field label="Behavior">
+          <select
+            className="csm-select"
+            value={behavior}
+            onChange={(event) => setConfigField("behavior", event.target.value)}
+          >
+            <option value="domain">domain（域名）</option>
+            <option value="classical">classical（完整规则）</option>
+            <option value="ipcidr">ipcidr（IP 网段）</option>
+          </select>
+        </Field>
+        {sourceMode === "subscription" ? (
+          <>
+            <div className="csm-full-col">
+              <Alert type="info">
+                保存时由服务器下载并保存规则内容；最终订阅只会包含展开后的具体规则，不会包含此 URL。
+              </Alert>
+            </div>
+            <Field label="规则订阅链接" full>
+              <input
+                className="csm-input csm-code-editor"
+                type="url"
+                value={String(config.sourceUrl ?? config.url ?? "")}
+                onChange={(event) =>
+                  setConfig((current) => ({
+                    ...current,
+                    sourceUrl: event.target.value,
+                    url: event.target.value,
+                  }))
+                }
+                placeholder="https://example.com/provider.yaml"
+              />
+            </Field>
+          </>
+        ) : (
+          <>
+            <Field label="自定义规则（每行一条）" full>
+              <textarea
+                className="csm-textarea csm-code-editor"
+                rows={12}
+                spellCheck={false}
+                value={manualContent}
+                onChange={(event) => setManualContent(event.target.value)}
+                placeholder="每行输入一条规则"
+              />
+              <small className="csm-muted">
+                当前 behavior 为 <code>{behavior}</code>，每行会作为一条 payload
+                保存，空行自动忽略。
+              </small>
+            </Field>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
 }
 
-function Toolbar({ title, icon, actions }: { title: string; icon: React.ReactNode; actions?: React.ReactNode }) { return <div className="csm-toolbar"><div><h2>{icon}{title}</h2></div>{actions && <div className="csm-toolbar-actions">{actions}</div>}</div>; }
-function PanelTitle({ title, icon }: { title: string; icon: React.ReactNode }) { return <div className="csm-panel-title"><h2>{icon}{title}</h2></div>; }
-function Table({ children }: { children: React.ReactNode }) { return <div className="csm-table-wrap"><table className="csm-table">{children}</table></div>; }
-function Actions({ children }: { children: React.ReactNode }) { return <div className="csm-actions">{children}</div>; }
-function Loading({ text }: { text: string }) { return <div className="csm-loading"><Spin />{text}</div>; }
-function StatusDot({ status }: { status: string }) { return <span className={`csm-status-dot ${status}`} />; }
-function SourceBadge({ status, enabled }: { status: string; enabled: boolean }) { if (!enabled) return <Badge>已停用</Badge>; return status === 'healthy' ? <Badge color="green">正常</Badge> : status === 'error' ? <Badge color="red">异常</Badge> : <Badge color="amber">未刷新</Badge>; }
-function PublishBadge({ profile }: { profile: Profile }) { return profile.publishedStatus === 'degraded' ? <Badge color="amber">已降级</Badge> : profile.publishedAt ? <Badge color="green">已发布</Badge> : <Badge>草稿</Badge>; }
-function publishLabel(profile: Profile) { return profile.publishedStatus === 'degraded' ? '已降级' : profile.publishedAt ? '已发布' : '草稿'; }
-function kernelName(kernel: Kernel) { return kernel === 'mihomo' ? 'Mihomo / Meta' : '传统 Clash'; }
-function stamp(value?: string | null) { if (!value) return '从未'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(); }
-function duration(seconds: number) { if (seconds % 86400 === 0) return `${seconds / 86400} 天`; if (seconds % 3600 === 0) return `${seconds / 3600} 小时`; return `${seconds} 秒`; }
-function message(error: unknown) { return error instanceof ApiError ? error.message : error instanceof Error ? error.message : '请求失败'; }
+function RulesView({
+  ruleSets,
+  loading,
+  onImport,
+  onCreate,
+  onEdit,
+  onRemove,
+}: {
+  ruleSets: RuleSet[];
+  loading: boolean;
+  onImport: () => void;
+  onCreate: () => void;
+  onEdit: (rule: RuleSet) => void;
+  onRemove: (rule: RuleSet) => void;
+}) {
+  return (
+    <div className="csm-panel">
+      <Toolbar
+        title="规则库"
+        icon={<FileCode2 size={18} />}
+        actions={
+          <>
+            <button
+              className="csm-btn csm-btn-secondary"
+              type="button"
+              onClick={onCreate}
+            >
+              <Plus size={14} />
+              手动新增
+            </button>
+            <button
+              className="csm-btn csm-btn-primary"
+              type="button"
+              onClick={onImport}
+            >
+              <Link size={14} />
+              从订阅链接 / YAML 导入
+            </button>
+          </>
+        }
+      />
+      {loading ? (
+        <Loading text="加载规则库…" />
+      ) : !ruleSets.length ? (
+        <EmptyState
+          icon={<FileCode2 size={32} />}
+          title="暂无规则库"
+          hint="可以使用默认模板手动新增，或只从订阅导入规则"
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>规则</th>
+              <th>策略组</th>
+              <th>Rule Provider</th>
+              <th>更新时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ruleSets.map((rule) => (
+              <tr key={rule.id}>
+                <td>
+                  <strong>{rule.name}</strong>
+                </td>
+                <td>{rule.rules.length}</td>
+                <td>{rule.groups.length}</td>
+                <td>{Object.keys(rule.providers).length}</td>
+                <td>{stamp(rule.updatedAt)}</td>
+                <td>
+                  <Actions>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-ghost"
+                      type="button"
+                      title="编辑"
+                      onClick={() => onEdit(rule)}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
+                      type="button"
+                      title="删除"
+                      onClick={() => onRemove(rule)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </Actions>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+      <p className="csm-footnote">
+        从订阅导入时只保存 rules、proxy-groups 和
+        rule-providers，不会导入或覆盖节点池中的节点。
+      </p>
+    </div>
+  );
+}
+
+function SourceModal({
+  source,
+  onClose,
+  onSaved,
+}: {
+  source: Source | null;
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const [form, setForm] = useState({
+    name: source?.name ?? "",
+    url: "",
+    userAgent: source?.userAgent ?? "",
+    refreshSeconds: source?.refreshSeconds ?? 21600,
+    enabled: source?.enabled ?? true,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function save() {
+    if (!source && !form.url.trim()) {
+      setError("请输入订阅地址。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      if (source)
+        await apiPut(`${API}/sources/${source.id}`, {
+          ...form,
+          url: form.url.trim() || undefined,
+        });
+      else await apiPost(`${API}/sources`, form);
+      await onSaved(source ? "订阅源已更新" : "订阅源已添加");
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Modal
+      title={source ? "编辑订阅源" : "添加订阅源"}
+      width={620}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <>
+                <Spin size={14} />
+                保存中
+              </>
+            ) : (
+              "保存"
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid">
+        {error && (
+          <div className="csm-full-col">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+        <Field label="名称">
+          <input
+            className="csm-input"
+            value={form.name}
+            onChange={(event) => setForm({ ...form, name: event.target.value })}
+            placeholder="例如：主订阅"
+          />
+        </Field>
+        <Field label="刷新周期">
+          <select
+            className="csm-select"
+            value={form.refreshSeconds}
+            onChange={(event) =>
+              setForm({ ...form, refreshSeconds: Number(event.target.value) })
+            }
+          >
+            <option value={3600}>每小时</option>
+            <option value={21600}>每 6 小时</option>
+            <option value={43200}>每 12 小时</option>
+            <option value={86400}>每天</option>
+          </select>
+        </Field>
+        <Field label={source ? "订阅地址（留空保持不变）" : "订阅地址"} full>
+          <input
+            className="csm-input"
+            type="url"
+            value={form.url}
+            onChange={(event) => setForm({ ...form, url: event.target.value })}
+            placeholder={
+              source ? source.url : "https://example.com/subscription"
+            }
+          />
+        </Field>
+        <Field label="User-Agent" full>
+          <input
+            className="csm-input"
+            value={form.userAgent}
+            onChange={(event) =>
+              setForm({ ...form, userAgent: event.target.value })
+            }
+            placeholder="留空使用工具默认值"
+          />
+        </Field>
+        <Field label="状态" full>
+          <label className="csm-check">
+            <input
+              type="checkbox"
+              checked={form.enabled}
+              onChange={(event) =>
+                setForm({ ...form, enabled: event.target.checked })
+              }
+            />
+            启用定时刷新
+          </label>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+function ProfileModal({
+  profile,
+  nodes,
+  ruleSets,
+  onClose,
+  onSaved,
+}: {
+  profile: Profile | null;
+  nodes: Node[];
+  ruleSets: RuleSet[];
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const [name, setName] = useState(profile?.name ?? "");
+  const [ruleSetId, setRuleSetId] = useState(profile?.ruleSetId ?? "");
+  const [selected, setSelected] = useState(
+    profile?.selectedStableIdentities ?? [],
+  );
+  const [settings, setSettings] = useState<ProfileSettings>({
+    mixedPort: 7890,
+    allowLan: false,
+    mode: "rule",
+    ipv6: false,
+    ...(profile?.settings ?? {}),
+  });
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const visibleNodes = useMemo(
+    () =>
+      nodes.filter((node) =>
+        `${node.name} ${node.alias} ${node.displayName} ${node.protocol} ${node.server}`
+          .toLowerCase()
+          .includes(search.trim().toLowerCase()),
+      ),
+    [nodes, search],
+  );
+  const compatible = (node: Node) => node.supportedOutput;
+  async function save() {
+    if (!name.trim()) {
+      setError("请输入配置名称。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const payload = {
+        name: name.trim(),
+        settings,
+        ruleSetId: ruleSetId || null,
+      };
+      const saved = profile
+        ? (
+            await apiPut<{ profile: Profile }>(
+              `${API}/profiles/${profile.id}`,
+              payload,
+            )
+          ).profile
+        : (await apiPost<{ profile: Profile }>(`${API}/profiles`, payload))
+            .profile;
+      await apiPut(`${API}/profiles/${saved.id}/selections`, {
+        stableIdentities: selected,
+      });
+      await onSaved(profile ? "聚合配置已更新" : "聚合配置已创建");
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Modal
+      title={profile ? "编辑聚合配置" : "新建聚合配置"}
+      width={900}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <>
+                <Spin size={14} />
+                保存中
+              </>
+            ) : (
+              "保存配置"
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid">
+        {error && (
+          <div className="csm-full-col">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+        <Field label="配置名称">
+          <input
+            className="csm-input"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </Field>
+        <Field label="输出格式">
+          <input className="csm-input" value="Clash Meta YAML" disabled />
+        </Field>
+        <Field label="规则库">
+          <select
+            className="csm-select"
+            value={ruleSetId}
+            onChange={(event) => setRuleSetId(event.target.value)}
+          >
+            <option value="">不使用规则库</option>
+            {ruleSets.map((rule) => (
+              <option value={rule.id} key={rule.id}>
+                {rule.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="运行模式">
+          <select
+            className="csm-select"
+            value={settings.mode ?? "rule"}
+            onChange={(event) =>
+              setSettings({ ...settings, mode: event.target.value })
+            }
+          >
+            <option value="rule">Rule</option>
+            <option value="global">Global</option>
+            <option value="direct">Direct</option>
+          </select>
+        </Field>
+        <Field label="Mixed Port">
+          <input
+            className="csm-input"
+            type="number"
+            min={1}
+            max={65535}
+            value={settings.mixedPort ?? 7890}
+            onChange={(event) =>
+              setSettings({
+                ...settings,
+                mixedPort: Number(event.target.value),
+              })
+            }
+          />
+        </Field>
+        <Field label="网络选项">
+          <div className="csm-inline-checks">
+            <label className="csm-check">
+              <input
+                type="checkbox"
+                checked={Boolean(settings.allowLan)}
+                onChange={(event) =>
+                  setSettings({ ...settings, allowLan: event.target.checked })
+                }
+              />
+              允许局域网
+            </label>
+            <label className="csm-check">
+              <input
+                type="checkbox"
+                checked={Boolean(settings.ipv6)}
+                onChange={(event) =>
+                  setSettings({ ...settings, ipv6: event.target.checked })
+                }
+              />
+              启用 IPv6
+            </label>
+          </div>
+        </Field>
+        <Field label={`选择节点（已选 ${selected.length}）`} full>
+          <div className="csm-node-picker">
+            <label className="csm-search">
+              <Search size={15} />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="按节点原名或别名搜索"
+              />
+            </label>
+            <div className="csm-node-options">
+              {visibleNodes.map((node) => {
+                const disabled = !compatible(node);
+                return (
+                  <label key={node.id} className={disabled ? "disabled" : ""}>
+                    <input
+                      type="checkbox"
+                      disabled={
+                        disabled && !selected.includes(node.stableIdentity)
+                      }
+                      checked={selected.includes(node.stableIdentity)}
+                      onChange={(event) =>
+                        setSelected(
+                          event.target.checked
+                            ? [...selected, node.stableIdentity]
+                            : selected.filter(
+                                (identity) => identity !== node.stableIdentity,
+                              ),
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{node.displayName || node.name}</strong>
+                      {node.alias && <small>原名：{node.name}</small>}
+                      <small>
+                        {node.protocol} · {node.server}:{node.port ?? "—"}
+                        {disabled ? " · Clash Meta 不支持" : ""}
+                      </small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <small className="csm-muted">
+            新出现的节点不会自动加入；已选节点消失时发布校验会给出告警。
+          </small>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)) : [];
+}
+
+function providerKeyText(provider: RuleProviderLibraryItem): string {
+  return /^rp-[0-9a-f]{32}$/.test(provider.providerKey)
+    ? "自动生成"
+    : provider.providerKey;
+}
+
+function providerBindings(
+  value?: Record<string, unknown>,
+): Record<string, string[]> {
+  const raw = value?.providerBindings;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>).map(([name, ids]) => [
+      name,
+      stringList(ids),
+    ]),
+  );
+}
+
+function initialRuleGroups(
+  ruleSet: RuleSet | undefined,
+  library: RuleProviderLibraryItem[],
+): { groups: RuleGroupDraft[]; fallback: RuleGroupDraft } {
+  const rawGroups = ruleSet?.groups?.length
+    ? ruleSet.groups
+    : [{ name: "PROXY", type: "select", proxies: ["DIRECT"] }];
+  const bindings = providerBindings(ruleSet?.importMeta);
+  const providerByKey = new Map(
+    library.map((provider) => [provider.providerKey, provider.id]),
+  );
+  const bindingsFromRules: Record<string, string[]> = {};
+  for (const rawRule of ruleSet?.rules ?? []) {
+    if (typeof rawRule !== "string") continue;
+    const parts = rawRule.split(",").map((part) => part.trim());
+    if (parts[0]?.toUpperCase() !== "RULE-SET" || !parts[1] || !parts[2])
+      continue;
+    const providerId = providerByKey.get(parts[1]);
+    if (providerId)
+      bindingsFromRules[parts[2]] = [
+        ...(bindingsFromRules[parts[2]] ?? []),
+        providerId,
+      ];
+  }
+  const drafts = rawGroups.map((rawGroup, index) => {
+    const { name, type, proxies, ...extra } = rawGroup;
+    const groupName = String(name ?? `PROXY-${index + 1}`);
+    return {
+      id: `strategy-${index}-${groupName}`,
+      name: groupName,
+      type: String(type ?? "select"),
+      proxies: stringList(proxies),
+      providerIds: [
+        ...new Set(bindings[groupName] ?? bindingsFromRules[groupName] ?? []),
+      ],
+      extra,
+    };
+  });
+  const savedFallbackName =
+    typeof ruleSet?.importMeta?.fallbackStrategyName === "string"
+      ? ruleSet.importMeta.fallbackStrategyName
+      : "";
+  const savedFallbackIndex = savedFallbackName
+    ? drafts.findIndex((group) => group.name === savedFallbackName)
+    : -1;
+  if (savedFallbackIndex >= 0) {
+    const fallback = {
+      ...drafts[savedFallbackIndex],
+      providerIds: [],
+      fallback: true,
+    };
+    return {
+      groups: drafts.filter((_, index) => index !== savedFallbackIndex),
+      fallback,
+    };
+  }
+
+  const usedNames = new Set(drafts.map((group) => group.name));
+  let fallbackName = "兜底策略";
+  let suffix = 2;
+  while (usedNames.has(fallbackName)) fallbackName = `兜底策略-${suffix++}`;
+  const source = drafts[0];
+  return {
+    groups: drafts,
+    fallback: {
+      id: `strategy-fallback-${fallbackName}`,
+      name: fallbackName,
+      type: source?.type ?? "select",
+      proxies: source?.proxies.length ? [...source.proxies] : ["DIRECT"],
+      providerIds: [],
+      extra: { ...(source?.extra ?? {}) },
+      fallback: true,
+    },
+  };
+}
+
+function RuleSetModal({
+  mode,
+  ruleSet,
+  nodes,
+  providerLibrary,
+  onClose,
+  onSaved,
+}: {
+  mode: "edit" | "import" | "create";
+  ruleSet?: RuleSet;
+  nodes: Node[];
+  providerLibrary: RuleProviderLibraryItem[];
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const isEdit = mode === "edit";
+  const isImport = mode === "import";
+  const [name, setName] = useState(
+    ruleSet?.name ?? (isImport ? "导入规则" : "新建规则库"),
+  );
+  const [subscriptionUrl, setSubscriptionUrl] = useState("");
+  const [yamlContent, setYamlContent] = useState("");
+  const [initialGroups] = useState(() =>
+    initialRuleGroups(ruleSet, providerLibrary),
+  );
+  const [groups, setGroups] = useState<RuleGroupDraft[]>(initialGroups.groups);
+  const [fallbackGroup, setFallbackGroup] = useState<RuleGroupDraft>(
+    initialGroups.fallback,
+  );
+  const [editing, setEditing] = useState<{
+    index: number | null;
+    value: RuleGroupDraft;
+    fallback?: boolean;
+  } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  function newGroup(): RuleGroupDraft {
+    const used = new Set([
+      ...groups.map((group) => group.name),
+      fallbackGroup.name,
+    ]);
+    let nextName = "PROXY";
+    let suffix = 2;
+    while (used.has(nextName)) nextName = `PROXY-${suffix++}`;
+    return {
+      id: `strategy-new-${Date.now()}`,
+      name: nextName,
+      type: "select",
+      proxies: ["DIRECT"],
+      providerIds: [],
+      extra: {},
+    };
+  }
+
+  function saveGroup(value: RuleGroupDraft) {
+    if (editing?.fallback) {
+      setFallbackGroup({ ...value, providerIds: [], fallback: true });
+      setEditing(null);
+      setError("");
+      return;
+    }
+    const duplicate =
+      value.name === fallbackGroup.name ||
+      groups.some(
+        (group, index) => group.name === value.name && index !== editing?.index,
+      );
+    if (duplicate) {
+      setError(`策略组名称“${value.name}”已存在。`);
+      return;
+    }
+    setGroups((current) =>
+      editing?.index === null
+        ? [...current, value]
+        : current.map((group, index) =>
+            index === editing?.index ? value : group,
+          ),
+    );
+    setEditing(null);
+    setError("");
+  }
+
+  function moveGroup(index: number, offset: -1 | 1) {
+    setGroups((current) => {
+      const target = index + offset;
+      if (index < 0 || index >= current.length || target < 0 || target >= current.length)
+        return current;
+      const reordered = [...current];
+      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      return reordered;
+    });
+  }
+
+  async function save() {
+    if (!name.trim()) {
+      setError("请输入规则库名称。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      if (isImport) {
+        if (!subscriptionUrl.trim() && !yamlContent.trim())
+          throw new Error("请输入订阅链接或粘贴 Clash YAML 内容。");
+        await apiPost(`${API}/rule-sets/import`, {
+          name: name.trim(),
+          url: subscriptionUrl.trim(),
+          content: yamlContent.trim(),
+        });
+      } else {
+        const cleanGroups = [...groups, fallbackGroup].map(
+          ({
+            id: _id,
+            providerIds: _providerIds,
+            fallback: _fallback,
+            name: groupName,
+            type,
+            proxies,
+            extra,
+          }) => ({ ...extra, name: groupName, type, proxies }),
+        );
+        const bindings = Object.fromEntries(
+          groups.map((group) => [group.name, [...new Set(group.providerIds)]]),
+        );
+        const rules = groups.flatMap((group) =>
+          group.providerIds
+            .map((providerId) => {
+              const provider = providerLibrary.find(
+                (item) => item.id === providerId,
+              );
+              return provider
+                ? `RULE-SET,${provider.providerKey},${group.name}`
+                : "";
+            })
+            .filter(Boolean),
+        );
+        rules.push(`MATCH,${fallbackGroup.name}`);
+        const payload = {
+          name: name.trim(),
+          groups: cleanGroups,
+          rules,
+          providers: {},
+          importMeta: {
+            ...(ruleSet?.importMeta ?? {}),
+            providerBindings: bindings,
+            fallbackStrategyName: fallbackGroup.name,
+            strategyGroupEditor: true,
+          },
+        };
+        if (isEdit && ruleSet)
+          await apiPut(`${API}/rule-sets/${ruleSet.id}`, payload);
+        else await apiPost(`${API}/rule-sets`, payload);
+      }
+      await onSaved(
+        isEdit
+          ? "规则库已更新"
+          : isImport
+            ? "规则已导入，可点击编辑调整策略组"
+            : "规则库已创建",
+      );
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const title = isEdit
+    ? "编辑规则库"
+    : isImport
+      ? "导入 Clash 规则"
+      : "手动新增规则库";
+  const saveLabel = isEdit
+    ? "保存规则库"
+    : isImport
+      ? "仅导入规则"
+      : "创建规则库";
+  return (
+    <>
+      <Modal
+        title={title}
+        width={860}
+        onClose={() => !saving && !editing && onClose()}
+        foot={
+          <>
+            <button
+              className="csm-btn csm-btn-secondary"
+              type="button"
+              disabled={saving}
+              onClick={onClose}
+            >
+              取消
+            </button>
+            <button
+              className="csm-btn csm-btn-primary"
+              type="button"
+              disabled={saving}
+              onClick={() => void save()}
+            >
+              {saving ? (
+                <>
+                  <Spin size={14} />
+                  保存中
+                </>
+              ) : (
+                saveLabel
+              )}
+            </button>
+          </>
+        }
+      >
+        <div className="csm-form-grid">
+          {error && (
+            <div className="csm-full-col">
+              <Alert type="error">{error}</Alert>
+            </div>
+          )}
+          <Field label="名称" full>
+            <input
+              className="csm-input"
+              value={name}
+              maxLength={120}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </Field>
+          {isImport ? (
+            <>
+              <div className="csm-full-col">
+                <Alert type="info">
+                  只导入订阅中的规则、策略组和 Rule
+                  Provider，节点不会进入节点池。导入的 Provider 会进入独立的
+                  Rule Provider 库。
+                </Alert>
+              </div>
+              <Field label="订阅链接（与 YAML 二选一）" full>
+                <input
+                  className="csm-input"
+                  type="url"
+                  value={subscriptionUrl}
+                  onChange={(event) => setSubscriptionUrl(event.target.value)}
+                  placeholder="https://example.com/subscription?format=clash"
+                />
+              </Field>
+              <Field label="Clash YAML（与订阅链接二选一）" full>
+                <textarea
+                  className="csm-textarea csm-code-editor"
+                  rows={20}
+                  spellCheck={false}
+                  value={yamlContent}
+                  onChange={(event) => setYamlContent(event.target.value)}
+                  placeholder={
+                    "proxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrule-providers:\n  example:\n    type: http\n    behavior: domain\n    url: https://example.com/rules.yaml\nrules:\n  - RULE-SET,example,PROXY\n  - MATCH,PROXY"
+                  }
+                />
+              </Field>
+            </>
+          ) : (
+            <div className="csm-full-col csm-strategy-section">
+              <div className="csm-strategy-section-head">
+                <div>
+                  <strong>策略组</strong>
+                  <span>越靠上的策略组规则越先匹配；兜底策略在下方单独配置</span>
+                </div>
+                <button
+                  className="csm-btn csm-btn-sm csm-btn-primary"
+                  type="button"
+                  onClick={() => setEditing({ index: null, value: newGroup() })}
+                >
+                  <Plus size={13} />
+                  新增策略组
+                </button>
+              </div>
+              {!groups.length ? (
+                <EmptyState
+                  title="暂无策略组"
+                  hint="新增策略组后，配置节点和使用的 Rule Provider"
+                />
+              ) : (
+                <div className="csm-strategy-group-cards">
+                  {groups.map((group, index) => (
+                    <article className="csm-strategy-group-card" key={group.id}>
+                      <div className="csm-strategy-card-main">
+                        <div className="csm-strategy-card-title">
+                          <strong>{group.name}</strong>
+                          <Badge>顺序 {index + 1}</Badge>
+                          <Badge color="blue">{group.type}</Badge>
+                        </div>
+                        <div className="csm-strategy-card-stats">
+                          <span>
+                            节点 <b>{group.proxies.length}</b>
+                          </span>
+                          <span>
+                            代理规则 <b>{group.providerIds.length}</b>
+                          </span>
+                        </div>
+                      </div>
+                      <Actions>
+                        <button
+                          className="csm-btn csm-btn-sm csm-btn-ghost"
+                          type="button"
+                          title="上移策略组"
+                          aria-label={`上移策略组 ${group.name}`}
+                          disabled={index === 0}
+                          onClick={() => moveGroup(index, -1)}
+                        >
+                          <ArrowUp size={13} />
+                        </button>
+                        <button
+                          className="csm-btn csm-btn-sm csm-btn-ghost"
+                          type="button"
+                          title="下移策略组"
+                          aria-label={`下移策略组 ${group.name}`}
+                          disabled={index === groups.length - 1}
+                          onClick={() => moveGroup(index, 1)}
+                        >
+                          <ArrowDown size={13} />
+                        </button>
+                        <button
+                          className="csm-btn csm-btn-sm csm-btn-secondary"
+                          type="button"
+                          onClick={() => setEditing({ index, value: group })}
+                        >
+                          <Pencil size={13} />
+                          编辑
+                        </button>
+                        <button
+                          className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
+                          type="button"
+                          title="删除策略组"
+                          onClick={() =>
+                            setGroups((current) =>
+                              current.filter(
+                                (_, itemIndex) => itemIndex !== index,
+                              ),
+                            )
+                          }
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </Actions>
+                    </article>
+                  ))}
+                </div>
+              )}
+              <div className="csm-fallback-strategy">
+                <div className="csm-fallback-strategy-head">
+                  <div>
+                    <strong>默认兜底策略</strong>
+                    <span>固定用于 MATCH，不参与规则排序，不能删除或设置代理规则</span>
+                  </div>
+                </div>
+                <article className="csm-strategy-group-card csm-fallback-strategy-card">
+                  <div className="csm-strategy-card-main">
+                    <div className="csm-strategy-card-title">
+                      <strong>兜底策略</strong>
+                      <Badge color="blue">不可删除</Badge>
+                      <Badge>{fallbackGroup.type}</Badge>
+                    </div>
+                    <div className="csm-strategy-card-stats">
+                      <span>
+                        节点 / 内置策略 <b>{fallbackGroup.proxies.length}</b>
+                      </span>
+                      <span>
+                        代理规则 <b>0</b>
+                      </span>
+                    </div>
+                  </div>
+                  <Actions>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-secondary"
+                      type="button"
+                      onClick={() =>
+                        setEditing({
+                          index: null,
+                          value: fallbackGroup,
+                          fallback: true,
+                        })
+                      }
+                    >
+                      <Pencil size={13} />
+                      编辑节点
+                    </button>
+                  </Actions>
+                </article>
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>
+      {editing && (
+        <StrategyGroupModal
+          key={`${editing.index ?? "new"}-${editing.value.id}`}
+          group={editing.value}
+          nodes={nodes}
+          providers={providerLibrary}
+          fallback={Boolean(editing.fallback)}
+          onClose={() => setEditing(null)}
+          onSave={saveGroup}
+        />
+      )}
+    </>
+  );
+}
+
+function StrategyGroupModal({
+  group,
+  nodes,
+  providers,
+  fallback = false,
+  onClose,
+  onSave,
+}: {
+  group: RuleGroupDraft;
+  nodes: Node[];
+  providers: RuleProviderLibraryItem[];
+  fallback?: boolean;
+  onClose: () => void;
+  onSave: (value: RuleGroupDraft) => void;
+}) {
+  const [name, setName] = useState(group.name);
+  const [type, setType] = useState(group.type);
+  const [proxies, setProxies] = useState(group.proxies);
+  const [providerIds, setProviderIds] = useState(group.providerIds);
+  const [nodeSearch, setNodeSearch] = useState("");
+  const [providerSearch, setProviderSearch] = useState("");
+  const [error, setError] = useState("");
+  const visibleNodes = useMemo(() => {
+    const keyword = nodeSearch.trim().toLowerCase();
+    return nodes.filter(
+      (node) =>
+        !keyword ||
+        `${node.name} ${node.alias} ${node.displayName} ${node.protocol} ${node.server}`
+          .toLowerCase()
+          .includes(keyword),
+    );
+  }, [nodes, nodeSearch]);
+  const visibleProviders = useMemo(() => {
+    const keyword = providerSearch.trim().toLowerCase();
+    return providers.filter(
+      (provider) =>
+        !keyword ||
+        `${provider.name} ${provider.providerKey} ${provider.description}`
+          .toLowerCase()
+          .includes(keyword),
+    );
+  }, [providers, providerSearch]);
+  const nodeReferences = new Set(
+    nodes.flatMap((node) =>
+      [node.name, node.alias, node.displayName].filter(Boolean),
+    ),
+  );
+  const unknownReferences = proxies.filter(
+    (proxy) =>
+      !nodeReferences.has(proxy) && !["DIRECT", "REJECT"].includes(proxy),
+  );
+
+  function toggleProxy(value: string, checked: boolean) {
+    setProxies((current) =>
+      checked
+        ? [...new Set([...current, value])]
+        : current.filter((item) => item !== value),
+    );
+  }
+  function moveProvider(index: number, offset: -1 | 1) {
+    setProviderIds((current) => {
+      const target = index + offset;
+      if (index < 0 || index >= current.length || target < 0 || target >= current.length)
+        return current;
+      const reordered = [...current];
+      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      return reordered;
+    });
+  }
+  function submit() {
+    const cleanName = fallback ? group.name : name.trim();
+    if (!cleanName || /[,\r\n]/.test(cleanName)) {
+      setError("请输入有效的策略组名称，不能包含逗号或换行。");
+      return;
+    }
+    if (!proxies.length) {
+      setError("请至少选择一个节点或 DIRECT / REJECT。");
+      return;
+    }
+    const extra = { ...group.extra };
+    if (type !== "select") {
+      if (!extra.url) extra.url = "http://www.gstatic.com/generate_204";
+      if (!extra.interval) extra.interval = 300;
+    }
+    onSave({
+      ...group,
+      name: cleanName,
+      type,
+      proxies,
+      providerIds: fallback ? [] : [...new Set(providerIds)],
+      extra,
+    });
+  }
+
+  return (
+    <Modal
+      title={fallback ? "编辑默认兜底策略" : "编辑策略组"}
+      width={820}
+      onClose={onClose}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            onClick={submit}
+          >
+            保存策略组
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid csm-strategy-editor">
+        {error && (
+          <div className="csm-full-col">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+        {fallback && (
+          <div className="csm-full-col">
+            <Alert type="info">
+              兜底策略只能选择节点、DIRECT 或 REJECT，不能绑定 Rule Provider。
+            </Alert>
+          </div>
+        )}
+        <Field label="策略组名称">
+          <input
+            className="csm-input"
+            value={fallback ? "兜底策略" : name}
+            maxLength={120}
+            disabled={fallback}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="例如：AI平台"
+          />
+          {fallback && (
+            <small className="csm-muted">固定用于最终 MATCH，名称不可修改。</small>
+          )}
+        </Field>
+        <Field label="节点选择方法">
+          <select
+            className="csm-select"
+            value={type}
+            onChange={(event) => setType(event.target.value)}
+          >
+            <option value="select">手动选择（select）</option>
+            <option value="url-test">自动测速（url-test）</option>
+            <option value="fallback">故障转移（fallback）</option>
+            <option value="load-balance">负载均衡（load-balance）</option>
+          </select>
+        </Field>
+        <Field label={`节点（已选 ${proxies.length}）`} full>
+          <div className="csm-strategy-picker">
+            <label className="csm-search">
+              <Search size={15} />
+              <input
+                value={nodeSearch}
+                onChange={(event) => setNodeSearch(event.target.value)}
+                placeholder="按节点原名、别名、协议或地址搜索"
+              />
+            </label>
+            <div className="csm-strategy-builtins">
+              {["DIRECT", "REJECT"].map((value) => (
+                <label key={value}>
+                  <input
+                    type="checkbox"
+                    checked={proxies.includes(value)}
+                    onChange={(event) =>
+                      toggleProxy(value, event.target.checked)
+                    }
+                  />
+                  <strong>{value}</strong>
+                </label>
+              ))}
+            </div>
+            <div className="csm-strategy-node-list">
+              {visibleNodes.map((node) => {
+                const value = node.alias || node.name;
+                const disabled = !node.supportedOutput;
+                return (
+                  <label key={node.id} className={disabled ? "disabled" : ""}>
+                    <input
+                      type="checkbox"
+                      disabled={disabled && !proxies.includes(value)}
+                      checked={proxies.includes(value)}
+                      onChange={(event) =>
+                        toggleProxy(value, event.target.checked)
+                      }
+                    />
+                    <span>
+                      <strong>{node.displayName || value}</strong>
+                      {node.alias && <small>原名：{node.name}</small>}
+                      <small>
+                        {node.protocol} · {node.server}:{node.port ?? "—"}
+                        {disabled ? " · Clash Meta 不支持" : ""}
+                      </small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            {unknownReferences.length > 0 && (
+              <div className="csm-preserved-refs">
+                <span>原配置中的其他引用</span>
+                {unknownReferences.map((value) => (
+                  <label key={value}>
+                    <input
+                      type="checkbox"
+                      checked
+                      onChange={() => toggleProxy(value, false)}
+                    />
+                    <code>{value}</code>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        </Field>
+        {!fallback && (
+        <Field label={`代理规则（已选 ${providerIds.length}）`} full>
+            <div className="csm-strategy-picker">
+              {providerIds.length > 0 && (
+                <div className="csm-provider-order">
+                  <div className="csm-provider-order-heading">
+                    <strong>规则匹配顺序</strong>
+                    <small>越靠上的规则越先输出和匹配</small>
+                  </div>
+                  {providerIds.map((providerId, index) => {
+                    const provider = providers.find((item) => item.id === providerId);
+                    return (
+                      <div className="csm-provider-order-row" key={providerId}>
+                        <span className="csm-provider-order-index">{index + 1}</span>
+                        <span className="csm-provider-order-name">
+                          <strong>{provider?.name ?? "已失效的 Rule Provider"}</strong>
+                          {provider && <small>{providerKeyText(provider)}</small>}
+                        </span>
+                        <span className="csm-provider-order-actions">
+                          <button
+                            className="csm-btn csm-btn-sm csm-btn-ghost"
+                            type="button"
+                            title="上移"
+                            aria-label={`上移 ${provider?.name ?? "规则"}`}
+                            disabled={index === 0}
+                            onClick={() => moveProvider(index, -1)}
+                          >
+                            <ArrowUp size={14} />
+                          </button>
+                          <button
+                            className="csm-btn csm-btn-sm csm-btn-ghost"
+                            type="button"
+                            title="下移"
+                            aria-label={`下移 ${provider?.name ?? "规则"}`}
+                            disabled={index === providerIds.length - 1}
+                            onClick={() => moveProvider(index, 1)}
+                          >
+                            <ArrowDown size={14} />
+                          </button>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <label className="csm-search">
+                <Search size={15} />
+                <input
+                  value={providerSearch}
+                  onChange={(event) => setProviderSearch(event.target.value)}
+                  placeholder="搜索 Rule Provider 名称或 Key"
+                />
+              </label>
+              {!providers.length ? (
+                <div className="csm-inline-empty">
+                  Rule Provider 库为空，请先到独立 Tab 新增。
+                </div>
+              ) : (
+                <div className="csm-provider-picker-list">
+                  {visibleProviders.map((provider) => (
+                    <label key={provider.id}>
+                      <input
+                        type="checkbox"
+                        checked={providerIds.includes(provider.id)}
+                        onChange={(event) =>
+                          setProviderIds((current) =>
+                            event.target.checked
+                              ? [...new Set([...current, provider.id])]
+                              : current.filter((id) => id !== provider.id),
+                          )
+                        }
+                      />
+                      <span>
+                        <strong>{provider.name}</strong>
+                        <code>
+                          {providerKeyText(provider)} ·{" "}
+                          {String(provider.config.type ?? "") === "manual"
+                            ? "自定义"
+                            : "规则订阅"}
+                        </code>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <small className="csm-muted">
+              勾选后会自动生成该策略组的 RULE-SET 规则，Provider
+              内容始终读取独立库中的最新版本；保存的规则内容会在输出时展开为普通规则。
+            </small>
+          </Field>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function PreviewModal({
+  state,
+  publishing,
+  onClose,
+  onCopy,
+  onPublish,
+}: {
+  state: PreviewState;
+  publishing: boolean;
+  onClose: () => void;
+  onCopy: () => void;
+  onPublish: () => void;
+}) {
+  const errors = state.messages.filter((item) => item.level === "error");
+  return (
+    <Modal
+      title={`配置预览：${state.profile.name}`}
+      width={920}
+      onClose={() => !publishing && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={publishing}
+            onClick={onCopy}
+          >
+            <Clipboard size={14} />
+            复制 YAML
+          </button>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={publishing}
+            onClick={onClose}
+          >
+            关闭
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={!state.valid || publishing}
+            onClick={onPublish}
+          >
+            {publishing ? (
+              <>
+                <Spin size={14} />
+                发布中
+              </>
+            ) : (
+              <>
+                <Upload size={14} />
+                发布有效配置
+              </>
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-preview">
+        {state.valid ? (
+          <Alert type="success">校验通过，可以发布并替换当前有效版本。</Alert>
+        ) : (
+          <Alert type="error">
+            存在 {errors.length} 个错误，当前已发布版本不会被覆盖。
+          </Alert>
+        )}
+        {state.messages.length > 0 && (
+          <div className="csm-validation-list">
+            {state.messages.map((item, index) => (
+              <div
+                className={item.level === "error" ? "error" : "info"}
+                key={`${item.code}-${index}`}
+              >
+                <AlertTriangle size={14} />
+                <span>{item.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <pre>{state.yaml}</pre>
+      </div>
+    </Modal>
+  );
+}
+
+function Toolbar({
+  title,
+  icon,
+  actions,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
+  return (
+    <div className="csm-toolbar">
+      <div>
+        <h2>
+          {icon}
+          {title}
+        </h2>
+      </div>
+      {actions && <div className="csm-toolbar-actions">{actions}</div>}
+    </div>
+  );
+}
+function PanelTitle({ title, icon }: { title: string; icon: React.ReactNode }) {
+  return (
+    <div className="csm-panel-title">
+      <h2>
+        {icon}
+        {title}
+      </h2>
+    </div>
+  );
+}
+function Table({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="csm-table-wrap">
+      <table className="csm-table">{children}</table>
+    </div>
+  );
+}
+function Actions({ children }: { children: React.ReactNode }) {
+  return <div className="csm-actions">{children}</div>;
+}
+function Loading({ text }: { text: string }) {
+  return (
+    <div className="csm-loading">
+      <Spin />
+      {text}
+    </div>
+  );
+}
+function StatusDot({ status }: { status: string }) {
+  return <span className={`csm-status-dot ${status}`} />;
+}
+function SourceBadge({
+  status,
+  enabled,
+}: {
+  status: string;
+  enabled: boolean;
+}) {
+  if (!enabled) return <Badge>已停用</Badge>;
+  return status === "healthy" ? (
+    <Badge color="green">正常</Badge>
+  ) : status === "error" ? (
+    <Badge color="red">异常</Badge>
+  ) : (
+    <Badge color="amber">未刷新</Badge>
+  );
+}
+function PublishBadge({ profile }: { profile: Profile }) {
+  return profile.publishedStatus === "degraded" ? (
+    <Badge color="amber">已降级</Badge>
+  ) : profile.publishedAt ? (
+    <Badge color="green">已发布</Badge>
+  ) : (
+    <Badge>草稿</Badge>
+  );
+}
+function publishLabel(profile: Profile) {
+  return profile.publishedStatus === "degraded"
+    ? "已降级"
+    : profile.publishedAt
+      ? "已发布"
+      : "草稿";
+}
+function stamp(value?: string | null) {
+  if (!value) return "从未";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
+}
+function duration(seconds: number) {
+  if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  return `${seconds} 秒`;
+}
+function message(error: unknown) {
+  return error instanceof ApiError
+    ? error.message
+    : error instanceof Error
+      ? error.message
+      : "请求失败";
+}

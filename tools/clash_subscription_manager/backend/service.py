@@ -36,14 +36,43 @@ DEFAULT_REFRESH_SECONDS = 6 * 3600
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 15
 MAX_REDIRECTS = 5
-SUPPORTED_URIS = {"ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic"}
-MIHOMO_ONLY = {"vless", "hysteria", "hysteria2", "tuic", "wireguard"}
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_SECONDS = 0.35
+PARSEABLE_URIS = {"ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic"}
 CLASH_STRUCTURED_TYPES = {"http", "socks5", "snell", "wireguard"}
+CLASH_META_PROXY_TYPES = PARSEABLE_URIS | CLASH_STRUCTURED_TYPES
+COMPATIBLE_GROUP_TYPES = {"select", "url-test", "fallback", "load-balance", "relay"}
+PROXY_COMMON_FIELDS = {"name", "type", "server", "port"}
+PROXY_FIELDS: dict[str, set[str]] = {
+    "ss": {"cipher", "password", "udp", "plugin", "plugin-opts"},
+    "ssr": {"cipher", "password", "protocol", "protocol-param", "obfs", "obfs-param", "udp"},
+    "vmess": {"uuid", "alterId", "cipher", "udp", "tls", "skip-cert-verify", "servername", "network", "ws-opts", "http-opts", "h2-opts"},
+    "trojan": {"password", "udp", "sni", "alpn", "skip-cert-verify", "client-fingerprint", "network", "ws-opts", "grpc-opts"},
+    "vless": {"uuid", "udp", "tls", "flow", "servername", "sni", "network", "skip-cert-verify", "client-fingerprint", "reality-opts", "ws-opts", "grpc-opts", "packet-encoding"},
+    "hysteria": {"auth", "auth-str", "protocol", "up", "down", "sni", "alpn", "skip-cert-verify", "obfs", "obfs-password", "recv-window-conn", "recv-window"},
+    "hysteria2": {"password", "up", "down", "sni", "alpn", "skip-cert-verify", "obfs", "obfs-password", "ports", "hop-interval"},
+    "tuic": {"uuid", "password", "ip", "sni", "alpn", "skip-cert-verify", "disable-sni", "reduce-rtt", "request-timeout", "udp-relay-mode", "congestion-controller", "heartbeat-interval", "max-udp-relay-packet-size"},
+    "wireguard": {"ip", "ipv6", "private-key", "public-key", "pre-shared-key", "reserved", "udp", "mtu", "dns", "remote-dns", "allowed-ips"},
+    "http": {"username", "password", "tls", "skip-cert-verify", "sni"},
+    "socks5": {"username", "password", "tls", "skip-cert-verify", "udp"},
+    "snell": {"psk", "version", "obfs-opts"},
+}
+GROUP_FIELDS = {"name", "type", "proxies", "url", "interval", "lazy", "disable-udp", "strategy"}
+DNS_FIELDS = {"enable", "ipv6", "listen", "enhanced-mode", "fake-ip-range", "use-hosts", "nameserver", "fallback", "fallback-filter", "default-nameserver", "nameserver-policy", "fake-ip-filter", "proxy-server-nameserver", "respect-rules", "prefer-h3"}
+RULE_PROVIDER_FIELDS = {"type", "behavior", "url", "path", "interval"}
+CLASH_META_RULE_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR", "GEOIP", "GEOSITE", "DST-PORT", "SRC-PORT", "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"}
+BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
+    {"id": "builtin-provider-ai", "name": "AI 平台", "providerKey": "ai-platforms", "description": "OpenAI、Claude、Gemini 等常见生成式 AI 平台。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.yaml", "path": "./ruleset/ai-platforms.yaml"}},
+    {"id": "builtin-provider-google", "name": "谷歌平台", "providerKey": "google", "description": "Google、YouTube、Gmail 及相关服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/google.yaml", "path": "./ruleset/google.yaml"}},
+    {"id": "builtin-provider-overseas", "name": "常见国外平台", "providerKey": "common-overseas", "description": "常见非中国大陆互联网平台域名集合。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-!cn.yaml", "path": "./ruleset/common-overseas.yaml"}},
+    {"id": "builtin-provider-github", "name": "GitHub", "providerKey": "github", "description": "GitHub 及其静态资源、代码托管相关域名。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/github.yaml", "path": "./ruleset/github.yaml"}},
+    {"id": "builtin-provider-media", "name": "海外影音娱乐", "providerKey": "overseas-media", "description": "常见海外流媒体、直播与影音平台。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-entertainment.yaml", "path": "./ruleset/overseas-media.yaml"}},
+)
 _initialized: set[str] = set()
 _init_lock = threading.Lock()
 
 register_tool_categories(TOOL_ID, [
-    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_profile_selections", "csm_rule_sets", "csm_published_snapshots"], None, "订阅源、节点、配置和最后有效发布版本"),
+    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_profile_selections", "csm_rule_sets", "csm_rule_providers", "csm_published_snapshots"], None, "订阅源、节点、配置和最后有效发布版本"),
     DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_probe_results"], "created_at", "订阅刷新、快照和 TCP 探测记录"),
     DataCategory("public_tokens", ["csm_public_tokens"], None, "公开订阅令牌索引", storage="platform_db", user_id_column="user_id"),
 ])
@@ -66,6 +95,54 @@ def _loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value or "")
     except (TypeError, ValueError):
         return fallback
+
+
+def _seed_rule_providers(conn: sqlite3.Connection) -> None:
+    now = _now()
+    for item in BUILTIN_RULE_PROVIDERS:
+        conn.execute("""INSERT OR IGNORE INTO csm_rule_providers(
+          id,name,provider_key,description,config_json,is_builtin,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?)""", (item["id"], item["name"], item["providerKey"],
+                                      item["description"], _json(item["config"]), 1, now, now))
+
+
+def _migrate_rule_provider_snapshots(conn: sqlite3.Connection) -> None:
+    """Move legacy rule-set Provider copies into the independent live library."""
+    library = {row["provider_key"]: row["id"] for row in conn.execute(
+        "SELECT id,provider_key FROM csm_rule_providers")}
+    now = _now()
+    for row in conn.execute("SELECT id,rules_json,providers_json,import_meta_json FROM csm_rule_sets"):
+        snapshots = _loads(row["providers_json"], {})
+        if not isinstance(snapshots, dict) or not snapshots:
+            continue
+        for raw_key, config in snapshots.items():
+            key = str(raw_key).strip()
+            if not key or key in library or not isinstance(config, dict):
+                continue
+            provider_id = _id()
+            conn.execute("""INSERT INTO csm_rule_providers(
+              id,name,provider_key,description,config_json,is_builtin,created_at,updated_at)
+              VALUES(?,?,?,?,?,0,?,?)""", (provider_id, key, key, "从旧规则库迁移", _json(config), now, now))
+            library[key] = provider_id
+        meta = _loads(row["import_meta_json"], {})
+        if not isinstance(meta, dict):
+            meta = {}
+        bindings = meta.get("providerBindings")
+        if not isinstance(bindings, dict):
+            bindings = {}
+        for rule in _loads(row["rules_json"], []):
+            if not isinstance(rule, str):
+                continue
+            parts = [part.strip() for part in rule.split(",")]
+            if len(parts) < 3 or parts[0].upper() != "RULE-SET" or parts[1] not in library:
+                continue
+            ids = bindings.setdefault(parts[2], [])
+            if isinstance(ids, list) and library[parts[1]] not in ids:
+                ids.append(library[parts[1]])
+        meta["providerBindings"] = bindings
+        meta["strategyGroupEditor"] = True
+        conn.execute("UPDATE csm_rule_sets SET providers_json='{}',import_meta_json=?,updated_at=? WHERE id=?",
+                     (_json(meta), now, row["id"]))
 
 
 def _fernet() -> Fernet:
@@ -127,14 +204,15 @@ def init_database(user_id: str) -> None:
               id TEXT PRIMARY KEY, stable_identity TEXT NOT NULL UNIQUE, fingerprint TEXT NOT NULL UNIQUE,
               name TEXT NOT NULL, protocol TEXT NOT NULL, server TEXT NOT NULL DEFAULT '', port INTEGER,
               config_json TEXT NOT NULL, supported_output INTEGER NOT NULL DEFAULT 1,
-              first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+              first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+              alias TEXT NOT NULL DEFAULT '', is_custom INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS csm_node_sources (
               node_id TEXT NOT NULL, source_id TEXT NOT NULL, source_alias TEXT NOT NULL DEFAULT '',
               last_seen_at TEXT NOT NULL, PRIMARY KEY(node_id, source_id),
               FOREIGN KEY(node_id) REFERENCES csm_nodes(id) ON DELETE CASCADE,
               FOREIGN KEY(source_id) REFERENCES csm_sources(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS csm_profiles (
-              id TEXT PRIMARY KEY, name TEXT NOT NULL, target_kernel TEXT NOT NULL DEFAULT 'mihomo',
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, target_kernel TEXT NOT NULL DEFAULT 'clash-meta',
               settings_json TEXT NOT NULL DEFAULT '{}', rule_set_id TEXT, token_encrypted TEXT NOT NULL,
               published_at TEXT, published_status TEXT NOT NULL DEFAULT 'draft', last_validation_json TEXT NOT NULL DEFAULT '[]',
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -144,7 +222,13 @@ def init_database(user_id: str) -> None:
             CREATE TABLE IF NOT EXISTS csm_rule_sets (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, rules_json TEXT NOT NULL DEFAULT '[]',
               providers_json TEXT NOT NULL DEFAULT '{}', groups_json TEXT NOT NULL DEFAULT '[]',
-              import_meta_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+              import_meta_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              group_name TEXT NOT NULL DEFAULT '默认分组');
+            CREATE TABLE IF NOT EXISTS csm_rule_providers (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, provider_key TEXT NOT NULL UNIQUE,
+              description TEXT NOT NULL DEFAULT '', config_json TEXT NOT NULL DEFAULT '{}',
+              is_builtin INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS csm_published_snapshots (
               id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, content_encrypted TEXT NOT NULL,
               content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -160,6 +244,20 @@ def init_database(user_id: str) -> None:
             CREATE INDEX IF NOT EXISTS csm_nodes_seen ON csm_nodes(last_seen_at);
             CREATE INDEX IF NOT EXISTS csm_runs_source ON csm_refresh_runs(source_id, created_at DESC);
             """)
+            # Lightweight, idempotent migrations for databases created by an
+            # earlier version of the tool.
+            node_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_nodes)")}
+            if "alias" not in node_columns:
+                conn.execute("ALTER TABLE csm_nodes ADD COLUMN alias TEXT NOT NULL DEFAULT ''")
+            if "is_custom" not in node_columns:
+                conn.execute("ALTER TABLE csm_nodes ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0")
+            rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_rule_sets)")}
+            if "group_name" not in rule_columns:
+                conn.execute("ALTER TABLE csm_rule_sets ADD COLUMN group_name TEXT NOT NULL DEFAULT '默认分组'")
+            placeholders = ",".join("?" for _ in CLASH_META_PROXY_TYPES)
+            conn.execute(f"UPDATE csm_nodes SET supported_output=CASE WHEN lower(protocol) IN ({placeholders}) THEN 1 ELSE 0 END", tuple(sorted(CLASH_META_PROXY_TYPES)))
+            _seed_rule_providers(conn)
+            _migrate_rule_provider_snapshots(conn)
         with connection_context() as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS csm_public_tokens (
               token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile_id TEXT NOT NULL,
@@ -210,7 +308,14 @@ def update_source(source_id: str, data: dict[str, Any], user: User) -> dict[str,
 def delete_source(source_id: str, user: User) -> None:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        if conn.execute("DELETE FROM csm_sources WHERE id=?", (source_id,)).rowcount == 0: _not_found("订阅源")
+        if not conn.execute("SELECT id FROM csm_sources WHERE id=?", (source_id,)).fetchone():
+            _not_found("订阅源")
+        conn.execute("DELETE FROM csm_source_snapshots WHERE source_id=?", (source_id,))
+        conn.execute("DELETE FROM csm_refresh_runs WHERE source_id=?", (source_id,))
+        conn.execute("DELETE FROM csm_node_sources WHERE source_id=?", (source_id,))
+        conn.execute("DELETE FROM csm_sources WHERE id=?", (source_id,))
+        conn.execute("""DELETE FROM csm_nodes WHERE is_custom=0 AND NOT EXISTS(
+          SELECT 1 FROM csm_node_sources WHERE csm_node_sources.node_id=csm_nodes.id)""")
 
 
 def _not_found(label: str) -> None:
@@ -238,7 +343,7 @@ def _node(name: str, protocol: str, server: str, port: int | None, config: dict[
     identity = _hash({"protocol": protocol, "server": server.lower(), "port": port, "name": name})
     fingerprint = _hash({k: v for k, v in config.items() if k != "name"})
     return {"stable_identity": identity, "fingerprint": fingerprint, "name": config["name"], "protocol": protocol,
-            "server": server, "port": port, "config": config, "supported_output": supported}
+            "server": server, "port": port, "config": config, "supported_output": supported and protocol in CLASH_META_PROXY_TYPES}
 
 
 def parse_uri(uri: str) -> dict[str, Any] | None:
@@ -246,7 +351,7 @@ def parse_uri(uri: str) -> dict[str, Any] | None:
     raw = uri.strip()
     if not raw or "://" not in raw: return None
     kind = raw.split("://", 1)[0].lower()
-    if kind not in SUPPORTED_URIS: return None
+    if kind not in PARSEABLE_URIS: return None
     if kind == "vmess":
         try:
             obj = json.loads(_b64decode(raw.split("://", 1)[1]).decode("utf-8-sig"))
@@ -281,9 +386,23 @@ def parse_uri(uri: str) -> dict[str, Any] | None:
     server, name, q = parsed.hostname or "", unquote(parsed.fragment) or kind, parse_qs(parsed.query)
     credentials = unquote(parsed.username or "")
     config: dict[str, Any] = {"password": unquote(parsed.password or "") or credentials, "uuid": credentials if kind in {"vless", "hysteria", "hysteria2", "tuic"} else "", "sni": _query_one(parsed.query, "sni") or _query_one(parsed.query, "peer"), "servername": _query_one(parsed.query, "sni"), "network": _query_one(parsed.query, "type"), "tls": _query_one(parsed.query, "security") or ("tls" if kind == "trojan" else ""), "flow": _query_one(parsed.query, "flow"), "udp": _query_one(parsed.query, "udp")}
-    if kind in {"hysteria", "hysteria2"}: config.update({"obfs": _query_one(parsed.query, "obfs"), "obfs-password": _query_one(parsed.query, "obfs-password"), "up": _query_one(parsed.query, "up"), "down": _query_one(parsed.query, "down")})
-    if kind == "tuic": config.update({"uuid": credentials, "password": unquote(parsed.password or ""), "congestion-controller": _query_one(parsed.query, "congestion_control")})
-    if kind == "vless": config["uuid"] = credentials
+    if kind in {"hysteria", "hysteria2"}:
+        config.update({"obfs": _query_one(parsed.query, "obfs"), "obfs-password": _query_one(parsed.query, "obfs-password"), "up": _query_one(parsed.query, "up"), "down": _query_one(parsed.query, "down")})
+    if kind == "hysteria":
+        config["auth-str"] = credentials
+    if kind == "hysteria2":
+        config["password"] = unquote(parsed.password or "") or credentials
+    if kind == "tuic":
+        config.update({"uuid": credentials, "password": unquote(parsed.password or ""), "congestion-controller": _query_one(parsed.query, "congestion_control")})
+    if kind == "vless":
+        config.update({
+            "uuid": credentials,
+            "client-fingerprint": _query_one(parsed.query, "fp"),
+            "packet-encoding": _query_one(parsed.query, "packetEncoding"),
+            "reality-opts": {"public-key": _query_one(parsed.query, "pbk"), "short-id": _query_one(parsed.query, "sid")},
+            "ws-opts": {"path": _query_one(parsed.query, "path"), "headers": {"Host": _query_one(parsed.query, "host")}},
+            "grpc-opts": {"grpc-service-name": _query_one(parsed.query, "serviceName")},
+        })
     return _node(name, kind, server, port, config)
 
 
@@ -293,7 +412,7 @@ def _clash_node(value: dict[str, Any]) -> dict[str, Any] | None:
     server = str(value.get("server") or "")
     try: port = int(value.get("port")) if value.get("port") is not None else None
     except (ValueError, TypeError): port = None
-    supported = protocol in SUPPORTED_URIS or protocol in CLASH_STRUCTURED_TYPES
+    supported = protocol in CLASH_META_PROXY_TYPES
     return _node(str(value.get("name") or protocol), protocol, server, port, dict(value), supported)
 
 
@@ -328,22 +447,69 @@ def parse_subscription(content: bytes | str) -> tuple[list[dict[str, Any]], int]
     return items, unsupported
 
 
+def _download_error_detail(exc: httpx.HTTPError) -> str:
+    """Describe a fetch failure without exposing a token-bearing URL."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        reason = exc.response.reason_phrase.strip()
+        return f"HTTP {status}" + (f" {reason}" if reason else "")
+    if isinstance(exc, httpx.TimeoutException):
+        return "请求超时"
+    # Transport messages contain useful DNS/TLS diagnostics, but some httpx
+    # errors append the request URL. Never persist the query string because
+    # subscription credentials commonly live there.
+    detail = str(exc).strip() or exc.__class__.__name__
+    try:
+        request_url = str(exc.request.url)
+    except RuntimeError:
+        request_url = ""
+    if request_url:
+        detail = detail.replace(request_url, _redact_url(request_url))
+    return detail[:240]
+
+
+def _retryable_download_error(exc: httpx.HTTPError) -> bool:
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {408, 429} or exc.response.status_code >= 500
+    return False
+
+
 def _download(url: str, user_agent: str = "") -> bytes:
     headers = {"User-Agent": user_agent or "pansis-clash-subscription-manager/1.0"}
+    last_error: httpx.HTTPError | None = None
+    attempts_made = 0
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True, max_redirects=MAX_REDIRECTS, headers=headers) as client:
-            with client.stream("GET", url) as response:
-                response.raise_for_status()
-                chunks: list[bytes] = []; size = 0
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > MAX_RESPONSE_BYTES:
-                        raise ToolboxError("SOURCE_TOO_LARGE", "订阅响应超过 10 MiB 限制。", status_code=422)
-                    chunks.append(chunk)
-                return b"".join(chunks)
-    except ToolboxError: raise
+            for attempt in range(DOWNLOAD_ATTEMPTS):
+                attempts_made = attempt + 1
+                try:
+                    with client.stream("GET", url) as response:
+                        response.raise_for_status()
+                        chunks: list[bytes] = []; size = 0
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if size > MAX_RESPONSE_BYTES:
+                                raise ToolboxError("SOURCE_TOO_LARGE", "订阅响应超过 10 MiB 限制。", status_code=422)
+                            chunks.append(chunk)
+                        return b"".join(chunks)
+                except ToolboxError:
+                    raise
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    if attempt + 1 >= DOWNLOAD_ATTEMPTS or not _retryable_download_error(exc):
+                        break
+                    time.sleep(DOWNLOAD_RETRY_SECONDS * (2 ** attempt))
+    except ToolboxError:
+        raise
     except httpx.HTTPError as exc:
-        raise ToolboxError("SOURCE_FETCH_FAILED", f"获取订阅失败：{str(exc)[:240]}", status_code=422) from exc
+        last_error = exc
+
+    assert last_error is not None
+    detail = _download_error_detail(last_error)
+    attempt_note = f"（已尝试 {attempts_made} 次）" if attempts_made > 1 else ""
+    raise ToolboxError("SOURCE_FETCH_FAILED", f"获取订阅失败{attempt_note}：{detail}", status_code=422) from last_error
 
 
 def _expand_providers(content: bytes, user_agent: str) -> list[bytes]:
@@ -383,7 +549,10 @@ def _store_nodes(conn: sqlite3.Connection, source_id: str, nodes: Iterable[dict[
                 node_id = conflict["id"]
                 conn.execute("UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,config_json=?,supported_output=?,last_seen_at=? WHERE id=?", (item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, node_id))
             else:
-                conn.execute("INSERT INTO csm_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)", (node_id, item["stable_identity"], item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, now))
+                conn.execute("""INSERT INTO csm_nodes(
+                  id,stable_identity,fingerprint,name,protocol,server,port,config_json,
+                  supported_output,first_seen_at,last_seen_at)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (node_id, item["stable_identity"], item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, now))
         conn.execute("INSERT INTO csm_node_sources(node_id,source_id,source_alias,last_seen_at) VALUES(?,?,?,?) ON CONFLICT(node_id,source_id) DO UPDATE SET source_alias=excluded.source_alias,last_seen_at=excluded.last_seen_at", (node_id, source_id, item["name"], now))
         count += 1
     return count
@@ -423,8 +592,146 @@ def refresh_source(source_id: str, user: User, *, auto_rebuild: bool = True) -> 
         raise ToolboxError("SOURCE_REFRESH_FAILED", f"刷新失败：{message[:240]}", status_code=422) from exc
 
 
-def _node_dict(row: sqlite3.Row, source_names: list[str] | None = None, probe: sqlite3.Row | None = None) -> dict[str, Any]:
-    return {"id": row["id"], "stableIdentity": row["stable_identity"], "name": row["name"], "protocol": row["protocol"], "server": row["server"], "port": row["port"], "config": _loads(row["config_json"], {}), "supportedOutput": bool(row["supported_output"]), "lastSeenAt": row["last_seen_at"], "sources": source_names or [], "tcp": None if not probe else {"reachable": bool(probe["reachable"]), "latencyMs": probe["latency_ms"], "error": probe["error"], "checkedAt": probe["created_at"]}}
+def _node_dict(row: sqlite3.Row, source_names: list[str] | None = None, probe: sqlite3.Row | None = None,
+               source_ids: list[str] | None = None) -> dict[str, Any]:
+    alias = str(row["alias"] or "")
+    return {"id": row["id"], "stableIdentity": row["stable_identity"], "name": row["name"], "alias": alias,
+            "displayName": alias or row["name"], "protocol": row["protocol"], "server": row["server"], "port": row["port"],
+            "config": _loads(row["config_json"], {}), "supportedOutput": _compatible(str(row["protocol"])),
+            "isCustom": bool(row["is_custom"]), "lastSeenAt": row["last_seen_at"], "sources": source_names or [],
+            "sourceIds": source_ids or [], "tcp": None if not probe else {
+                "reachable": bool(probe["reachable"]), "latencyMs": probe["latency_ms"], "error": probe["error"], "checkedAt": probe["created_at"]}}
+
+
+def _normalise_custom_node(content: str) -> dict[str, Any]:
+    """Validate one user-authored Clash Meta proxy mapping."""
+    try:
+        value = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise ToolboxError("INVALID_CUSTOM_NODE_YAML", "自定义节点 YAML 无法解析。", status_code=422) from exc
+    if not isinstance(value, dict):
+        raise ToolboxError("INVALID_CUSTOM_NODE", "自定义节点必须是一个 YAML 对象。", status_code=422)
+    name = str(value.get("name") or "").strip()[:120]
+    protocol = str(value.get("type") or "").strip().lower()
+    server = str(value.get("server") or "").strip()
+    if not name:
+        raise ToolboxError("CUSTOM_NODE_NAME_REQUIRED", "请输入自定义节点名称。", status_code=422)
+    if protocol not in CLASH_META_PROXY_TYPES:
+        raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "节点协议不受 Clash Meta 支持。", status_code=422)
+    if not server:
+        raise ToolboxError("CUSTOM_NODE_SERVER_REQUIRED", "请输入自定义节点服务器地址。", status_code=422)
+    raw_port = value.get("port")
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise ToolboxError("INVALID_CUSTOM_NODE_PORT", "节点端口必须是 1 到 65535 的整数。", status_code=422) from exc
+    if isinstance(raw_port, bool) or not 1 <= port <= 65535:
+        raise ToolboxError("INVALID_CUSTOM_NODE_PORT", "节点端口必须是 1 到 65535 的整数。", status_code=422)
+    config = dict(value)
+    config.update({"name": name, "type": protocol, "server": server, "port": port})
+    return {"name": name, "protocol": protocol, "server": server, "port": port, "config": config}
+
+
+def _insert_custom_node(conn: sqlite3.Connection, material: dict[str, Any], *, node_id: str | None = None) -> sqlite3.Row:
+    node_id = node_id or _id()
+    now = _now()
+    stable_identity = _hash({"customNodeId": node_id})
+    fingerprint = _hash({"customNodeId": node_id, "config": material["config"]})
+    conn.execute("""INSERT INTO csm_nodes(
+      id,stable_identity,fingerprint,name,protocol,server,port,config_json,
+      supported_output,first_seen_at,last_seen_at,alias,is_custom)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)""", (
+        node_id, stable_identity, fingerprint, material["name"], material["protocol"],
+        material["server"], material["port"], _json(material["config"]),
+        int(_compatible(material["protocol"])), now, now, ""))
+    return conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone()
+
+
+def _clean_node_alias(conn: sqlite3.Connection, node_id: str, node_name: str, alias: str) -> str:
+    clean = alias.strip()[:120]
+    if clean == node_name:
+        return ""
+    if clean:
+        conflict = conn.execute("SELECT id FROM csm_nodes WHERE id<>? AND (name=? OR alias=?) LIMIT 1", (node_id, clean, clean)).fetchone()
+        if conflict:
+            raise ToolboxError("NODE_ALIAS_CONFLICT", "该别名已被其他节点名称或别名占用。", status_code=409)
+    return clean
+
+
+def create_custom_node(content: str, user: User, alias: str = "") -> dict[str, Any]:
+    init_database(user.id)
+    material = _normalise_custom_node(content)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = _insert_custom_node(conn, material)
+        clean_alias = _clean_node_alias(conn, row["id"], material["name"], alias)
+        if clean_alias:
+            conn.execute("UPDATE csm_nodes SET alias=? WHERE id=?", (clean_alias, row["id"]))
+            row = conn.execute("SELECT * FROM csm_nodes WHERE id=?", (row["id"],)).fetchone()
+        return _node_dict(row)
+
+
+def update_custom_node(node_id: str, content: str, user: User, alias: str | None = None) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            _not_found("节点")
+        if not row["is_custom"]:
+            raise ToolboxError("SUBSCRIPTION_NODE_READ_ONLY", "订阅节点不能直接编辑，请先复制为自定义节点。", status_code=409)
+        material = _normalise_custom_node(content)
+        clean_alias = row["alias"] if alias is None else _clean_node_alias(conn, node_id, material["name"], alias)
+        fingerprint = _hash({"customNodeId": node_id, "config": material["config"]})
+        conn.execute("""UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,
+                      config_json=?,supported_output=1,last_seen_at=?,alias=? WHERE id=?""", (
+            fingerprint, material["name"], material["protocol"], material["server"],
+            material["port"], _json(material["config"]), _now(), clean_alias, node_id))
+        return _node_dict(conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone())
+
+
+def copy_subscription_node(node_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            _not_found("节点")
+        if row["is_custom"]:
+            raise ToolboxError("CUSTOM_NODE_COPY_NOT_REQUIRED", "该节点已经是可编辑的自定义节点。", status_code=409)
+        if not _compatible(str(row["protocol"])):
+            raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "该订阅节点的协议不受 Clash Meta 支持，不能复制为自定义节点。", status_code=422)
+        base = str(row["alias"] or row["name"] or "自定义节点")
+        names = {str(item["name"]) for item in conn.execute("SELECT name FROM csm_nodes")}
+        copy_name = f"{base}（副本）"
+        sequence = 2
+        while copy_name in names:
+            copy_name = f"{base}（副本 {sequence}）"
+            sequence += 1
+        config = _loads(row["config_json"], {})
+        config["name"] = copy_name
+        material = {"name": copy_name, "protocol": row["protocol"], "server": row["server"],
+                    "port": row["port"], "config": config}
+        return _node_dict(_insert_custom_node(conn, material))
+
+
+def delete_custom_node(node_id: str, user: User) -> None:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT is_custom FROM csm_nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            _not_found("节点")
+        if not row["is_custom"]:
+            raise ToolboxError("SUBSCRIPTION_NODE_READ_ONLY", "订阅节点由订阅源管理，不能单独删除。", status_code=409)
+        conn.execute("DELETE FROM csm_nodes WHERE id=?", (node_id,))
+
+
+def update_node_alias(node_id: str, alias: str, user: User) -> dict[str, Any]:
+    """Set a user-owned display/output name while preserving the source name."""
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone()
+        if not row: _not_found("节点")
+        clean = _clean_node_alias(conn, node_id, row["name"], alias)
+        conn.execute("UPDATE csm_nodes SET alias=? WHERE id=?", (clean, node_id))
+        return _node_dict(conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone())
 
 
 def list_nodes(user: User, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -432,24 +739,30 @@ def list_nodes(user: User, filters: dict[str, Any] | None = None) -> list[dict[s
     for key, column in (("protocol", "n.protocol"), ("sourceId", "ns.source_id")):
         if filters.get(key): terms.append(f"{column}=?"); values.append(str(filters[key]))
     if filters.get("search"):
-        terms.append("(n.name LIKE ? OR n.server LIKE ?)"); values.extend([f"%{filters['search']}%", f"%{filters['search']}%"])
+        terms.append("(n.name LIKE ? OR n.alias LIKE ? OR n.server LIKE ?)"); values.extend([f"%{filters['search']}%", f"%{filters['search']}%", f"%{filters['search']}%"])
     where = " WHERE " + " AND ".join(terms) if terms else ""
     query = f"""SELECT DISTINCT n.*, (SELECT group_concat(s.name,'|') FROM csm_node_sources ns2 JOIN csm_sources s ON s.id=ns2.source_id WHERE ns2.node_id=n.id) AS source_names,
+      (SELECT group_concat(ns3.source_id,'|') FROM csm_node_sources ns3 WHERE ns3.node_id=n.id) AS source_ids,
       (SELECT pr.id FROM csm_probe_results pr WHERE pr.node_id=n.id ORDER BY pr.created_at DESC LIMIT 1) AS probe_id FROM csm_nodes n LEFT JOIN csm_node_sources ns ON ns.node_id=n.id{where} ORDER BY n.last_seen_at DESC"""
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         result=[]
         for row in conn.execute(query, values):
             probe = conn.execute("SELECT * FROM csm_probe_results WHERE id=?", (row["probe_id"],)).fetchone() if row["probe_id"] else None
-            result.append(_node_dict(row, str(row["source_names"] or "").split("|") if row["source_names"] else [], probe))
+            result.append(_node_dict(
+                row,
+                str(row["source_names"] or "").split("|") if row["source_names"] else [],
+                probe,
+                str(row["source_ids"] or "").split("|") if row["source_ids"] else [],
+            ))
         return result
 
 
-def _compatible(protocol: str, kernel: str) -> bool:
-    return kernel == "mihomo" or protocol not in MIHOMO_ONLY
+def _compatible(protocol: str) -> bool:
+    return protocol.lower() in CLASH_META_PROXY_TYPES
 
 
 def _profile_row(row: sqlite3.Row, public_token: str | None = None) -> dict[str, Any]:
-    return {"id": row["id"], "name": row["name"], "targetKernel": row["target_kernel"], "settings": _loads(row["settings_json"], {}), "ruleSetId": row["rule_set_id"], "publishedAt": row["published_at"], "publishedStatus": row["published_status"], "validation": _loads(row["last_validation_json"], []), "subscriptionToken": public_token, "createdAt": row["created_at"]}
+    return {"id": row["id"], "name": row["name"], "settings": _loads(row["settings_json"], {}), "ruleSetId": row["rule_set_id"], "publishedAt": row["published_at"], "publishedStatus": row["published_status"], "validation": _loads(row["last_validation_json"], []), "subscriptionToken": public_token, "createdAt": row["created_at"]}
 
 
 def list_profiles(user: User) -> list[dict[str, Any]]:
@@ -470,10 +783,8 @@ def _create_token_index(user_id: str, profile_id: str, token: str) -> None:
 
 def create_profile(data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id); profile_id, token, now = _id(), secrets.token_urlsafe(32), _now()
-    kernel = str(data.get("targetKernel") or "mihomo")
-    if kernel not in {"mihomo", "clash"}: raise ToolboxError("INVALID_KERNEL", "目标内核必须是 mihomo 或 clash。", status_code=422)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        conn.execute("INSERT INTO csm_profiles VALUES(?,?,?,?,?,?,?,?,?,?,?)", (profile_id, str(data.get("name") or "未命名聚合")[:120], kernel, _json(data.get("settings") or {}), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", now, now))
+        conn.execute("INSERT INTO csm_profiles VALUES(?,?,?,?,?,?,?,?,?,?,?)", (profile_id, str(data.get("name") or "未命名聚合")[:120], "clash-meta", _json(data.get("settings") or {}), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", now, now))
         row = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
     _create_token_index(user.id, profile_id, token)
     return _profile_row(row, token)
@@ -481,14 +792,13 @@ def create_profile(data: dict[str, Any], user: User) -> dict[str, Any]:
 
 def update_profile(profile_id: str, data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id)
-    allowed = {"name": "name", "targetKernel": "target_kernel", "ruleSetId": "rule_set_id"}
+    allowed = {"name": "name", "ruleSetId": "rule_set_id"}
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         row = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
         if not row: _not_found("聚合配置")
         changed: dict[str, Any] = {}
         for inbound, column in allowed.items():
             if inbound in data: changed[column] = data[inbound]
-        if "targetKernel" in data and data["targetKernel"] not in {"mihomo", "clash"}: raise ToolboxError("INVALID_KERNEL", "目标内核无效。", status_code=422)
         if "settings" in data: changed["settings_json"] = _json(data["settings"] or {})
         if changed:
             sql = ",".join(f"{key}=?" for key in changed)
@@ -512,14 +822,306 @@ def set_profile_selections(profile_id: str, identities: list[str], user: User) -
     return {"profileId": profile_id, "selected": len(dict.fromkeys(identities))}
 
 
+def _normalise_legacy_manual_provider(config: dict[str, Any]) -> dict[str, Any]:
+    """Keep legacy inline records editable without ever emitting the non-portable type."""
+    value = dict(config)
+    if value.get("type") == "inline":
+        value["type"] = "manual"
+    return value
+
+
+def _rule_provider_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {"id": row["id"], "name": row["name"], "providerKey": row["provider_key"],
+            "description": row["description"] or "", "config": _normalise_legacy_manual_provider(_loads(row["config_json"], {})),
+            "builtin": bool(row["is_builtin"]),
+            "updatedAt": row["updated_at"]}
+
+
+def list_rule_providers(user: User) -> list[dict[str, Any]]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        return [_rule_provider_row(row) for row in conn.execute(
+            "SELECT * FROM csm_rule_providers ORDER BY is_builtin DESC,name COLLATE NOCASE")]
+
+
+def _download_rule_provider_payload(url: str) -> list[str]:
+    content = _download(_require_http_url(url)).decode("utf-8-sig", "replace")
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise ToolboxError("INVALID_PROVIDER_YAML", "规则订阅内容不是有效的 YAML。", status_code=422) from exc
+    payload = document.get("payload") if isinstance(document, dict) else document
+    if not isinstance(payload, list) or any(not isinstance(item, str) for item in payload):
+        raise ToolboxError("INVALID_PROVIDER_PAYLOAD", "规则订阅必须包含字符串数组 payload。", status_code=422)
+    result = [item.strip() for item in payload if item.strip()]
+    if not result:
+        raise ToolboxError("INVALID_PROVIDER_PAYLOAD", "规则订阅中没有可用规则。", status_code=422)
+    return result
+
+
+def _normalise_rule_provider(data: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
+    name = str(data.get("name") or "").strip()[:120]
+    provider_key = str(data.get("providerKey") or "").strip()[:120]
+    description = str(data.get("description") or "").strip()[:500]
+    config = data.get("config") or {}
+    if not name:
+        raise ToolboxError("RULE_PROVIDER_NAME_REQUIRED", "请输入 Rule Provider 名称。", status_code=422)
+    if not provider_key:
+        provider_key = f"rp-{uuid.uuid4().hex}"
+    if any(char in provider_key for char in ",\r\n"):
+        raise ToolboxError("INVALID_PROVIDER_KEY", "Provider Key 不能包含逗号或换行。", status_code=422)
+    if not isinstance(config, dict):
+        raise ToolboxError("INVALID_PROVIDER_CONFIG", "Rule Provider 配置必须是对象。", status_code=422)
+    provider_type = str(config.get("type") or "").strip().lower()
+    if provider_type == "inline":
+        provider_type = "manual"  # one-way migration for records created by older versions
+    behavior = str(config.get("behavior") or "").strip().lower()
+    if behavior not in {"domain", "ipcidr", "classical"}:
+        raise ToolboxError("INVALID_PROVIDER_BEHAVIOR", "Behavior 必须是 domain、ipcidr 或 classical。", status_code=422)
+    if str(config.get("format") or "").lower() == "mrs":
+        raise ToolboxError("INCOMPATIBLE_PROVIDER_FORMAT", "MRS 格式不在当前 Clash Meta YAML 输出范围内，请改用 YAML Provider。", status_code=422)
+    if provider_type == "cached":
+        source_url = str(config.get("url") or config.get("sourceUrl") or "").strip()
+        payload = _download_rule_provider_payload(source_url)
+        config = {"type": "cached", "behavior": behavior, "sourceUrl": source_url,
+                  "payload": payload, "fetchedAt": _now()}
+    elif provider_type == "manual":
+        payload = config.get("payload")
+        if not isinstance(payload, list) or any(not isinstance(item, str) for item in payload):
+            raise ToolboxError("INVALID_PROVIDER_PAYLOAD", "手写 Rule Provider 的 payload 必须是字符串数组。", status_code=422)
+        clean_payload = [item.strip() for item in payload if item.strip()]
+        if not clean_payload:
+            raise ToolboxError("INVALID_PROVIDER_PAYLOAD", "手写 Rule Provider 至少需要一条规则。", status_code=422)
+        config = {"type": "manual", "behavior": behavior, "payload": clean_payload}
+    elif provider_type in {"http", "file"}:
+        config = {key: value for key, value in config.items() if key in RULE_PROVIDER_FIELDS}
+        config["type"] = provider_type
+        config["behavior"] = behavior
+        if not (config.get("url") or config.get("path")):
+            raise ToolboxError("INVALID_PROVIDER_CONFIG", "订阅型 Rule Provider 至少需要 url 或 path。", status_code=422)
+    else:
+        raise ToolboxError("INVALID_PROVIDER_TYPE", "Rule Provider 仅支持规则订阅、http、file 或自定义规则。", status_code=422)
+    return name, provider_key, description, config
+
+
+def save_rule_provider(data: dict[str, Any], user: User, provider_id: str | None = None) -> dict[str, Any]:
+    init_database(user.id)
+    name, provider_key, description, config = _normalise_rule_provider(data)
+    now = _now()
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        conflict = conn.execute("SELECT id FROM csm_rule_providers WHERE provider_key=? AND id<>?", (provider_key, provider_id or "")).fetchone()
+        if conflict:
+            raise ToolboxError("PROVIDER_KEY_CONFLICT", "Provider Key 已被其他项目使用。", status_code=409)
+        if provider_id:
+            row = conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
+            if not row: _not_found("Rule Provider")
+            conn.execute("""UPDATE csm_rule_providers SET name=?,provider_key=?,description=?,config_json=?,updated_at=? WHERE id=?""",
+                         (name, provider_key, description, _json(config), now, provider_id))
+        else:
+            provider_id = _id()
+            conn.execute("""INSERT INTO csm_rule_providers(
+              id,name,provider_key,description,config_json,is_builtin,created_at,updated_at)
+              VALUES(?,?,?,?,?,0,?,?)""", (provider_id, name, provider_key, description, _json(config), now, now))
+        return _rule_provider_row(conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone())
+
+
+def copy_rule_provider(provider_id: str, mode: str, user: User) -> dict[str, Any]:
+    """Copy a Provider while always assigning a new internal Provider Key."""
+    init_database(user.id)
+    clean_mode = str(mode or "original").strip().lower()
+    if clean_mode not in {"original", "manual"}:
+        raise ToolboxError("INVALID_PROVIDER_COPY_MODE", "复制方式仅支持原样复制或转为自定义规则。", status_code=422)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
+        if not row:
+            _not_found("Rule Provider")
+        stored = _normalise_legacy_manual_provider(_loads(row["config_json"], {}))
+        base = str(row["name"] or "Rule Provider")
+        names = {str(item["name"]) for item in conn.execute("SELECT name FROM csm_rule_providers")}
+    copy_name = f"{base}（副本）"
+    sequence = 2
+    while copy_name in names:
+        copy_name = f"{base}（副本 {sequence}）"
+        sequence += 1
+
+    config = dict(stored)
+    if clean_mode == "manual":
+        provider_type = str(stored.get("type") or "").lower()
+        behavior = str(stored.get("behavior") or "domain").lower()
+        if provider_type == "manual":
+            payload = stored.get("payload") or []
+        elif provider_type == "cached":
+            source_url = str(stored.get("sourceUrl") or stored.get("url") or "").strip()
+            payload = _download_rule_provider_payload(source_url) if source_url else stored.get("payload") or []
+        elif provider_type == "http":
+            payload = _download_rule_provider_payload(str(stored.get("url") or "").strip())
+        else:
+            raise ToolboxError(
+                "PROVIDER_COPY_TO_MANUAL_UNSUPPORTED",
+                "该 Rule Provider 没有可下载的规则订阅链接，无法转为自定义规则。",
+                status_code=422,
+            )
+        config = {"type": "manual", "behavior": behavior, "payload": payload}
+
+    return save_rule_provider({
+        "name": copy_name,
+        "providerKey": "",
+        "description": str(row["description"] or ""),
+        "config": config,
+    }, user)
+
+
+def delete_rule_provider(provider_id: str, user: User) -> None:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT is_builtin FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
+        if not row: _not_found("Rule Provider")
+        if bool(row["is_builtin"]):
+            raise ToolboxError("BUILTIN_RULE_PROVIDER", "内置 Rule Provider 不能删除，可以编辑其配置。", status_code=409)
+        for rule_row in conn.execute("SELECT name,import_meta_json FROM csm_rule_sets"):
+            meta = _loads(rule_row["import_meta_json"], {})
+            bindings = meta.get("providerBindings") if isinstance(meta, dict) else None
+            if isinstance(bindings, dict) and any(
+                provider_id in ids for ids in bindings.values() if isinstance(ids, list)
+            ):
+                raise ToolboxError("RULE_PROVIDER_IN_USE", f"Rule Provider 正被规则库“{rule_row['name']}”使用，请先在策略组中取消选择。", status_code=409)
+        conn.execute("DELETE FROM csm_rule_providers WHERE id=?", (provider_id,))
+
+
+def _remote_provider_output(config: dict[str, Any]) -> dict[str, Any]:
+    value = _normalise_legacy_manual_provider(config)
+    if value.get("type") not in {"http", "file"} or str(value.get("format") or "").lower() == "mrs":
+        return {}
+    locations = f"{value.get('url', '')} {value.get('path', '')}".lower()
+    if ".mrs" in locations:
+        return {}
+    return {key: item for key, item in value.items() if key in RULE_PROVIDER_FIELDS and item not in (None, "")}
+
+
+def _manual_provider_rules(config: dict[str, Any], target: str) -> list[str]:
+    value = _normalise_legacy_manual_provider(config)
+    if value.get("type") not in {"manual", "cached"}:
+        return []
+    behavior = str(value.get("behavior") or "domain")
+    result: list[str] = []
+    for raw in value.get("payload") or []:
+        item = str(raw).strip()
+        if not item:
+            continue
+        if behavior == "domain":
+            suffix = item.startswith("+.") or item.startswith(".")
+            domain = item[2:] if item.startswith("+.") else item[1:] if item.startswith(".") else item
+            result.append(f"{'DOMAIN-SUFFIX' if suffix else 'DOMAIN'},{domain},{target}")
+        elif behavior == "ipcidr":
+            try:
+                network = ipaddress.ip_network(item, strict=False)
+            except ValueError as exc:
+                raise ToolboxError("INVALID_PROVIDER_PAYLOAD", f"无效 IP 网段：{item}。", status_code=422) from exc
+            rule_type = "IP-CIDR6" if network.version == 6 else "IP-CIDR"
+            result.append(f"{rule_type},{item},{target},no-resolve")
+        else:
+            parts = [part.strip() for part in item.split(",")]
+            if len(parts) < 2:
+                raise ToolboxError("INVALID_PROVIDER_PAYLOAD", f"classical 规则不完整：{item}。", status_code=422)
+            if parts[-1].lower() == "no-resolve":
+                result.append(",".join(parts[:-1] + [target, "no-resolve"]))
+            else:
+                result.append(",".join(parts + [target]))
+    return result
+
+
+def package_rule_providers(provider_ids: list[str], target: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    clean_target = str(target or "").strip()[:120]
+    if not clean_target or any(char in clean_target for char in ",\r\n"):
+        raise ToolboxError("INVALID_PROVIDER_TARGET", "请输入有效的策略组或节点名称。", status_code=422)
+    ordered_ids = list(dict.fromkeys(str(item) for item in provider_ids if item))[:100]
+    if not ordered_ids:
+        raise ToolboxError("RULE_PROVIDER_REQUIRED", "请至少选择一个 Rule Provider。", status_code=422)
+    placeholders = ",".join("?" for _ in ordered_ids)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        rows = {row["id"]: row for row in conn.execute(f"SELECT * FROM csm_rule_providers WHERE id IN ({placeholders})", ordered_ids)}
+    if any(item not in rows for item in ordered_ids):
+        raise ToolboxError("RULE_PROVIDER_NOT_FOUND", "所选 Rule Provider 已不存在，请刷新后重试。", status_code=404)
+    providers: dict[str, Any] = {}
+    rules: list[str] = []
+    for provider_id in ordered_ids:
+        row = rows[provider_id]
+        key = str(row["provider_key"])
+        if key in providers:
+            raise ToolboxError("PROVIDER_KEY_CONFLICT", f"多个项目使用相同 Provider Key：{key}。", status_code=409)
+        stored = _loads(row["config_json"], {})
+        manual_rules = _manual_provider_rules(stored, clean_target)
+        if manual_rules:
+            rules.extend(manual_rules)
+        else:
+            providers[key] = _remote_provider_output(stored)
+            rules.append(f"RULE-SET,{key},{clean_target}")
+    return {"providers": providers, "rules": rules}
+
+
 def _rule_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {"id": row["id"], "name": row["name"], "rules": _loads(row["rules_json"], []), "providers": _loads(row["providers_json"], {}), "groups": _loads(row["groups_json"], []), "importMeta": _loads(row["import_meta_json"], {}), "updatedAt": row["updated_at"]}
+    return {"id": row["id"], "name": row["name"],
+            "rules": _loads(row["rules_json"], []), "providers": _loads(row["providers_json"], {}),
+            "groups": _loads(row["groups_json"], []), "importMeta": _loads(row["import_meta_json"], {}),
+            "updatedAt": row["updated_at"]}
 
 
 def list_rule_sets(user: User) -> list[dict[str, Any]]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        return [_rule_row(row) for row in conn.execute("SELECT * FROM csm_rule_sets ORDER BY updated_at DESC")]
+        return [_rule_row(row) for row in conn.execute("SELECT * FROM csm_rule_sets ORDER BY name COLLATE NOCASE")]
+
+
+def _materialize_rule_provider_bindings(conn: sqlite3.Connection, rule_set: dict[str, Any]) -> dict[str, Any]:
+    """Resolve saved Provider IDs at build time so rule sets never hold Provider snapshots."""
+    meta = rule_set.get("importMeta") or {}
+    bindings = meta.get("providerBindings") if isinstance(meta, dict) else None
+    if not isinstance(bindings, dict):
+        return rule_set
+    ordered_ids: list[str] = []
+    for group in rule_set.get("groups", []):
+        ids = bindings.get(str(group.get("name") or "")) or []
+        if isinstance(ids, list):
+            ordered_ids.extend(str(provider_id) for provider_id in ids if provider_id)
+    ordered_ids = list(dict.fromkeys(ordered_ids))[:500]
+    rows: dict[str, sqlite3.Row] = {}
+    if ordered_ids:
+        placeholders = ",".join("?" for _ in ordered_ids)
+        rows = {row["id"]: row for row in conn.execute(
+            f"SELECT * FROM csm_rule_providers WHERE id IN ({placeholders})", ordered_ids)}
+    providers: dict[str, Any] = {}
+    generated_rules: list[str] = []
+    missing_ids: list[str] = []
+    for group in rule_set.get("groups", []):
+        group_name = str(group.get("name") or "")
+        ids = bindings.get(group_name) or []
+        if not isinstance(ids, list):
+            continue
+        for provider_id in dict.fromkeys(str(item) for item in ids if item):
+            row = rows.get(provider_id)
+            if not row:
+                missing_ids.append(provider_id)
+                continue
+            provider_key = str(row["provider_key"])
+            stored = _loads(row["config_json"], {})
+            manual_rules = _manual_provider_rules(stored, group_name)
+            if manual_rules:
+                generated_rules.extend(manual_rules)
+            else:
+                providers[provider_key] = _remote_provider_output(stored)
+                generated_rules.append(f"RULE-SET,{provider_key},{group_name}")
+    base_rules = [
+        rule for rule in rule_set.get("rules", [])
+        if not (isinstance(rule, str) and rule.split(",", 1)[0].strip().upper() == "RULE-SET")
+    ]
+    material = dict(rule_set)
+    material["providers"] = providers
+    material["rules"] = generated_rules + base_rules
+    material_meta = dict(meta)
+    material_meta["missingProviderIds"] = list(dict.fromkeys(missing_ids))
+    material["importMeta"] = material_meta
+    return material
 
 
 def _normalise_rules(data: dict[str, Any]) -> tuple[list[Any], dict[str, Any], list[dict[str, Any]]]:
@@ -529,6 +1131,11 @@ def _normalise_rules(data: dict[str, Any]) -> tuple[list[Any], dict[str, Any], l
     if not isinstance(rules, list) or not isinstance(providers, dict) or not isinstance(groups, list):
         raise ToolboxError("INVALID_RULE_SET", "规则、规则提供器和策略组必须分别为数组、对象和数组。", status_code=422)
     clean_groups = [dict(item) for item in groups if isinstance(item, dict) and item.get("name")]
+    names = [str(group.get("name") or "").strip() for group in clean_groups]
+    if any(not name or any(char in name for char in ",\r\n") for name in names):
+        raise ToolboxError("INVALID_STRATEGY_GROUP_NAME", "策略组名称不能为空，且不能包含逗号或换行。", status_code=422)
+    if len(names) != len(set(names)):
+        raise ToolboxError("DUPLICATE_STRATEGY_GROUP", "策略组名称不能重复。", status_code=422)
     return rules[:5000], providers, clean_groups[:1000]
 
 
@@ -538,21 +1145,73 @@ def save_rule_set(data: dict[str, Any], user: User, rule_set_id: str | None = No
         if rule_set_id:
             row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (rule_set_id,)).fetchone()
             if not row: _not_found("规则库")
-            conn.execute("UPDATE csm_rule_sets SET name=?,rules_json=?,providers_json=?,groups_json=?,updated_at=? WHERE id=?", (str(data.get("name") or row["name"])[:120], _json(rules), _json(providers), _json(groups), now, rule_set_id))
+            group_name = "默认分组"
+            import_meta = data.get("importMeta") if isinstance(data.get("importMeta"), dict) else _loads(row["import_meta_json"], {})
+            conn.execute("UPDATE csm_rule_sets SET name=?,group_name=?,rules_json=?,providers_json=?,groups_json=?,import_meta_json=?,updated_at=? WHERE id=?", (str(data.get("name") or row["name"])[:120], group_name, _json(rules), _json(providers), _json(groups), _json(import_meta), now, rule_set_id))
         else:
             rule_set_id = _id()
-            conn.execute("INSERT INTO csm_rule_sets VALUES(?,?,?,?,?,?,?,?)", (rule_set_id, str(data.get("name") or "规则库")[:120], _json(rules), _json(providers), _json(groups), _json(data.get("importMeta") or {}), now, now))
+            group_name = "默认分组"
+            conn.execute("""INSERT INTO csm_rule_sets(
+              id,name,rules_json,providers_json,groups_json,import_meta_json,created_at,updated_at,group_name)
+              VALUES(?,?,?,?,?,?,?,?,?)""", (rule_set_id, str(data.get("name") or "规则库")[:120], _json(rules), _json(providers), _json(groups), _json(data.get("importMeta") or {}), now, now, group_name))
         return _rule_row(conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (rule_set_id,)).fetchone())
 
 
 def import_rule_set(data: dict[str, Any], user: User) -> dict[str, Any]:
-    """Import is always a detached editable copy; it never updates a source."""
+    """Import rules and groups without importing proxy nodes or storing Provider snapshots."""
     content = str(data.get("content") or "")
-    if not content and data.get("url"): content = _download(_require_http_url(str(data["url"]))).decode("utf-8-sig", "replace")
-    try: document = yaml.safe_load(content)
-    except yaml.YAMLError as exc: raise ToolboxError("INVALID_RULE_YAML", "规则 YAML 无法解析。", status_code=422) from exc
-    if not isinstance(document, dict): raise ToolboxError("INVALID_RULE_YAML", "规则内容必须是 YAML 对象。", status_code=422)
-    return save_rule_set({"name": data.get("name") or "导入规则", "rules": document.get("rules", []), "providers": document.get("rule-providers", {}), "groups": document.get("proxy-groups", []), "importMeta": {"importedAt": _now(), "source": "url" if data.get("url") else "paste"}}, user)
+    if not content and data.get("url"):
+        content = _download(_require_http_url(str(data["url"]))).decode("utf-8-sig", "replace")
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise ToolboxError("INVALID_RULE_YAML", "规则 YAML 无法解析。", status_code=422) from exc
+    if not isinstance(document, dict):
+        raise ToolboxError("INVALID_RULE_YAML", "规则内容必须是 YAML 对象。", status_code=422)
+
+    imported_providers = document.get("rule-providers") or {}
+    if not isinstance(imported_providers, dict):
+        raise ToolboxError("INVALID_RULE_YAML", "rule-providers 必须是对象。", status_code=422)
+    library_by_key = {item["providerKey"]: item for item in list_rule_providers(user)}
+    for key, config in imported_providers.items():
+        provider_key = str(key).strip()
+        if not provider_key or not isinstance(config, dict) or provider_key in library_by_key:
+            continue
+        created = save_rule_provider({
+            "name": provider_key,
+            "providerKey": provider_key,
+            "description": "从规则订阅导入",
+            "config": config,
+        }, user)
+        library_by_key[provider_key] = created
+
+    bindings: dict[str, list[str]] = {}
+    rules = document.get("rules") or []
+    if not isinstance(rules, list):
+        raise ToolboxError("INVALID_RULE_YAML", "rules 必须是数组。", status_code=422)
+    for rule in rules:
+        if not isinstance(rule, str):
+            continue
+        parts = [part.strip() for part in rule.split(",")]
+        if len(parts) < 3 or parts[0].upper() != "RULE-SET":
+            continue
+        provider = library_by_key.get(parts[1])
+        if provider:
+            bindings.setdefault(parts[2], []).append(provider["id"])
+    bindings = {name: list(dict.fromkeys(ids)) for name, ids in bindings.items()}
+
+    return save_rule_set({
+        "name": data.get("name") or "导入规则",
+        "rules": rules,
+        "providers": {},
+        "groups": document.get("proxy-groups", []),
+        "importMeta": {
+            "importedAt": _now(),
+            "source": "url" if data.get("url") else "paste",
+            "providerBindings": bindings,
+            "strategyGroupEditor": True,
+        },
+    }, user)
 
 
 def delete_rule_set(rule_set_id: str, user: User) -> None:
@@ -572,35 +1231,54 @@ def _profile_material(conn: sqlite3.Connection, profile_id: str) -> tuple[sqlite
         if row: nodes.append(row)
         else: missing.append(identity)
     rule = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)).fetchone() if profile["rule_set_id"] else None
-    return profile, nodes, _rule_row(rule) if rule else None, missing
+    rule_set = _materialize_rule_provider_bindings(conn, _rule_row(rule)) if rule else None
+    return profile, nodes, rule_set, missing
+
+
+def _rule_string_parts(rule: str) -> tuple[str, str, str]:
+    """Return material before the policy, the policy, and trailing options."""
+    head, separator, tail = rule.rpartition(",")
+    if not separator:
+        return "", "", ""
+    if tail.strip().lower() == "no-resolve":
+        prefix, policy_separator, policy = head.rpartition(",")
+        if policy_separator:
+            return prefix, policy.strip(), f",{tail}"
+    return head, tail.strip(), ""
 
 
 def _rule_target(rule: Any) -> str:
-    if isinstance(rule, str): return rule.rsplit(",", 1)[-1].strip()
+    if isinstance(rule, str): return _rule_string_parts(rule)[1]
     if isinstance(rule, dict): return str(rule.get("target") or rule.get("policy") or rule.get("proxy") or "")
     return ""
 
 
 def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict[str, Any] | None, missing: list[str]) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
-    kernel = profile["target_kernel"]
     for item in nodes:
-        if not bool(item["supported_output"]): messages.append({"level": "error", "code": "UNSUPPORTED_NODE", "message": f"节点 {item['name']} 的协议无法安全输出。"})
-        elif not _compatible(item["protocol"], kernel): messages.append({"level": "error", "code": "KERNEL_INCOMPATIBLE", "message": f"节点 {item['name']}（{item['protocol']}）不兼容传统 Clash。"})
+        label = item["alias"] or item["name"]
+        if not _compatible(str(item["protocol"])):
+            messages.append({"level": "error", "code": "INCOMPATIBLE_OUTPUT", "message": f"节点 {label}（{item['protocol']}）不受 Clash Meta 支持。"})
     for identity in missing: messages.append({"level": "error", "code": "MISSING_SELECTION", "message": f"已选节点 {identity[:12]}… 已从节点池消失。"})
     if not rule_set: return messages
     groups = rule_set["groups"]; names = {str(group.get("name")) for group in groups if group.get("name")}
-    node_names = {node["name"] for node in nodes}
+    _, node_references, ambiguous_references = _node_output_material(nodes)
+    node_names = set(node_references) | set(ambiguous_references)
     graph: dict[str, set[str]] = {}
     for group in groups:
         name = str(group.get("name") or "")
         if not name: continue
-        refs = group.get("proxies") or group.get("use") or []
+        group_type = str(group.get("type") or "select")
+        if group_type not in COMPATIBLE_GROUP_TYPES:
+            messages.append({"level": "error", "code": "INCOMPATIBLE_GROUP", "message": f"策略组 {name} 使用了非兼容类型：{group_type}。"})
+        refs = group.get("proxies") or []
         if not isinstance(refs, list):
             messages.append({"level": "error", "code": "INVALID_GROUP", "message": f"策略组 {name} 的成员必须是列表。"}); continue
         graph[name] = {str(ref) for ref in refs if str(ref) in names}
         for ref in refs:
-            if str(ref) not in names and str(ref) not in node_names and str(ref) not in {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}:
+            if str(ref) in ambiguous_references and str(ref) not in names:
+                messages.append({"level": "error", "code": "AMBIGUOUS_NODE_REFERENCE", "message": f"策略组 {name} 引用了重名节点：{ref}，请改用唯一别名。"})
+            elif str(ref) not in names and str(ref) not in node_names and str(ref) not in {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}:
                 messages.append({"level": "error", "code": "MISSING_GROUP_REFERENCE", "message": f"策略组 {name} 引用了不存在的节点或子组：{ref}。"})
     visiting, visited = set(), set()
     def visit(name: str) -> None:
@@ -611,16 +1289,27 @@ def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set:
         visiting.remove(name); visited.add(name)
     for name in graph: visit(name)
     for rule in rule_set["rules"]:
+        if not isinstance(rule, str):
+            messages.append({"level": "error", "code": "INCOMPATIBLE_RULE", "message": "仅支持 Clash Meta 的字符串规则。"})
+            continue
+        rule_type = rule.split(",", 1)[0].strip().upper()
+        if rule_type not in CLASH_META_RULE_TYPES:
+            messages.append({"level": "error", "code": "INCOMPATIBLE_RULE", "message": f"规则类型 {rule_type or '空'} 不属于兼容范围。"})
         target = _rule_target(rule)
-        if target and target not in names and target not in {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}:
-            messages.append({"level": "error", "code": "MISSING_RULE_TARGET", "message": f"规则引用不存在的策略组：{target}。"})
+        if target in ambiguous_references and target not in names:
+            messages.append({"level": "error", "code": "AMBIGUOUS_NODE_REFERENCE", "message": f"规则引用了重名节点：{target}，请改用唯一别名。"})
+        elif target and target not in names and target not in node_names and target not in {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}:
+            messages.append({"level": "error", "code": "MISSING_RULE_TARGET", "message": f"规则引用不存在的策略组或节点：{target}。"})
     for index, rule in enumerate(rule_set["rules"]):
         value = rule if isinstance(rule, str) else str(rule.get("type") or "")
         if str(value).upper().startswith("MATCH") and index != len(rule_set["rules"]) - 1:
             messages.append({"level": "error", "code": "MATCH_POSITION", "message": "MATCH 终止规则必须位于规则列表末尾。"})
+    for provider_id in (rule_set.get("importMeta") or {}).get("missingProviderIds", []):
+        messages.append({"level": "error", "code": "MISSING_RULE_PROVIDER", "message": f"规则库引用的 Rule Provider 已不存在：{str(provider_id)[:12]}…。"})
     for name, provider in rule_set["providers"].items():
-        if not isinstance(provider, dict) or not provider.get("type") or not (provider.get("url") or provider.get("path")):
-            messages.append({"level": "error", "code": "INVALID_PROVIDER", "message": f"Rule Provider {name} 缺少 type、url 或 path。"})
+        valid_remote = isinstance(provider, dict) and provider.get("type") in {"http", "file"} and provider.get("behavior") in {"domain", "ipcidr", "classical"} and bool(provider.get("url") or provider.get("path"))
+        if not valid_remote:
+            messages.append({"level": "error", "code": "INCOMPATIBLE_PROVIDER", "message": f"Rule Provider {name} 不是兼容的 http/file Provider。"})
     return messages
 
 
@@ -633,23 +1322,89 @@ def validate_profile(profile_id: str, user: User) -> dict[str, Any]:
     return {"profileId": profile_id, "valid": not any(m["level"] == "error" for m in messages), "messages": messages, "selectedNodeCount": len(nodes), "missingSelections": missing}
 
 
-def _unique_proxies(nodes: list[sqlite3.Row]) -> list[dict[str, Any]]:
-    used: dict[str, int] = {}; output = []
+def _proxy_output(config: dict[str, Any], protocol: str) -> dict[str, Any]:
+    allowed = PROXY_COMMON_FIELDS | PROXY_FIELDS.get(protocol, set())
+    return {key: value for key, value in config.items() if key in allowed and value not in (None, "", [], {})}
+
+
+def _group_output(group: dict[str, Any]) -> dict[str, Any] | None:
+    group_type = str(group.get("type") or "select")
+    if group_type not in COMPATIBLE_GROUP_TYPES:
+        return None
+    value = {key: item for key, item in group.items() if key in GROUP_FIELDS and item not in (None, "")}
+    value["type"] = group_type
+    return value
+
+
+def _dns_output(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items() if key in DNS_FIELDS}
+
+
+def _node_output_material(nodes: list[sqlite3.Row]) -> tuple[list[dict[str, Any]], dict[str, str], set[str]]:
+    """Build unique proxy names and resolve source names/aliases to them."""
+    used: dict[str, int] = {}; output = []; candidates: dict[str, set[str]] = {}
     for row in nodes:
-        value = _loads(row["config_json"], {}); base = str(value.get("name") or row["name"]); count = used.get(base, 0); used[base] = count + 1
-        if count: value["name"] = f"{base} ({count + 1})"
+        protocol = str(row["protocol"] or "").lower()
+        if not _compatible(protocol):
+            continue
+        value = _proxy_output(_loads(row["config_json"], {}), protocol)
+        original = str(row["name"] or value.get("name") or "")
+        alias = str(row["alias"] or "")
+        base = alias or original
+        count = used.get(base, 0); used[base] = count + 1
+        output_name = f"{base} ({count + 1})" if count else base
+        value["name"] = output_name
         output.append(value)
-    return output
+        for reference in {original, alias} - {""}:
+            candidates.setdefault(reference, set()).add(output_name)
+    ambiguous = {reference for reference, values in candidates.items() if len(values) > 1}
+    references = {reference: next(iter(values)) for reference, values in candidates.items() if len(values) == 1}
+    return output, references, ambiguous
+
+
+def _rewrite_rule_target(rule: Any, references: dict[str, str], group_names: set[str]) -> Any:
+    if isinstance(rule, str):
+        head, target, suffix = _rule_string_parts(rule)
+        if target and target not in group_names and target in references:
+            return f"{head},{references[target]}{suffix}"
+        return rule
+    if isinstance(rule, dict):
+        value = dict(rule)
+        for key in ("target", "policy", "proxy"):
+            target = str(value.get(key) or "")
+            if target and target not in group_names and target in references:
+                value[key] = references[target]
+                break
+        return value
+    return rule
+
+
+def _rewrite_rule_material(rule_set: dict[str, Any], references: dict[str, str]) -> tuple[list[dict[str, Any]], list[Any]]:
+    groups = [value for group in rule_set["groups"] if (value := _group_output(dict(group))) is not None]
+    group_names = {str(group.get("name")) for group in groups if group.get("name")}
+    for group in groups:
+        proxies = group.get("proxies")
+        if isinstance(proxies, list):
+            group["proxies"] = [references.get(str(ref), str(ref)) if str(ref) not in group_names else ref for ref in proxies]
+    rules = [_rewrite_rule_target(rule, references, group_names) for rule in rule_set["rules"]]
+    return groups, rules
 
 
 def _build_config(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict[str, Any] | None) -> dict[str, Any]:
     settings = _loads(profile["settings_json"], {})
-    config: dict[str, Any] = {"mixed-port": int(settings.get("mixedPort", 7890)), "allow-lan": bool(settings.get("allowLan", False)), "mode": settings.get("mode", "rule"), "ipv6": bool(settings.get("ipv6", False)), "proxies": _unique_proxies(nodes)}
-    if settings.get("dns") is not None: config["dns"] = settings["dns"]
+    proxies, references, _ = _node_output_material(nodes)
+    config: dict[str, Any] = {"mixed-port": int(settings.get("mixedPort", 7890)), "allow-lan": bool(settings.get("allowLan", False)), "mode": settings.get("mode") if settings.get("mode") in {"rule", "global", "direct"} else "rule", "ipv6": bool(settings.get("ipv6", False)), "proxies": proxies}
+    dns = _dns_output(settings.get("dns"))
+    if dns: config["dns"] = dns
     if rule_set:
-        config["proxy-groups"] = rule_set["groups"]
-        config["rules"] = rule_set["rules"]
-        if rule_set["providers"]: config["rule-providers"] = rule_set["providers"]
+        groups, rules = _rewrite_rule_material(rule_set, references)
+        config["proxy-groups"] = groups
+        config["rules"] = [rule for rule in rules if isinstance(rule, str)]
+        providers = {key: output for key, provider in rule_set["providers"].items()
+                     if (output := _remote_provider_output(provider))}
+        if providers: config["rule-providers"] = providers
     return config
 
 

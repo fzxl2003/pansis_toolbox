@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import format_datetime
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
@@ -32,14 +32,12 @@ class SourcePatch(BaseModel):
 
 class ProfilePayload(BaseModel):
     name: str = "未命名聚合"
-    targetKernel: Literal["mihomo", "clash"] = "mihomo"
     settings: dict[str, Any] = {}
     ruleSetId: str | None = None
 
 
 class ProfilePatch(BaseModel):
     name: str | None = None
-    targetKernel: Literal["mihomo", "clash"] | None = None
     settings: dict[str, Any] | None = None
     ruleSetId: str | None = None
 
@@ -64,6 +62,31 @@ class RuleImportPayload(BaseModel):
 
 class ProbePayload(BaseModel):
     nodeIds: list[str] = Field(default_factory=list, max_length=1000)
+
+
+class NodeAliasPayload(BaseModel):
+    alias: str = Field(default="", max_length=120)
+
+
+class CustomNodePayload(BaseModel):
+    content: str = Field(min_length=1, max_length=100000)
+    alias: str | None = Field(default=None, max_length=120)
+
+
+class RuleProviderLibraryPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    providerKey: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=500)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuleProviderPackagePayload(BaseModel):
+    providerIds: list[str] = Field(default_factory=list, max_length=100)
+    target: str = Field(min_length=1, max_length=120)
+
+
+class RuleProviderCopyPayload(BaseModel):
+    mode: str = Field(default="original", pattern="^(original|manual)$")
 
 
 @router.get("/dashboard")
@@ -101,9 +124,35 @@ def get_nodes(request: Request, protocol: str = "", sourceId: str = "", search: 
     return {"nodes": service.list_nodes(require_user(request), {"protocol": protocol, "sourceId": sourceId, "search": search})}
 
 
+@router.post("/nodes")
+def post_custom_node(request: Request, payload: CustomNodePayload) -> dict[str, Any]:
+    return {"node": service.create_custom_node(payload.content, require_user(request), payload.alias or "")}
+
+
 @router.post("/nodes/probe")
 def probe_nodes(request: Request, payload: ProbePayload) -> dict[str, Any]:
     return {"results": service.probe_nodes(payload.nodeIds, require_user(request)), "notice": "TCP 可达不代表代理可用或真实延迟。"}
+
+
+@router.post("/nodes/{node_id}/copy")
+def copy_node(request: Request, node_id: str) -> dict[str, Any]:
+    return {"node": service.copy_subscription_node(node_id, require_user(request))}
+
+
+@router.put("/nodes/{node_id}")
+def put_custom_node(request: Request, node_id: str, payload: CustomNodePayload) -> dict[str, Any]:
+    return {"node": service.update_custom_node(node_id, payload.content, require_user(request), payload.alias)}
+
+
+@router.delete("/nodes/{node_id}")
+def remove_custom_node(request: Request, node_id: str) -> dict[str, bool]:
+    service.delete_custom_node(node_id, require_user(request))
+    return {"deleted": True}
+
+
+@router.put("/nodes/{node_id}/alias")
+def put_node_alias(request: Request, node_id: str, payload: NodeAliasPayload) -> dict[str, Any]:
+    return {"node": service.update_node_alias(node_id, payload.alias, require_user(request))}
 
 
 @router.get("/profiles")
@@ -149,6 +198,36 @@ def publish_profile(request: Request, profile_id: str) -> dict[str, Any]:
 @router.post("/profiles/{profile_id}/rotate-token")
 def rotate_token(request: Request, profile_id: str) -> dict[str, Any]:
     return service.rotate_profile_token(profile_id, require_user(request))
+
+
+@router.get("/rule-providers")
+def get_rule_providers(request: Request) -> dict[str, Any]:
+    return {"providers": service.list_rule_providers(require_user(request))}
+
+
+@router.post("/rule-providers")
+def post_rule_provider(request: Request, payload: RuleProviderLibraryPayload) -> dict[str, Any]:
+    return {"provider": service.save_rule_provider(payload.model_dump(), require_user(request))}
+
+
+@router.put("/rule-providers/{provider_id}")
+def put_rule_provider(request: Request, provider_id: str, payload: RuleProviderLibraryPayload) -> dict[str, Any]:
+    return {"provider": service.save_rule_provider(payload.model_dump(), require_user(request), provider_id)}
+
+
+@router.delete("/rule-providers/{provider_id}")
+def remove_rule_provider(request: Request, provider_id: str) -> dict[str, bool]:
+    service.delete_rule_provider(provider_id, require_user(request)); return {"deleted": True}
+
+
+@router.post("/rule-providers/{provider_id}/copy")
+def copy_rule_provider(request: Request, provider_id: str, payload: RuleProviderCopyPayload) -> dict[str, Any]:
+    return {"provider": service.copy_rule_provider(provider_id, payload.mode, require_user(request))}
+
+
+@router.post("/rule-providers/package")
+def package_rule_providers(request: Request, payload: RuleProviderPackagePayload) -> dict[str, Any]:
+    return service.package_rule_providers(payload.providerIds, payload.target, require_user(request))
 
 
 @router.get("/rule-sets")

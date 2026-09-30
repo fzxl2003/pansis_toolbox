@@ -1,7 +1,7 @@
 {
   "id": "clash_subscription_manager",
   "name": "Clash 订阅聚合器",
-  "description": "导入、去重和发布面向 Mihomo 或传统 Clash 的可撤销聚合订阅。",
+  "description": "导入、去重并发布 Clash Meta YAML 聚合订阅。",
   "version": "1.0.0",
   "enabled": true,
   "category": "network",

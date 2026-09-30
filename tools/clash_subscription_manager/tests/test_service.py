@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import yaml
@@ -47,17 +48,44 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     assert node
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         service._store_nodes(conn, source["id"], [node])
-    profile = service.create_profile({"name": "my sub"}, user)
+    provider = service.save_rule_provider({
+        "name": "示例域名",
+        "providerKey": "example-domains",
+        "config": {"type": "manual", "behavior": "domain", "payload": ["example.com"]},
+    }, user)
+    rule_set = service.save_rule_set({
+        "name": "basic rules",
+        "groups": [{"name": "PROXY", "type": "select", "proxies": [node["name"]]}],
+        "rules": ["MATCH,PROXY"],
+        "providers": {},
+        "importMeta": {"providerBindings": {"PROXY": [provider["id"]]}},
+    }, user)
+    profile = service.create_profile({"name": "my sub", "ruleSetId": rule_set["id"]}, user)
+    assert profile["ruleSetName"] == "basic rules"
     assert "targetKernel" not in profile
-    service.set_profile_selections(profile["id"], [node["stable_identity"]], user)
     published = service.publish_profile(profile["id"], user)
-    result = service.public_subscription(published["subscriptionToken"])
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        node_row = conn.execute("SELECT id FROM csm_nodes WHERE name=?", (node["name"],)).fetchone()
+        now = service._now()
+        conn.execute("INSERT INTO csm_probe_results(id,node_id,reachable,latency_ms,error,created_at) VALUES(?,?,1,123,?,?)",
+                     (service._id(), node_row["id"], "", now))
+        conn.execute("INSERT INTO csm_refresh_runs(id,source_id,status,started_at,finished_at,duration_ms,nodes_before,nodes_after,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (service._id(), source["id"], "success", now, now, 120, 1, 1, "", now))
+    assert service.list_profiles(user)[0]["ruleSetName"] == "basic rules"
+    result = service.public_subscription(
+        published["subscriptionToken"], client_ip="127.0.0.1", user_agent="pytest"
+    )
     assert result is not None
     assert "vless" in result[0]
     assert "reality-opts" in result[0]
-    rotated = service.rotate_profile_token(profile["id"], user)
-    assert service.public_subscription(published["subscriptionToken"]) is None
-    assert service.public_subscription(rotated["subscriptionToken"]) is not None
+    details = service.public_subscription_details(published["subscriptionToken"])
+    assert details is not None
+    assert details["ruleSetName"] == "basic rules"
+    assert details["proxies"][0]["latencyMs"] == 123
+    assert details["groups"][0]["providers"][0]["payload"] == ["example.com"]
+    assert details["requestRuns"][0]["clientIp"] == "127.0.0.1"
+    assert details["requestRuns"][0]["userAgent"] == "pytest"
+    assert "vless" in details["yaml"]
 
 
 def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
@@ -78,8 +106,13 @@ def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
     assert not node["supported_output"]
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         service._store_nodes(conn, source["id"], [node])
-    profile = service.create_profile({"name": "compatible"}, user)
-    service.set_profile_selections(profile["id"], [node["stable_identity"]], user)
+    rule_set = service.save_rule_set({
+        "name": "unsupported rules",
+        "groups": [{"name": "PROXY", "type": "select", "proxies": [node["name"]]}],
+        "rules": ["MATCH,PROXY"],
+        "providers": {},
+    }, user)
+    profile = service.create_profile({"name": "compatible", "ruleSetId": rule_set["id"]}, user)
     result = service.validate_profile(profile["id"], user)
     assert not result["valid"]
     assert any(message["code"] == "INCOMPATIBLE_OUTPUT" for message in result["messages"])
@@ -103,6 +136,52 @@ def test_download_retries_transient_dns_failure(monkeypatch) -> None:
     assert service._download("https://subscription.example/sub?token=secret") == b"proxies: []"
     assert attempts == 3
 
+
+
+def test_profile_output_is_rule_driven_and_keeps_only_current_snapshot(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="rule-driven-user", username="rule-driven", display_name="Rule Driven")
+    service.init_database(user.id)
+    source = service.create_source({"name": "source", "url": "https://example.invalid/sub"}, user)
+    nodes, unsupported = service.parse_subscription("""proxies:
+  - name: node-a
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+  - name: node-b
+    type: socks5
+    server: 127.0.0.1
+    port: 1081
+""")
+    assert unsupported == 0 and len(nodes) == 2
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        service._store_nodes(conn, source["id"], nodes)
+    rule_set = service.save_rule_set({
+        "name": "single node",
+        "groups": [{"name": "PROXY", "type": "select", "proxies": ["node-a"]}],
+        "rules": ["MATCH,PROXY"],
+        "providers": {},
+    }, user)
+    profile = service.create_profile({
+        "name": "rule driven",
+        "ruleSetId": rule_set["id"],
+        "settings": {"mode": "global"},
+    }, user)
+    published = service.publish_profile(profile["id"], user)
+    document = yaml.safe_load(service.public_subscription(published["subscriptionToken"])[0])
+    assert document["mode"] == "rule"
+    assert [item["name"] for item in document["proxies"]] == ["node-a"]
+    details = service.public_subscription_details(published["subscriptionToken"])
+    assert details is not None
+    assert details["mode"] == "rule"
+    assert [item["name"] for item in details["proxies"]] == ["node-a"]
+    service.publish_profile(profile["id"], user)
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM csm_published_snapshots WHERE profile_id=?", (profile["id"],)).fetchone()[0]
+    assert count == 1
 
 def test_download_error_redacts_subscription_query(monkeypatch) -> None:
     secret_url = "https://subscription.example/sub?token=must-not-leak"
@@ -157,7 +236,6 @@ def test_node_alias_and_original_name_resolve_in_rule_material(tmp_path, monkeyp
     }, user)
     assert "groupName" not in rule_set
     profile = service.create_profile({"name": "alias profile", "ruleSetId": rule_set["id"]}, user)
-    service.set_profile_selections(profile["id"], [node["stable_identity"]], user)
 
     validation = service.validate_profile(profile["id"], user)
     assert validation["valid"]
@@ -333,6 +411,57 @@ def test_rule_set_provider_bindings_are_resolved_live_without_snapshot(tmp_path,
     assert updated["importMeta"]["providerBindings"] == {"AI": []}
 
 
+def test_profile_rule_provider_output_mode_controls_inline_expansion(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="provider-output-mode-user", username="output-mode", display_name="Output Mode")
+
+    provider = service.save_rule_provider({
+        "name": "AI 平台",
+        "providerKey": "remote-test",
+        "config": {
+            "type": "http",
+            "behavior": "domain",
+            "interval": 86400,
+            "url": "https://example.invalid/ai.yaml",
+            "path": "./ruleset/remote-test.yaml",
+        },
+    }, user)
+    rule_set = service.save_rule_set({
+        "name": "输出模式规则",
+        "groups": [{"name": "AI", "type": "select", "proxies": ["DIRECT"]}],
+        "rules": ["MATCH,AI"],
+        "providers": {},
+        "importMeta": {"providerBindings": {"AI": [provider["id"]]}, "strategyGroupEditor": True},
+    }, user)
+    profile = service.create_profile({"name": "内联配置", "ruleSetId": rule_set["id"]}, user)
+    assert profile["settings"]["ruleProviderOutputMode"] == "inline"
+
+    downloads: list[str] = []
+    def fake_download(url: str) -> list[str]:
+        downloads.append(url)
+        return ["chat.example.com", "+.ai.example"]
+
+    monkeypatch.setattr(service, "_download_rule_provider_payload", fake_download)
+    inline_preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
+    assert downloads == ["https://example.invalid/ai.yaml"]
+    assert "rule-providers" not in inline_preview
+    assert "https://example.invalid/ai.yaml" not in inline_preview
+    assert inline_preview["rules"] == [
+        "DOMAIN,chat.example.com,AI",
+        "DOMAIN-SUFFIX,ai.example,AI",
+        "MATCH,AI",
+    ]
+
+    service.update_profile(profile["id"], {"settings": {"ruleProviderOutputMode": "url"}}, user)
+    url_preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
+    assert downloads == ["https://example.invalid/ai.yaml"]
+    assert url_preview["rule-providers"]["remote-test"]["url"] == "https://example.invalid/ai.yaml"
+    assert url_preview["rules"] == ["RULE-SET,remote-test,AI", "MATCH,AI"]
+
+
 def test_rule_import_moves_rule_providers_to_live_library(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)
@@ -424,3 +553,94 @@ password: local-pass
     assert cannot_delete_subscription.value.status_code == 409
     service.delete_custom_node(created["id"], user)
     assert all(node["id"] != created["id"] for node in service.list_nodes(user))
+
+
+def test_node_groups_crud_resolution_and_strategy_expansion(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="group-user", username="groups", display_name="Groups")
+    source = service.create_source({"name": "source", "url": "https://example.invalid/sub"}, user)
+    def _ss(fragment: str, port: int) -> dict:
+        uri = "ss://" + base64.urlsafe_b64encode(f"aes-128-gcm:pass{port}@example.org:{port}".encode()).decode().rstrip("=") + f"#{fragment}"
+        return service.parse_uri(uri)
+    node_a = _ss("🇭🇰 Hong Kong 01", 10001)
+    node_b = _ss("🇯🇵 Japan 01", 10002)
+    node_c = _ss("🇺🇸 US 01", 10003)
+    assert node_a and node_b and node_c
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        service._store_nodes(conn, source["id"], [node_a, node_b, node_c])
+
+    nodes = service.list_nodes(user)
+    ids_by_name = {node["name"]: node["id"] for node in nodes}
+
+    # Region group matches multiple countries, optionally scoped to explicit nodes.
+    region = service.save_node_group({"name": "亚洲节点", "kind": "region",
+                                      "config": {"countries": ["HK", "JP"], "nodeIds": []}}, user)
+    assert region["kind"] == "region"
+    assert set(region["members"]) == {"🇭🇰 Hong Kong 01", "🇯🇵 Japan 01"}
+    region_scoped = service.save_node_group({"name": "仅日本", "kind": "region",
+                                             "config": {"countries": ["HK", "JP"],
+                                                        "nodeIds": [ids_by_name["🇯🇵 Japan 01"]]}}, user)
+    assert region_scoped["members"] == ["🇯🇵 Japan 01"]
+
+    # Latency group picks the fastest reachable nodes, optionally scoped to explicit nodes.
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        for node, latency in ((node_a, 80), (node_b, 40), (node_c, 190)):
+            row = conn.execute("SELECT id FROM csm_nodes WHERE fingerprint=?", (node["fingerprint"],)).fetchone()
+            conn.execute("INSERT INTO csm_probe_results(id,node_id,reachable,latency_ms,error,created_at) VALUES(?,?,1,?,?,?)",
+                         (service._id(), row["id"], latency, "", service._now()))
+    latency = service.save_node_group({"name": "前2快", "kind": "latency",
+                                       "config": {"mode": "top", "count": 2, "nodeIds": []}}, user)
+    assert latency["members"] == ["🇯🇵 Japan 01", "🇭🇰 Hong Kong 01"]
+    latency_scoped = service.save_node_group({"name": "延迟阈值内", "kind": "latency",
+                                              "config": {"mode": "threshold", "thresholdMs": 100,
+                                                         "nodeIds": [ids_by_name["🇭🇰 Hong Kong 01"], ids_by_name["🇺🇸 US 01"]]}}, user)
+    assert latency_scoped["members"] == ["🇭🇰 Hong Kong 01"]
+
+    # Custom group keeps the exact picked nodes.
+    custom = service.save_node_group({"name": "自选", "kind": "custom",
+                                      "config": {"nodeIds": [ids_by_name["🇺🇸 US 01"]]}}, user)
+    assert custom["members"] == ["🇺🇸 US 01"]
+
+    # A strategy group referencing node groups is expanded into concrete proxies.
+    rule_set = service.save_rule_set({
+        "name": "grouped rules",
+        "groups": [{"name": "PROXY", "type": "select", "proxies": ["DIRECT"],
+                    "nodeGroups": [region["id"], latency["id"], custom["id"]]}],
+        "rules": ["MATCH,PROXY"],
+        "providers": {},
+    }, user)
+    profile = service.create_profile({"name": "grouped profile", "ruleSetId": rule_set["id"]}, user)
+    preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
+    proxies = set(preview["proxy-groups"][0]["proxies"])
+    assert proxies == {"DIRECT", "🇭🇰 Hong Kong 01", "🇯🇵 Japan 01", "🇺🇸 US 01"}
+
+def test_subscription_details_html_layout() -> None:
+    from tools.clash_subscription_manager.backend.router import _subscription_details_html
+
+    page = _subscription_details_html("token", {
+        "name": "visual sub", "ruleSetName": "basic rules", "publishedAt": "2026-01-01T00:00:00+00:00",
+        "contentHash": "hash", "mode": "rule", "yaml": "mode: rule",
+        "proxies": [{"name": "node", "type": "socks5", "server": "example.org", "port": 443,
+                     "latencyMs": 123, "reachable": True, "checkedAt": "2026-01-01T00:01:00+00:00"}],
+        "groups": [{"name": "PROXY", "type": "select", "proxies": ["node"],
+                    "providers": [{"name": "示例域名", "kind": "自定义", "behavior": "domain",
+                                   "ruleCount": 1, "payload": ["example.com"]}]}],
+        "requestRuns": [{"requestedAt": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+                         "clientIp": "127.0.0.1", "userAgent": "pytest", "statusCode": 200}],
+    })
+    assert "订阅拉取日志" in page
+    assert '<dialog class="modal"' in page
+    assert '<details ' not in page
+    assert '发布时间' not in page
+    assert '内容校验' not in page
+    assert '复制订阅链接' in page
+    assert 'speed-dot good' in page
+    assert '最近拉取' in page
+    assert '5 分钟前' in page
+    assert "123 ms" in page
+    assert "example.com" in page
+    assert "Rule Provider" not in page
+    assert "<h2>规则</h2>" not in page

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import html
 from email.utils import format_datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from backend.app.core.security import require_user
@@ -40,10 +41,6 @@ class ProfilePatch(BaseModel):
     name: str | None = None
     settings: dict[str, Any] | None = None
     ruleSetId: str | None = None
-
-
-class SelectionPayload(BaseModel):
-    stableIdentities: list[str] = Field(default_factory=list, max_length=5000)
 
 
 class RuleSetPayload(BaseModel):
@@ -87,6 +84,12 @@ class RuleProviderPackagePayload(BaseModel):
 
 class RuleProviderCopyPayload(BaseModel):
     mode: str = Field(default="original", pattern="^(original|manual)$")
+
+
+class NodeGroupPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    kind: str = Field(pattern="^(custom|region|latency)$")
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/dashboard")
@@ -154,6 +157,25 @@ def remove_custom_node(request: Request, node_id: str) -> dict[str, bool]:
 def put_node_alias(request: Request, node_id: str, payload: NodeAliasPayload) -> dict[str, Any]:
     return {"node": service.update_node_alias(node_id, payload.alias, require_user(request))}
 
+@router.get("/node-groups")
+def get_node_groups(request: Request) -> dict[str, Any]:
+    return {"groups": service.list_node_groups(require_user(request))}
+
+
+@router.post("/node-groups")
+def post_node_group(request: Request, payload: NodeGroupPayload) -> dict[str, Any]:
+    return {"group": service.save_node_group(payload.model_dump(), require_user(request))}
+
+
+@router.put("/node-groups/{group_id}")
+def put_node_group(request: Request, group_id: str, payload: NodeGroupPayload) -> dict[str, Any]:
+    return {"group": service.save_node_group(payload.model_dump(), require_user(request), group_id)}
+
+
+@router.delete("/node-groups/{group_id}")
+def remove_node_group(request: Request, group_id: str) -> dict[str, bool]:
+    service.delete_node_group(group_id, require_user(request)); return {"deleted": True}
+
 
 @router.get("/profiles")
 def get_profiles(request: Request) -> dict[str, Any]:
@@ -175,29 +197,14 @@ def remove_profile(request: Request, profile_id: str) -> dict[str, bool]:
     service.delete_profile(profile_id, require_user(request)); return {"deleted": True}
 
 
-@router.put("/profiles/{profile_id}/selections")
-def put_selections(request: Request, profile_id: str, payload: SelectionPayload) -> dict[str, Any]:
-    return service.set_profile_selections(profile_id, payload.stableIdentities, require_user(request))
-
-
 @router.post("/profiles/{profile_id}/validate")
 def validate_profile(request: Request, profile_id: str) -> dict[str, Any]:
     return service.validate_profile(profile_id, require_user(request))
 
 
-@router.post("/profiles/{profile_id}/preview")
-def preview_profile(request: Request, profile_id: str) -> dict[str, Any]:
-    return service.preview_profile(profile_id, require_user(request))
-
-
 @router.post("/profiles/{profile_id}/publish")
 def publish_profile(request: Request, profile_id: str) -> dict[str, Any]:
     return service.publish_profile(profile_id, require_user(request))
-
-
-@router.post("/profiles/{profile_id}/rotate-token")
-def rotate_token(request: Request, profile_id: str) -> dict[str, Any]:
-    return service.rotate_profile_token(profile_id, require_user(request))
 
 
 @router.get("/rule-providers")
@@ -260,10 +267,260 @@ def get_refresh_runs(request: Request, limit: int = 100) -> dict[str, Any]:
     return {"runs": service.refresh_runs(require_user(request), limit)}
 
 
+def _subscription_details_html(token: str, details: dict[str, Any]) -> str:
+    e = html.escape
+    proxies = details.get("proxies") or []
+    groups = details.get("groups") or []
+    runs = details.get("requestRuns") or []
+    max_speed_dots = 24
+
+    def latency_level(item: dict[str, Any]) -> str:
+        if not item.get("checkedAt"): return "unknown"
+        if item.get("reachable") is False: return "bad"
+        value = item.get("latencyMs")
+        if value is None: return "unknown"
+        return "good" if float(value) <= 200 else "warn" if float(value) <= 500 else "bad"
+
+    def latency(item: dict[str, Any]) -> str:
+        if not item.get("checkedAt"): return '<span class="latency muted">未探测</span>'
+        if item.get("reachable") is False: return '<span class="latency bad">不可达</span>'
+        value = item.get("latencyMs")
+        if value is None: return '<span class="latency warn">无延迟</span>'
+        return f'<span class="latency {latency_level(item)}">{float(value):.0f} ms</span>'
+
+    def speed_dot(item: dict[str, Any]) -> str:
+        value = item.get("latencyMs")
+        if not item.get("checkedAt"): label = "未探测"
+        elif item.get("reachable") is False: label = "不可达"
+        elif value is None: label = "无延迟"
+        else: label = f"{float(value):.0f} ms"
+        title = f"{item.get('name') or '节点'} · {label}"
+        return f'<i class="speed-dot {latency_level(item)}" title="{e(title)}"></i>'
+
+    no_payload = '<li class="muted">暂无内容</li>'
+    no_members = '<span class="muted">暂无成员</span>'
+    no_providers = '<p class="muted">该策略组未绑定规则内容。</p>'
+
+    def request_status(code: Any) -> str:
+        return '<span class="status ok">成功</span>' if int(code or 200) == 200 else f'<span class="status bad">{int(code or 0)}</span>'
+
+    def relative_time(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text: return "—"
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text
+        if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
+        seconds = int((datetime.now(timezone.utc) - parsed).total_seconds())
+        if seconds < 60: return "刚刚"
+        minutes = seconds // 60
+        if minutes < 60: return f"{minutes} 分钟前"
+        hours = minutes // 60
+        if hours < 24: return f"{hours} 小时前"
+        days = hours // 24
+        if days < 30: return f"{days} 天前"
+        months = days // 30
+        if months < 12: return f"{months} 个月前"
+        return f"{months // 12} 年前"
+
+    node_rows = "".join(
+        f'<tr><td class="node-name">{e(str(item.get("name") or ""))}</td>'
+        f'<td>{e(str(item.get("type") or ""))}</td>'
+        f'<td class="mono">{e(str(item.get("server") or ""))}</td>'
+        f'<td>{e(str(item.get("port") or ""))}</td>'
+        f'<td>{latency(item)}</td></tr>'
+        for item in proxies
+    )
+
+    speed_dots = "".join(speed_dot(item) for item in proxies[:max_speed_dots])
+    if len(proxies) > max_speed_dots:
+        speed_dots += f'<span class="speed-more" title="共 {len(proxies)} 个节点">+{len(proxies) - max_speed_dots}</span>'
+    if not speed_dots:
+        speed_dots = '<i class="speed-dot unknown" title="暂无节点"></i>'
+
+    group_cards: list[str] = []
+    group_modals: list[str] = []
+    for index, group in enumerate(groups):
+        members = [str(item) for item in group.get("proxies") or []]
+        member_chips = "".join(f'<span class="chip">{e(member)}</span>' for member in members[:80])
+        if len(members) > 80:
+            member_chips += f'<span class="chip">另有 {len(members) - 80} 个成员</span>'
+        provider_items: list[str] = []
+        for provider in group.get("providers") or []:
+            payload = [str(item) for item in provider.get("payload") or []]
+            payload_html = "".join(f"<li><code>{e(item)}</code></li>" for item in payload[:200])
+            provider_items.append(
+                f'<article class="provider-card"><header><strong>{e(str(provider.get("name") or ""))}</strong>'
+                f'<span>{e(str(provider.get("kind") or ""))} · {e(str(provider.get("behavior") or ""))} · {int(provider.get("ruleCount") or 0)} 条</span></header>'
+                f'<ul class="payload">{payload_html or no_payload}</ul></article>'
+            )
+        group_name = e(str(group.get("name") or ""))
+        group_meta = e(f'{group.get("type") or ""} · {len(members)} 个成员 · {len(group.get("providers") or [])} 组规则内容')
+        modal_id = f"group-modal-{index}"
+        group_cards.append(
+            f'<button type="button" class="group-card" onclick="document.getElementById(\'{modal_id}\').showModal()">'
+            f'<span class="group-name">{group_name}</span><span class="group-meta">{group_meta}</span></button>'
+        )
+        group_modals.append(
+            f'<dialog class="modal" id="{modal_id}" aria-label="策略组详情"><article class="modal-panel">'
+            f'<header class="modal-head"><div><strong>{group_name}</strong><span>{group_meta}</span></div>'
+            f'<button type="button" class="modal-close" onclick="this.closest(\'dialog\').close()">关闭</button></header>'
+            f'<div class="modal-body"><section><h3>成员</h3><div class="chips">{member_chips or no_members}</div></section>'
+            f'<section><h3>规则内容</h3><div class="providers">{"".join(provider_items) or no_providers}</div></section></div>'
+            f'</article></dialog>'
+        )
+
+    log_rows = "".join(
+        f'<tr><td>{e(str(item.get("requestedAt") or ""))}</td>'
+        f'<td class="mono">{e(str(item.get("clientIp") or "—"))}</td>'
+        f'<td class="user-agent">{e(str(item.get("userAgent") or "—"))}</td>'
+        f'<td>{request_status(item.get("statusCode"))}</td></tr>'
+        for item in runs
+    )
+    latest_request_raw = str(runs[0].get("requestedAt") or "") if runs else ""
+    latest_request = relative_time(latest_request_raw)
+
+    css = '''
+:root{color-scheme:light dark;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;--line:#e5e7eb;--muted:#64748b;--panel:#ffffff;--bg:#f5f7fb;--text:#111827}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}
+main{max-width:1180px;margin:0 auto;padding:34px 20px 70px}
+.hero{position:relative;overflow:hidden;border-radius:24px;padding:34px;color:#fff;background:linear-gradient(135deg,#172554,#2563eb 62%,#0ea5e9);box-shadow:0 20px 45px rgba(37,99,235,.18)}
+.hero:after{content:"";position:absolute;right:-70px;top:-90px;width:280px;height:280px;border-radius:999px;background:rgba(255,255,255,.12)}
+.hero-inner{position:relative;z-index:1;display:flex;justify-content:space-between;gap:24px;align-items:flex-start;flex-wrap:wrap}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.78}h1{margin:8px 0 12px;font-size:clamp(24px,4vw,35px);line-height:1.15}
+.meta{margin:0;font-size:13px;line-height:1.8;opacity:.86}.meta b{font-weight:650}
+.hero-actions{display:flex;flex-wrap:wrap;gap:10px}
+.button{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#1d4ed8;border-radius:12px;padding:12px 17px;text-decoration:none;font-weight:700;box-shadow:0 10px 22px rgba(15,23,42,.14)}
+button.button{border:0;cursor:pointer;font:inherit}.copy-feedback{display:block;min-height:18px;margin-top:6px;font-size:12px;font-weight:600;color:#fff;opacity:.9}.copy-feedback.copy-success{color:#bbf7d0}.copy-feedback.copy-error{color:#fecaca}button.copy-success{background:#dcfce7;color:#166534}button.copy-error{background:#fee2e2;color:#991b1b}
+h2{display:flex;align-items:center;gap:9px;margin:34px 0 13px;font-size:19px}.section-note{margin:0 0 12px;color:var(--muted);font-size:13px}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:34px 0 13px}.section-head h2{margin:0}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:18px}
+.summary-card{background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.2);border-radius:16px;padding:16px;backdrop-filter:blur(10px)}
+.summary-card b{display:block;font-size:22px;margin-bottom:6px}.summary-card span{font-size:12px;opacity:.82}
+.summary-time{font-size:15px;line-height:1.35;word-break:break-all}
+.speed-dots{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-height:12px;margin-bottom:6px}
+.speed-dot{display:inline-block;width:9px;height:9px;border-radius:999px;background:rgba(255,255,255,.42)}
+.speed-dot.good{background:#4ade80}.speed-dot.warn{background:#fbbf24}.speed-dot.bad{background:#f87171}.speed-dot.unknown{background:rgba(255,255,255,.42)}
+.speed-more{color:#fff;font-size:11px;font-weight:700;opacity:.82}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:0 2px 8px rgba(15,23,42,.04);overflow:hidden}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:720px}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px;white-space:nowrap}th{background:#f8fafc;color:var(--muted);font-size:12px;letter-spacing:.02em}tbody tr:last-child td{border-bottom:0}.node-name{max-width:320px;overflow:hidden;text-overflow:ellipsis}.mono,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.user-agent{max-width:380px;overflow:hidden;text-overflow:ellipsis}
+.latency,.status{display:inline-flex;align-items:center;min-width:68px;justify-content:center;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:650}.latency.good,.status.ok{background:#dcfce7;color:#166534}.latency.warn{background:#fef3c7;color:#92400e}.latency.bad,.status.bad{background:#fee2e2;color:#991b1b}.latency.muted,.status.running{background:#e2e8f0;color:#475569}
+.group-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}
+button.group-card{display:flex;flex-direction:column;gap:5px;width:100%;padding:16px 17px;border:1px solid var(--line);border-radius:18px;background:var(--panel);color:var(--text);text-align:left;font:inherit;cursor:pointer;box-shadow:0 2px 8px rgba(15,23,42,.04)}
+button.group-card:hover{border-color:#93c5fd;transform:translateY(-1px)}
+.group-name{font-size:15px;font-weight:700}.group-meta{color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:7px}.chip{max-width:100%;overflow:hidden;text-overflow:ellipsis;background:#eef2ff;color:#3730a3;border-radius:999px;padding:5px 10px;font-size:12px}
+.providers{display:grid;gap:10px}.provider-card{border:1px solid var(--line);border-radius:14px;padding:12px}.provider-card header{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.provider-card strong{font-size:13px}.provider-card header span{color:var(--muted);font-size:12px;white-space:nowrap}
+.payload{list-style:none;margin:10px 0 0;padding:0;max-height:210px;overflow:auto}.payload li{padding:7px 8px;border-top:1px solid var(--line);font-size:12px}.payload code{word-break:break-all}
+.modal{width:min(880px,calc(100vw - 32px));max-height:min(780px,calc(100vh - 40px));padding:0;border:0;border-radius:18px;background:var(--panel);color:var(--text);box-shadow:0 24px 70px rgba(15,23,42,.28)}
+.modal::backdrop{background:rgba(15,23,42,.56);backdrop-filter:blur(3px)}
+.modal-panel{display:flex;flex-direction:column;max-height:inherit}
+.modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px;border-bottom:1px solid var(--line)}
+.modal-head strong{display:block;font-size:17px}.modal-head span{display:block;margin-top:4px;color:var(--muted);font-size:12px}
+.modal-close{border:0;border-radius:9px;padding:8px 12px;background:#e2e8f0;color:#334155;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.modal-body{padding:18px 20px;overflow:auto}.modal-body h3{margin:0 0 10px;font-size:13px;color:var(--muted)}.modal-body section+section{margin-top:18px}
+pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;background:#0b1120;color:#e2e8f0;border-radius:0;font-size:12px;line-height:1.65}.muted,.error-text{color:var(--muted)}
+@media(max-width:720px){.hero{padding:25px}.summary-card b{font-size:19px}.summary-time{font-size:13px}.table-wrap{margin:0 -20px}.modal{width:calc(100vw - 20px)}.user-agent{max-width:220px}}
+@media(prefers-color-scheme:dark){:root{--line:#28324a;--muted:#94a3b8;--panel:#111827;--bg:#080d19;--text:#e6eaf3}th{background:#0f172a}.chip{background:#1e293b;color:#bfdbfe}.button{background:#e2e8f0}.latency.good,.status.ok{background:#14532d;color:#bbf7d0}.latency.warn{background:#78350f;color:#fde68a}.latency.bad,.status.bad{background:#7f1d1d;color:#fecaca}.latency.muted,.status.running{background:#1e293b;color:#cbd5e1}button.group-card,.provider-card{box-shadow:none}.modal-close{background:#1e293b;color:#e2e8f0}.provider-card{background:#0f172a}}
+'''
+    script = '''
+<script>
+(function(){
+  document.querySelectorAll("dialog.modal").forEach(function(dialog){
+    dialog.addEventListener("click", function(event){ if(event.target === dialog) dialog.close(); });
+  });
+  var button = document.querySelector("[data-copy-subscription]");
+  var feedback = document.querySelector("[data-copy-feedback]");
+  if(!button) return;
+  var originalText = button.textContent;
+  function setStatus(kind, message){
+    button.textContent = message;
+    button.classList.remove("copy-success", "copy-error");
+    if(kind) button.classList.add(kind);
+    if(feedback){
+      feedback.textContent = message;
+      feedback.className = "copy-feedback " + (kind || "");
+    }
+  }
+  function resetStatus(){
+    button.textContent = originalText;
+    button.classList.remove("copy-success", "copy-error");
+    if(feedback){
+      feedback.textContent = "";
+      feedback.className = "copy-feedback";
+    }
+  }
+  function fallbackCopy(text){
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    var copied = false;
+    try { copied = document.execCommand("copy"); } catch(error) { copied = false; }
+    area.remove();
+    return copied;
+  }
+  button.addEventListener("click", function(){
+    var link = document.querySelector("[data-subscription-link]");
+    if(!link){ setStatus("copy-error", "复制失败：未找到订阅链接"); return; }
+    var text = link.href;
+    setStatus("", "复制中…");
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){
+        setStatus("copy-success", "已复制");
+        setTimeout(resetStatus, 1800);
+      }).catch(function(){
+        if(fallbackCopy(text)){
+          setStatus("copy-success", "已复制");
+          setTimeout(resetStatus, 1800);
+        } else {
+          setStatus("copy-error", "复制失败，请手动复制");
+        }
+      });
+    } else if(fallbackCopy(text)){
+      setStatus("copy-success", "已复制");
+      setTimeout(resetStatus, 1800);
+    } else {
+      setStatus("copy-error", "复制失败，请手动复制");
+    }
+  });
+})();
+</script>
+'''
+    return f'''<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅详情 · {e(str(details.get("name") or ""))}</title><style>{css}</style></head>
+<body><main>
+<header class="hero"><div class="hero-inner"><div><p class="eyebrow">Clash Meta 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="hero-actions"><a class="button" data-subscription-link href="/sub/clash/{e(token)}">下载 Clash Meta YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div></div>
+<section class="summary"><div class="summary-card"><b>{e(str(details.get("mode") or "rule").upper())}</b><span>运行模式</span></div><div class="summary-card"><b>{len(proxies)}</b><div class="speed-dots">{speed_dots}</div><span>输出节点</span></div><div class="summary-card"><b>{len(groups)}</b><span>策略组</span></div><div class="summary-card"><b class="summary-time" title="{e(latest_request_raw or '暂无拉取记录')}">{e(latest_request)}</b><span>最近拉取</span></div></section></header>
+<h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>延迟</th></tr></thead><tbody>{node_rows or '<tr><td colspan="5" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
+<h2>策略组</h2><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
+<div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" onclick="document.getElementById('yaml-modal').showModal()">打开预览</button></div>
+<dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 Clash Meta 配置</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code>{e(str(details.get("yaml") or ""))}</code></pre></div></article></dialog>
+<h2>订阅拉取日志</h2><p class="section-note">记录聚合订阅链接的请求，不包含上游订阅源刷新记录。</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端 IP</th><th>User-Agent</th><th>状态</th></tr></thead><tbody>{log_rows or '<tr><td colspan="4" class="muted">暂无拉取日志</td></tr>'}</tbody></table></div></div>
+{''.join(group_modals)}
+</main>{script}</body></html>'''
+
 def mount_extra(app: FastAPI) -> None:
+    @app.get("/sub/clash/details/{token}", include_in_schema=False)
+    def public_clash_subscription_details(token: str) -> HTMLResponse:
+        details = service.public_subscription_details(token)
+        if details is None:
+            return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>订阅不存在</title><body><h1>订阅不存在或已失效</h1></body></html>", status_code=404)
+        return HTMLResponse(_subscription_details_html(token, details))
+
     @app.get("/sub/clash/{token}", include_in_schema=False)
-    def public_clash_subscription(token: str) -> Response:
-        value = service.public_subscription(token)
+    def public_clash_subscription(token: str, request: Request) -> Response:
+        value = service.public_subscription(
+            token,
+            client_ip=request.client.host if request.client else "",
+            user_agent=request.headers.get("user-agent", ""),
+        )
         if value is None: return Response(status_code=404)
         content, digest, created_at, name = value
         # YAML accepts a quoted filename token; keep response headers safe.

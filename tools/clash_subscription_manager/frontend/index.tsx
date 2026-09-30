@@ -10,6 +10,7 @@ import {
   Check,
   Clipboard,
   Eye,
+  ExternalLink,
   FileCode2,
   FolderOpen,
   Gauge,
@@ -17,13 +18,11 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  RotateCw,
   Search,
   Send,
   Server,
   ShieldAlert,
   Trash2,
-  Upload,
 } from "lucide-react";
 
 import {
@@ -44,7 +43,7 @@ import {
 } from "./components";
 
 const API = "/api/tools/clash-subscription-manager";
-type View = "dashboard" | "nodes" | "profiles" | "rules" | "providers";
+type View = "dashboard" | "nodes" | "profiles" | "rules";
 type ValidationMessage = { level: string; code?: string; message: string };
 type Source = {
   id: string;
@@ -73,6 +72,8 @@ type Node = {
   supportedOutput: boolean;
   isCustom: boolean;
   lastSeenAt: string;
+  country?: string | null;
+  countryLabel?: string | null;
   config: Record<string, unknown>;
   tcp?: {
     reachable: boolean;
@@ -87,13 +88,15 @@ type ProfileSettings = {
   mode?: string;
   ipv6?: boolean;
   dns?: unknown;
+  ruleProviderOutputMode?: "url" | "inline";
 };
 type Profile = {
   id: string;
   name: string;
   settings: ProfileSettings;
   ruleSetId?: string;
-  selectedStableIdentities?: string[];
+  ruleSetName?: string | null;
+  ruleSetUpdatedAt?: string | null;
   publishedAt?: string;
   publishedStatus: string;
   validation: ValidationMessage[];
@@ -123,8 +126,19 @@ type RuleGroupDraft = {
   type: string;
   proxies: string[];
   providerIds: string[];
+  nodeGroups: string[];
   extra: Record<string, unknown>;
   fallback?: boolean;
+};
+type NodeGroup = {
+  id: string;
+  name: string;
+  kind: "custom" | "region" | "latency";
+  config: Record<string, unknown>;
+  members: string[];
+  memberCount: number;
+  createdAt?: string;
+  updatedAt?: string;
 };
 type RefreshRun = {
   id: string;
@@ -145,15 +159,10 @@ type Dashboard = {
   profiles: Profile[];
   alerts: { kind?: string; message: string }[];
 };
-type PreviewState = {
-  profile: Profile;
-  yaml: string;
-  valid: boolean;
-  messages: ValidationMessage[];
-};
-
 export default function ClashSubscriptionManager() {
   const [view, setView] = useState<View>("dashboard");
+  const [rulesTab, setRulesTab] = useState<"rules" | "providers">("providers");
+  const [nodesTab, setNodesTab] = useState<"pool" | "groups">("pool");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -162,6 +171,7 @@ export default function ClashSubscriptionManager() {
   const [providerLibrary, setProviderLibrary] = useState<
     RuleProviderLibraryItem[]
   >([]);
+  const [nodeGroups, setNodeGroups] = useState<NodeGroup[]>([]);
   const [runs, setRuns] = useState<RefreshRun[]>([]);
   const [sourceModal, setSourceModal] = useState<Source | null | false>(false);
   const [profileModal, setProfileModal] = useState<Profile | null | false>(
@@ -177,12 +187,14 @@ export default function ClashSubscriptionManager() {
   const [providerCopy, setProviderCopy] = useState<RuleProviderLibraryItem | null>(
     null,
   );
+  const [nodeGroupModal, setNodeGroupModal] = useState<NodeGroup | null | false>(
+    false,
+  );
   const [addNodeOpen, setAddNodeOpen] = useState(false);
   const [customNodeModal, setCustomNodeModal] = useState<Node | null | false>(
     false,
   );
   const [aliasNode, setAliasNode] = useState<Node | null>(null);
-  const [preview, setPreview] = useState<PreviewState | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
@@ -199,6 +211,7 @@ export default function ClashSubscriptionManager() {
         profileData,
         ruleData,
         providerData,
+        nodeGroupData,
         runData,
       ] = await Promise.all([
         apiGet<Dashboard>(`${API}/dashboard`),
@@ -209,6 +222,7 @@ export default function ClashSubscriptionManager() {
         apiGet<{ providers: RuleProviderLibraryItem[] }>(
           `${API}/rule-providers`,
         ),
+        apiGet<{ groups: NodeGroup[] }>(`${API}/node-groups`),
         apiGet<{ runs: RefreshRun[] }>(`${API}/refresh-runs?limit=100`),
       ]);
       setDashboard(dashboardData);
@@ -217,6 +231,7 @@ export default function ClashSubscriptionManager() {
       setProfiles(profileData.profiles);
       setRuleSets(ruleData.ruleSets);
       setProviderLibrary(providerData.providers);
+      setNodeGroups(nodeGroupData.groups);
       setRuns(runData.runs);
       setError("");
     } catch (caught) {
@@ -318,15 +333,15 @@ export default function ClashSubscriptionManager() {
   }
   function removeRuleSet(ruleSet: RuleSet) {
     confirm({
-      title: "删除规则库",
+      title: "删除规则组",
       message: (
-        <>确认删除「{ruleSet.name}」？引用它的聚合配置需要重新选择规则库。</>
+        <>确认删除「{ruleSet.name}」？引用它的聚合配置需要重新选择规则组。</>
       ),
       onConfirm: async () => {
         await action(
           `rule-delete-${ruleSet.id}`,
           () => apiDelete(`${API}/rule-sets/${ruleSet.id}`),
-          "规则库已删除",
+          "规则组已删除",
         );
       },
     });
@@ -338,7 +353,7 @@ export default function ClashSubscriptionManager() {
       message: (
         <>
           确认删除「{provider.name}
-          」？如果仍被策略组使用，需要先在规则库中取消选择。
+          」？如果仍被策略组使用，需要先在规则组中取消选择。
         </>
       ),
       onConfirm: async () => {
@@ -361,21 +376,22 @@ export default function ClashSubscriptionManager() {
       "Rule Provider 已复制",
     );
   }
-  async function openPreview(profile: Profile) {
-    setPending(`preview-${profile.id}`);
-    setError("");
-    try {
-      const result = await apiPost<{
-        yaml: string;
-        valid: boolean;
-        messages: ValidationMessage[];
-      }>(`${API}/profiles/${profile.id}/preview`, {});
-      setPreview({ profile, ...result });
-    } catch (caught) {
-      setError(message(caught));
-    } finally {
-      setPending("");
-    }
+  function removeNodeGroup(group: NodeGroup) {
+    confirm({
+      title: "删除节点分组",
+      message: (
+        <>
+          确认删除节点分组「{group.name}」？引用它的策略组将失去该分组内的节点。
+        </>
+      ),
+      onConfirm: async () => {
+        await action(
+          `node-group-delete-${group.id}`,
+          () => apiDelete(`${API}/node-groups/${group.id}`),
+          "节点分组已删除",
+        );
+      },
+    });
   }
   async function copy(value: string, success: string) {
     try {
@@ -388,6 +404,10 @@ export default function ClashSubscriptionManager() {
   const subscriptionUrl = (profile: Profile) =>
     profile.subscriptionToken
       ? `${window.location.origin}/sub/clash/${profile.subscriptionToken}`
+      : "";
+  const subscriptionDetailUrl = (profile: Profile) =>
+    profile.subscriptionToken
+      ? `${window.location.origin}/sub/clash/details/${profile.subscriptionToken}`
       : "";
 
   return (
@@ -422,7 +442,14 @@ export default function ClashSubscriptionManager() {
           icon={<Activity size={14} />}
           onClick={() => setView("nodes")}
         >
-          节点池
+          节点
+        </Tab>
+        <Tab
+          active={view === "rules"}
+          icon={<FileCode2 size={14} />}
+          onClick={() => setView("rules")}
+        >
+          规则
         </Tab>
         <Tab
           active={view === "profiles"}
@@ -430,20 +457,6 @@ export default function ClashSubscriptionManager() {
           onClick={() => setView("profiles")}
         >
           聚合配置
-        </Tab>
-        <Tab
-          active={view === "rules"}
-          icon={<FileCode2 size={14} />}
-          onClick={() => setView("rules")}
-        >
-          规则库
-        </Tab>
-        <Tab
-          active={view === "providers"}
-          icon={<FolderOpen size={14} />}
-          onClick={() => setView("providers")}
-        >
-          Rule Provider
         </Tab>
       </nav>
       <div className="csm-body">
@@ -458,33 +471,65 @@ export default function ClashSubscriptionManager() {
           />
         )}
         {view === "nodes" && (
-          <NodesView
-            sources={sources}
-            nodes={nodes}
-            loading={loading}
-            pending={pending}
-            onAdd={() => setAddNodeOpen(true)}
-            onEditSource={setSourceModal}
-            onRemoveSource={removeSource}
-            onRefreshSource={(source) =>
-              void action(
-                `source-refresh-${source.id}`,
-                () => apiPost(`${API}/sources/${source.id}/refresh`, {}),
-                "订阅源刷新完成",
-              )
-            }
-            onEditCustom={setCustomNodeModal}
-            onRemoveCustom={removeCustomNode}
-            onCopy={(node) => void copySubscriptionNode(node)}
-            onAlias={setAliasNode}
-            onProbe={(ids) =>
-              void action(
-                "nodes-probe",
-                () => apiPost(`${API}/nodes/probe`, { nodeIds: ids }),
-                "TCP 探测完成",
-              )
-            }
-          />
+          <div className="csm-stack">
+            <nav className="csm-subnav" aria-label="节点二级菜单">
+              <button
+                type="button"
+                className={nodesTab === "pool" ? "active" : ""}
+                onClick={() => setNodesTab("pool")}
+              >
+                <Activity size={14} />
+                节点池
+              </button>
+              <button
+                type="button"
+                className={nodesTab === "groups" ? "active" : ""}
+                onClick={() => setNodesTab("groups")}
+              >
+                <FolderOpen size={14} />
+                节点分组
+              </button>
+            </nav>
+            {nodesTab === "pool" ? (
+              <NodesView
+                sources={sources}
+                nodes={nodes}
+                loading={loading}
+                pending={pending}
+                onAdd={() => setAddNodeOpen(true)}
+                onEditSource={setSourceModal}
+                onRemoveSource={removeSource}
+                onRefreshSource={(source) =>
+                  void action(
+                    `source-refresh-${source.id}`,
+                    () => apiPost(`${API}/sources/${source.id}/refresh`, {}),
+                    "订阅源刷新完成",
+                  )
+                }
+                onEditCustom={setCustomNodeModal}
+                onRemoveCustom={removeCustomNode}
+                onCopy={(node) => void copySubscriptionNode(node)}
+                onAlias={setAliasNode}
+                onProbe={(ids) =>
+                  void action(
+                    "nodes-probe",
+                    () => apiPost(`${API}/nodes/probe`, { nodeIds: ids }),
+                    "TCP 探测完成",
+                  )
+                }
+              />
+            ) : (
+              <NodeGroupsView
+                groups={nodeGroups}
+                nodes={nodes}
+                loading={loading}
+                pending={pending}
+                onAdd={() => setNodeGroupModal(null)}
+                onEdit={setNodeGroupModal}
+                onRemove={removeNodeGroup}
+              />
+            )}
+          </div>
         )}
         {view === "profiles" && (
           <ProfilesView
@@ -492,6 +537,7 @@ export default function ClashSubscriptionManager() {
             loading={loading}
             pending={pending}
             subscriptionUrl={subscriptionUrl}
+            subscriptionDetailUrl={subscriptionDetailUrl}
             onAdd={() => setProfileModal(null)}
             onEdit={setProfileModal}
             onRemove={removeProfile}
@@ -502,48 +548,52 @@ export default function ClashSubscriptionManager() {
                 "配置校验完成",
               )
             }
-            onPreview={(profile) => void openPreview(profile)}
             onCopy={(profile) =>
               void copy(subscriptionUrl(profile), "订阅链接已复制")
             }
-            onRotate={(profile) =>
-              confirm({
-                title: "轮换订阅令牌",
-                message: (
-                  <>轮换后「{profile.name}」的旧链接将立即失效，确认继续？</>
-                ),
-                onConfirm: async () => {
-                  await action(
-                    `rotate-${profile.id}`,
-                    () =>
-                      apiPost(`${API}/profiles/${profile.id}/rotate-token`, {}),
-                    "订阅令牌已轮换",
-                  );
-                },
-              })
-            }
-          />
-        )}
-        {view === "providers" && (
-          <RuleProvidersView
-            providers={providerLibrary}
-            loading={loading}
-            pending={pending}
-            onAdd={() => setProviderModal(null)}
-            onEdit={setProviderModal}
-            onCopy={copyRuleProvider}
-            onRemove={removeRuleProvider}
           />
         )}
         {view === "rules" && (
-          <RulesView
-            ruleSets={ruleSets}
-            loading={loading}
-            onImport={() => setRuleModal({ mode: "import" })}
-            onCreate={() => setRuleModal({ mode: "create" })}
-            onEdit={(ruleSet) => setRuleModal({ mode: "edit", ruleSet })}
-            onRemove={removeRuleSet}
-          />
+          <div className="csm-stack">
+            <nav className="csm-subnav" aria-label="规则二级菜单">
+              <button
+                type="button"
+                className={rulesTab === "providers" ? "active" : ""}
+                onClick={() => setRulesTab("providers")}
+              >
+                <FolderOpen size={14} />
+                规则源
+              </button>
+              <button
+                type="button"
+                className={rulesTab === "rules" ? "active" : ""}
+                onClick={() => setRulesTab("rules")}
+              >
+                <FileCode2 size={14} />
+                规则组
+              </button>
+            </nav>
+            {rulesTab === "rules" ? (
+              <RulesView
+                ruleSets={ruleSets}
+                loading={loading}
+                onImport={() => setRuleModal({ mode: "import" })}
+                onCreate={() => setRuleModal({ mode: "create" })}
+                onEdit={(ruleSet) => setRuleModal({ mode: "edit", ruleSet })}
+                onRemove={removeRuleSet}
+              />
+            ) : (
+              <RuleProvidersView
+                providers={providerLibrary}
+                loading={loading}
+                pending={pending}
+                onAdd={() => setProviderModal(null)}
+                onEdit={setProviderModal}
+                onCopy={copyRuleProvider}
+                onRemove={removeRuleProvider}
+              />
+            )}
+          </div>
         )}
       </div>
       {addNodeOpen && (
@@ -573,7 +623,6 @@ export default function ClashSubscriptionManager() {
       {profileModal !== false && (
         <ProfileModal
           profile={profileModal}
-          nodes={nodes}
           ruleSets={ruleSets}
           onClose={() => setProfileModal(false)}
           onSaved={async (text) => {
@@ -611,9 +660,22 @@ export default function ClashSubscriptionManager() {
           ruleSet={ruleModal.ruleSet}
           nodes={nodes}
           providerLibrary={providerLibrary}
+          nodeGroups={nodeGroups}
           onClose={() => setRuleModal(null)}
           onSaved={async (text) => {
             setRuleModal(null);
+            setNotice(text);
+            await loadAll();
+          }}
+        />
+      )}
+      {nodeGroupModal !== false && (
+        <NodeGroupModal
+          group={nodeGroupModal}
+          nodes={nodes}
+          onClose={() => setNodeGroupModal(false)}
+          onSaved={async (text) => {
+            setNodeGroupModal(false);
             setNotice(text);
             await loadAll();
           }}
@@ -639,24 +701,6 @@ export default function ClashSubscriptionManager() {
             setNotice(text);
             await loadAll();
           }}
-        />
-      )}
-      {preview && (
-        <PreviewModal
-          state={preview}
-          publishing={pending === `publish-${preview.profile.id}`}
-          onClose={() => setPreview(null)}
-          onCopy={() => void copy(preview.yaml, "YAML 已复制")}
-          onPublish={() =>
-            void action(
-              `publish-${preview.profile.id}`,
-              () =>
-                apiPost(`${API}/profiles/${preview.profile.id}/publish`, {}),
-              "配置已发布",
-            ).then((ok) => {
-              if (ok) setPreview(null);
-            })
-          }
         />
       )}
       {dialog}
@@ -691,6 +735,14 @@ function refreshRunStatus(run: RefreshRun) {
       : "进行中";
 }
 
+function runStatusColor(run: RefreshRun) {
+  return run.status === "success"
+    ? "green"
+    : run.status === "failed"
+      ? "red"
+      : "blue";
+}
+
 function RefreshRunLog({
   title,
   runs,
@@ -708,17 +760,7 @@ function RefreshRunLog({
       <div className="csm-dashboard-log-list">
         {runs.map((run) => (
           <div className="csm-dashboard-log-row" key={run.id}>
-            <Badge
-              color={
-                run.status === "success"
-                  ? "green"
-                  : run.status === "failed"
-                    ? "red"
-                    : "blue"
-              }
-            >
-              {refreshRunStatus(run)}
-            </Badge>
+            <Badge color={runStatusColor(run)}>{refreshRunStatus(run)}</Badge>
             <span>
               <strong>{run.sourceName}</strong>
               <small>
@@ -735,6 +777,113 @@ function RefreshRunLog({
   );
 }
 
+function DashboardDetailModal({
+  detail,
+  data,
+  runs,
+  onClose,
+}: {
+  detail: "protocol" | "alerts" | "sources";
+  data: Dashboard | null;
+  runs: RefreshRun[];
+  onClose: () => void;
+}) {
+  const orderedRuns = [...runs].sort(
+    (left, right) =>
+      (Date.parse(right.startedAt) || 0) - (Date.parse(left.startedAt) || 0),
+  );
+  const latestRunBySource = new Map<string, RefreshRun>();
+  for (const run of orderedRuns) {
+    if (!latestRunBySource.has(run.sourceId))
+      latestRunBySource.set(run.sourceId, run);
+  }
+  const title =
+    detail === "protocol"
+      ? "节点协议分布"
+      : detail === "alerts"
+        ? "告警中心"
+        : "订阅源健康";
+  return (
+    <Modal title={title} onClose={onClose} width={640}>
+      {detail === "protocol" && (
+        <>
+          {data?.protocolDistribution.length ? (
+            <div className="csm-bars">
+              {data.protocolDistribution.map((item) => (
+                <div key={item.name}>
+                  <code>{item.name}</code>
+                  <span>
+                    <i
+                      style={{
+                        width: `${Math.max(5, (item.value / Math.max(...data.protocolDistribution.map((entry) => entry.value))) * 100)}%`,
+                      }}
+                    />
+                  </span>
+                  <b>{item.value}</b>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="暂无节点数据" />
+          )}
+          <RefreshRunLog
+            title="节点更新日志"
+            runs={orderedRuns.filter((run) => run.status === "success")}
+          />
+        </>
+      )}
+      {detail === "alerts" && (
+        <>
+          {data?.alerts.length ? (
+            <div className="csm-alert-list">
+              {data.alerts.map((alert, index) => (
+                <div key={`${alert.message}-${index}`}>
+                  <AlertTriangle size={15} />
+                  <span>{alert.message}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState icon={<Check size={28} />} title="没有待处理告警" />
+          )}
+          <RefreshRunLog
+            title="失败刷新日志"
+            runs={orderedRuns.filter((run) => run.status === "failed")}
+          />
+        </>
+      )}
+      {detail === "sources" && (
+        <>
+          {data?.sources.length ? (
+            <div className="csm-source-health-list">
+              {data.sources.map((source) => {
+                const run = latestRunBySource.get(source.id);
+                return (
+                  <div className="csm-source-health-row" key={source.id}>
+                    <StatusDot status={source.status} />
+                    <span>
+                      <strong>{source.name}</strong>
+                      <small>
+                        {run
+                          ? `最近刷新：${refreshRunStatus(run)} · 节点 ${run.nodesBefore} → ${run.nodesAfter}${run.durationMs == null ? "" : ` · ${run.durationMs} ms`}`
+                          : "暂无刷新日志"}
+                      </small>
+                    </span>
+                    <time>{run ? stamp(run.startedAt) : "—"}</time>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <EmptyState title="暂无订阅源" />
+          )}
+          <RefreshRunLog title="全部刷新日志" runs={orderedRuns} />
+        </>
+      )}
+    </Modal>
+  );
+}
+
 function DashboardView({
   data,
   runs,
@@ -746,23 +895,11 @@ function DashboardView({
   loading: boolean;
   onNavigate: (view: View) => void;
 }) {
+  const [detail, setDetail] = useState<
+    "protocol" | "alerts" | "sources" | null
+  >(null);
   if (loading && !data) return <Loading text="加载运营总览…" />;
   const metrics = data?.metrics ?? {};
-  const orderedRuns = [...runs].sort(
-    (left, right) =>
-      (Date.parse(right.startedAt) || 0) - (Date.parse(left.startedAt) || 0),
-  );
-  const successfulRuns = orderedRuns
-    .filter((run) => run.status === "success")
-    .slice(0, 4);
-  const failedRuns = orderedRuns
-    .filter((run) => run.status === "failed")
-    .slice(0, 4);
-  const latestRunBySource = new Map<string, RefreshRun>();
-  for (const run of orderedRuns) {
-    if (!latestRunBySource.has(run.sourceId))
-      latestRunBySource.set(run.sourceId, run);
-  }
   const cards: Array<[string, number, string, View]> = [
     [
       "订阅源",
@@ -803,7 +940,20 @@ function DashboardView({
       </section>
       <section className="csm-grid-two">
         <div className="csm-panel">
-          <PanelTitle icon={<BarChart3 size={18} />} title="节点协议分布" />
+          <PanelTitle
+            icon={<BarChart3 size={18} />}
+            title="节点协议分布"
+            action={
+              <button
+                className="csm-link-button"
+                type="button"
+                onClick={() => setDetail("protocol")}
+              >
+                <Eye size={13} />
+                查看详情
+              </button>
+            }
+          />
           {data?.protocolDistribution.length ? (
             <div className="csm-bars">
               {data.protocolDistribution.map((item) => (
@@ -826,24 +976,31 @@ function DashboardView({
               hint="成功刷新订阅源后显示协议分布"
             />
           )}
-          <RefreshRunLog title="最近节点更新日志" runs={successfulRuns} />
         </div>
         <div className="csm-panel">
-          <PanelTitle icon={<ShieldAlert size={18} />} title="告警中心" />
-          {data?.alerts.length || failedRuns.length ? (
-            <>
-              {!!data?.alerts.length && (
-                <div className="csm-alert-list">
-                  {data.alerts.map((alert, index) => (
-                    <div key={`${alert.message}-${index}`}>
-                      <AlertTriangle size={15} />
-                      <span>{alert.message}</span>
-                    </div>
-                  ))}
+          <PanelTitle
+            icon={<ShieldAlert size={18} />}
+            title="告警中心"
+            action={
+              <button
+                className="csm-link-button"
+                type="button"
+                onClick={() => setDetail("alerts")}
+              >
+                <Eye size={13} />
+                查看详情
+              </button>
+            }
+          />
+          {data?.alerts.length ? (
+            <div className="csm-alert-list">
+              {data.alerts.map((alert, index) => (
+                <div key={`${alert.message}-${index}`}>
+                  <AlertTriangle size={15} />
+                  <span>{alert.message}</span>
                 </div>
-              )}
-              <RefreshRunLog title="失败刷新日志" runs={failedRuns} />
-            </>
+              ))}
+            </div>
           ) : (
             <EmptyState
               icon={<Check size={28} />}
@@ -855,26 +1012,29 @@ function DashboardView({
       </section>
       <section className="csm-grid-two">
         <div className="csm-panel">
-          <PanelTitle icon={<Server size={18} />} title="订阅源健康" />
+          <PanelTitle
+            icon={<Server size={18} />}
+            title="订阅源健康"
+            action={
+              <button
+                className="csm-link-button"
+                type="button"
+                onClick={() => setDetail("sources")}
+              >
+                <Eye size={13} />
+                查看详情
+              </button>
+            }
+          />
           {data?.sources.length ? (
-            <div className="csm-source-health-list">
-              {data.sources.map((source) => {
-                const run = latestRunBySource.get(source.id);
-                return (
-                  <div className="csm-source-health-row" key={source.id}>
-                    <StatusDot status={source.status} />
-                    <span>
-                      <strong>{source.name}</strong>
-                      <small>
-                        {run
-                          ? `最近刷新：${refreshRunStatus(run)} · 节点 ${run.nodesBefore} → ${run.nodesAfter}${run.durationMs == null ? "" : ` · ${run.durationMs} ms`}`
-                          : "暂无刷新日志"}
-                      </small>
-                    </span>
-                    <time>{run ? stamp(run.startedAt) : "—"}</time>
-                  </div>
-                );
-              })}
+            <div className="csm-summary-list">
+              {data.sources.map((source) => (
+                <div key={source.id}>
+                  <StatusDot status={source.status} />
+                  <strong>{source.name}</strong>
+                  <span>{source.lastError || stamp(source.lastSuccessAt)}</span>
+                </div>
+              ))}
             </div>
           ) : (
             <EmptyState title="暂无订阅源" />
@@ -897,6 +1057,14 @@ function DashboardView({
           )}
         </div>
       </section>
+      {detail && (
+        <DashboardDetailModal
+          detail={detail}
+          data={data}
+          runs={runs}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1305,7 +1473,8 @@ function NodesView({
         </div>
       )}
       <p className="csm-footnote">
-        同一节点属于多个订阅源时会显示在对应的每个分组中。别名用于最终输出；规则库同时接受节点原名和别名。探测结果会在节点名称下短暂显示，TCP
+        同一节点属于多个订阅源时会显示在对应的每个分组中。别名用于最终输出；规则组同时接受节点原名和别名。系统每 2
+        分钟自动探测全部节点，探测结果会在节点名称下短暂显示；TCP
         可达仅表示目标地址和端口能够建立连接。
       </p>
     </div>
@@ -1429,7 +1598,7 @@ function CustomNodeModal({
             placeholder="留空时使用配置中的 name"
           />
           <small className="csm-muted">
-            别名用于最终输出，规则库仍可使用配置原名。
+            别名用于最终输出，规则组仍可使用配置原名。
           </small>
         </Field>
         <Field label="节点配置">
@@ -1555,7 +1724,7 @@ function NodeAliasModal({
             placeholder="留空恢复使用订阅原名"
           />
           <small className="csm-muted">
-            别名不会被订阅刷新覆盖，规则库可同时使用订阅原名和别名。
+            别名不会被订阅刷新覆盖，规则组可同时使用订阅原名和别名。
           </small>
         </Field>
       </div>
@@ -1568,25 +1737,23 @@ function ProfilesView({
   loading,
   pending,
   subscriptionUrl,
+  subscriptionDetailUrl,
   onAdd,
   onEdit,
   onRemove,
   onValidate,
-  onPreview,
   onCopy,
-  onRotate,
 }: {
   profiles: Profile[];
   loading: boolean;
   pending: string;
   subscriptionUrl: (profile: Profile) => string;
+  subscriptionDetailUrl: (profile: Profile) => string;
   onAdd: () => void;
   onEdit: (profile: Profile) => void;
   onRemove: (profile: Profile) => void;
   onValidate: (profile: Profile) => void;
-  onPreview: (profile: Profile) => void;
   onCopy: (profile: Profile) => void;
-  onRotate: (profile: Profile) => void;
 }) {
   return (
     <div className="csm-panel">
@@ -1610,17 +1777,15 @@ function ProfilesView({
         <EmptyState
           icon={<Send size={32} />}
           title="暂无聚合配置"
-          hint="创建配置后选择节点、关联规则并校验发布"
+          hint="创建配置后关联规则组并发布"
         />
       ) : (
         <Table>
           <thead>
             <tr>
               <th>名称</th>
-              <th>输出格式</th>
-              <th>节点</th>
-              <th>规则库</th>
-              <th>发布状态</th>
+              <th>规则组</th>
+              <th>状态</th>
               <th>订阅链接</th>
               <th>操作</th>
             </tr>
@@ -1630,6 +1795,7 @@ function ProfilesView({
               const errors = profile.validation.filter(
                 (item) => item.level === "error",
               ).length;
+              const published = Boolean(profile.subscriptionToken && profile.publishedAt);
               return (
                 <tr key={profile.id}>
                   <td>
@@ -1640,27 +1806,35 @@ function ProfilesView({
                       </small>
                     )}
                   </td>
-                  <td>
-                    <Badge color="blue">Clash Meta YAML</Badge>
-                  </td>
-                  <td>{profile.selectedStableIdentities?.length ?? 0}</td>
-                  <td>{profile.ruleSetId ? "已关联" : "未关联"}</td>
+                  <td>{profile.ruleSetName || "未关联"}</td>
                   <td>
                     <PublishBadge profile={profile} />
                   </td>
                   <td>
-                    {profile.subscriptionToken ? (
-                      <button
-                        className="csm-link-button"
-                        type="button"
-                        title={subscriptionUrl(profile)}
-                        onClick={() => onCopy(profile)}
-                      >
-                        <Clipboard size={13} />
-                        复制链接
-                      </button>
+                    {published ? (
+                      <div className="csm-cell-links">
+                        <a
+                          className="csm-link-button"
+                          href={subscriptionDetailUrl(profile)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={subscriptionDetailUrl(profile)}
+                        >
+                          <ExternalLink size={13} />
+                          可视化详情
+                        </a>
+                        <button
+                          className="csm-link-button"
+                          type="button"
+                          title={subscriptionUrl(profile)}
+                          onClick={() => onCopy(profile)}
+                        >
+                          <Clipboard size={13} />
+                          YAML 订阅
+                        </button>
+                      </div>
                     ) : (
-                      "—"
+                      "发布后可用"
                     )}
                   </td>
                   <td>
@@ -1685,27 +1859,6 @@ function ProfilesView({
                         ) : (
                           <Check size={13} />
                         )}
-                      </button>
-                      <button
-                        className="csm-btn csm-btn-sm csm-btn-primary"
-                        type="button"
-                        disabled={pending === `preview-${profile.id}`}
-                        onClick={() => onPreview(profile)}
-                      >
-                        {pending === `preview-${profile.id}` ? (
-                          <Spin size={13} />
-                        ) : (
-                          <Eye size={13} />
-                        )}
-                        预览 / 发布
-                      </button>
-                      <button
-                        className="csm-btn csm-btn-sm csm-btn-ghost"
-                        type="button"
-                        title="轮换令牌"
-                        onClick={() => onRotate(profile)}
-                      >
-                        <RotateCw size={13} />
                       </button>
                       <button
                         className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
@@ -2213,6 +2366,481 @@ function RuleProviderModal({
   );
 }
 
+function nodeGroupKindText(kind: NodeGroup["kind"]): string {
+  return kind === "custom" ? "自定义分组" : kind === "region" ? "地域分组" : "延迟分组";
+}
+
+function nodeGroupKindBadge(kind: NodeGroup["kind"]) {
+  const color = kind === "custom" ? "green" : kind === "region" ? "blue" : "amber";
+  return <Badge color={color}>{nodeGroupKindText(kind)}</Badge>;
+}
+
+function nodeRef(node: Node): string {
+  return node.alias || node.name;
+}
+
+function nodeGroupSummary(group: NodeGroup, nodes: Node[]): string {
+  const config = group.config;
+  if (group.kind === "custom") {
+    return `已选 ${group.memberCount} 个节点`;
+  }
+  if (group.kind === "region") {
+    const countries = stringList(config.countries);
+    const labels = countries
+      .map((code) => {
+        const label = nodes.find((node) => node.country === code)?.countryLabel;
+        return label ?? code;
+      })
+      .filter(Boolean);
+    return `国家/地区：${labels.length ? labels.join("、") : countries.join("、")}`;
+  }
+  if (String(config.mode ?? "top") === "threshold") {
+    return `延迟 ≤ ${config.thresholdMs ?? 0} ms`;
+  }
+  return `延迟最低前 ${config.count ?? 5} 个`;
+}
+
+function NodeGroupsView({
+  groups,
+  nodes,
+  loading,
+  pending,
+  onAdd,
+  onEdit,
+  onRemove,
+}: {
+  groups: NodeGroup[];
+  nodes: Node[];
+  loading: boolean;
+  pending: string;
+  onAdd: () => void;
+  onEdit: (group: NodeGroup) => void;
+  onRemove: (group: NodeGroup) => void;
+}) {
+  return (
+    <div className="csm-panel">
+      <Toolbar
+        title="节点分组"
+        icon={<FolderOpen size={18} />}
+        actions={
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            onClick={onAdd}
+          >
+            <Plus size={14} />
+            新增分组
+          </button>
+        }
+      />
+      <Alert type="info">
+        节点分组用于在策略组中批量选择节点：支持手动勾选的自定义分组、按国家/地区匹配的地域分组，以及按
+        TCP 延迟排序的前 N 个或阈值以内节点的延迟分组。
+      </Alert>
+      {loading ? (
+        <Loading text="加载节点分组…" />
+      ) : !groups.length ? (
+        <EmptyState
+          icon={<FolderOpen size={32} />}
+          title="暂无节点分组"
+          hint="新增分组后，可在编辑规则组的策略组中直接选择"
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>匹配条件</th>
+              <th>成员</th>
+              <th>更新时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((group) => (
+              <tr key={group.id}>
+                <td>
+                  <strong>{group.name}</strong>
+                </td>
+                <td>{nodeGroupKindBadge(group.kind)}</td>
+                <td>
+                  <span className="csm-cell-note">
+                    {nodeGroupSummary(group, nodes)}
+                  </span>
+                </td>
+                <td>
+                  <Badge color="blue">{group.memberCount} 个节点</Badge>
+                </td>
+                <td>{stamp(group.updatedAt)}</td>
+                <td>
+                  <Actions>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-ghost"
+                      type="button"
+                      title="编辑"
+                      onClick={() => onEdit(group)}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
+                      type="button"
+                      title="删除"
+                      disabled={pending === `node-group-delete-${group.id}`}
+                      onClick={() => onRemove(group)}
+                    >
+                      {pending === `node-group-delete-${group.id}` ? (
+                        <Spin size={13} />
+                      ) : (
+                        <Trash2 size={13} />
+                      )}
+                    </button>
+                  </Actions>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+      <p className="csm-footnote">
+        地域与延迟分组为动态规则：策略组在发布时会按当前节点池实时解析成员；自定义分组则固定保存所选节点。系统每 2
+        分钟自动进行一次全局 TCP 探测，延迟分组会随最新结果更新。
+      </p>
+    </div>
+  );
+}
+
+function NodeGroupModal({
+  group,
+  nodes,
+  onClose,
+  onSaved,
+}: {
+  group: NodeGroup | null;
+  nodes: Node[];
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const config = group?.config ?? {};
+  const [name, setName] = useState(group?.name ?? "节点分组");
+  const [kind, setKind] = useState<NodeGroup["kind"]>(group?.kind ?? "custom");
+  const [nodeIds, setNodeIds] = useState<string[]>(
+    stringList(config.nodeIds),
+  );
+  const [nodeSearch, setNodeSearch] = useState("");
+  const [countries, setCountries] = useState<string[]>(
+    stringList(config.countries),
+  );
+  const [latencyMode, setLatencyMode] = useState<"top" | "threshold">(
+    String(config.mode ?? "top") === "threshold" ? "threshold" : "top",
+  );
+  const [latencyCount, setLatencyCount] = useState<number>(
+    Number(config.count ?? 5),
+  );
+  const [latencyThreshold, setLatencyThreshold] = useState<number>(
+    Number(config.thresholdMs ?? 200),
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const visibleNodes = useMemo(() => {
+    const keyword = nodeSearch.trim().toLowerCase();
+    return nodes.filter(
+      (node) =>
+        !keyword ||
+        `${node.name} ${node.alias} ${node.displayName} ${node.protocol} ${node.server}`
+          .toLowerCase()
+          .includes(keyword),
+    );
+  }, [nodes, nodeSearch]);
+
+  const countryOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const node of nodes) {
+      if (node.country && !seen.has(node.country)) {
+        seen.set(node.country, node.countryLabel || node.country);
+      }
+    }
+    return Array.from(seen.entries()).map(([code, label]) => ({
+      code,
+      label,
+    }));
+  }, [nodes]);
+
+  const previewMembers = useMemo(() => {
+    const refOf = (node: Node) => node.alias || node.name;
+    const scoped = nodeIds.length
+      ? nodes.filter((node) => nodeIds.includes(node.id))
+      : nodes;
+    if (kind === "custom") {
+      return scoped.map(refOf);
+    }
+    if (kind === "region") {
+      return scoped
+        .filter((node) => node.country && countries.includes(node.country))
+        .map(refOf);
+    }
+    const withLatency = scoped
+      .filter((node) => node.tcp?.reachable && node.tcp.latencyMs != null)
+      .sort((a, b) => (a.tcp?.latencyMs ?? 0) - (b.tcp?.latencyMs ?? 0));
+    if (latencyMode === "threshold") {
+      return withLatency
+        .filter((node) => (node.tcp?.latencyMs ?? 0) <= latencyThreshold)
+        .map(refOf);
+    }
+    return withLatency.slice(0, latencyCount).map(refOf);
+  }, [kind, nodeIds, nodes, countries, latencyMode, latencyCount, latencyThreshold]);
+
+  function buildConfig(): Record<string, unknown> {
+    if (kind === "custom") return { nodeIds };
+    if (kind === "region") {
+      return { countries, nodeIds };
+    }
+    return {
+      mode: latencyMode,
+      count: Math.max(1, latencyCount || 5),
+      thresholdMs: Math.max(0, latencyThreshold || 0),
+      nodeIds,
+    };
+  }
+
+  async function save() {
+    if (!name.trim()) {
+      setError("请输入分组名称。");
+      return;
+    }
+    if (kind === "custom" && !nodeIds.length) {
+      setError("请至少选择一个节点。");
+      return;
+    }
+    if (kind === "region" && !countries.length) {
+      setError("请至少选择一个国家或地区。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const payload = { name: name.trim(), kind, config: buildConfig() };
+      if (group) await apiPut(`${API}/node-groups/${group.id}`, payload);
+      else await apiPost(`${API}/node-groups`, payload);
+      await onSaved(group ? "节点分组已更新" : "节点分组已创建");
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={group ? `编辑节点分组：${group.name}` : "新增节点分组"}
+      width={760}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <>
+                <Spin size={14} />
+                保存中
+              </>
+            ) : (
+              "保存分组"
+            )}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid csm-strategy-editor">
+        {error && (
+          <div className="csm-full-col">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+        <Field label="分组名称">
+          <input
+            className="csm-input"
+            value={name}
+            maxLength={120}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="例如：香港日本节点"
+          />
+        </Field>
+        <Field label="分组类型">
+          <div className="csm-provider-source-switch" role="group" aria-label="分组类型">
+            <button
+              className={`csm-btn csm-btn-sm ${kind === "custom" ? "csm-btn-primary" : "csm-btn-secondary"}`}
+              type="button"
+              onClick={() => setKind("custom")}
+            >
+              自定义
+            </button>
+            <button
+              className={`csm-btn csm-btn-sm ${kind === "region" ? "csm-btn-primary" : "csm-btn-secondary"}`}
+              type="button"
+              onClick={() => setKind("region")}
+            >
+              地域
+            </button>
+            <button
+              className={`csm-btn csm-btn-sm ${kind === "latency" ? "csm-btn-primary" : "csm-btn-secondary"}`}
+              type="button"
+              onClick={() => setKind("latency")}
+            >
+              延迟
+            </button>
+          </div>
+        </Field>
+        <Field
+          label={
+            kind === "custom"
+              ? `选择节点（已选 ${nodeIds.length}）`
+              : `选择节点（已选 ${nodeIds.length}，默认全部）`
+          }
+          full
+        >
+            <div className="csm-strategy-picker">
+              <label className="csm-search">
+                <Search size={15} />
+                <input
+                  value={nodeSearch}
+                  onChange={(event) => setNodeSearch(event.target.value)}
+                  placeholder="按节点名称、别名、协议或地址搜索"
+                />
+              </label>
+              <div className="csm-strategy-node-list">
+                {visibleNodes.map((node) => (
+                  <label key={node.id}>
+                    <input
+                      type="checkbox"
+                      checked={nodeIds.includes(node.id)}
+                      onChange={(event) =>
+                        setNodeIds((current) =>
+                          event.target.checked
+                            ? [...new Set([...current, node.id])]
+                            : current.filter((id) => id !== node.id),
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{node.displayName || node.name}</strong>
+                      {node.alias && <small>原名：{node.name}</small>}
+                      <small>
+                        {node.protocol} · {node.server}:{node.port ?? "—"}
+                        {node.country ? ` · ${node.countryLabel ?? node.country}` : ""}
+                      </small>
+                    </span>
+                  </label>
+                ))}
+                {!visibleNodes.length && (
+                  <div className="csm-inline-empty">没有符合条件的节点</div>
+                )}
+              </div>
+            </div>
+          </Field>
+        {kind === "region" && (
+          <Field label={`国家 / 地区（多选，已选 ${countries.length}）`} full>
+              <div className="csm-check-grid">
+                {countryOptions.map((option) => (
+                  <label className="csm-check" key={option.code}>
+                    <input
+                      type="checkbox"
+                      checked={countries.includes(option.code)}
+                      onChange={(event) =>
+                        setCountries((current) =>
+                          event.target.checked
+                            ? [...new Set([...current, option.code])]
+                            : current.filter((code) => code !== option.code),
+                        )
+                      }
+                    />
+                    {option.label}
+                  </label>
+                ))}
+                {!countryOptions.length && (
+                  <span className="csm-muted">暂无可识别的国家/地区。</span>
+                )}
+              </div>
+          </Field>
+        )}
+        {kind === "latency" && (
+          <>
+            <Field label="延迟模式">
+              <select
+                className="csm-select"
+                value={latencyMode}
+                onChange={(event) =>
+                  setLatencyMode(event.target.value as "top" | "threshold")
+                }
+              >
+                <option value="top">延迟最低的前 N 个节点</option>
+                <option value="threshold">延迟阈值以内的节点</option>
+              </select>
+            </Field>
+            {latencyMode === "top" ? (
+              <Field label="节点数量">
+                <input
+                  className="csm-input"
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={latencyCount}
+                  onChange={(event) => setLatencyCount(Number(event.target.value))}
+                />
+              </Field>
+            ) : (
+              <Field label="延迟阈值（毫秒）">
+                <input
+                  className="csm-input"
+                  type="number"
+                  min={0}
+                  max={100000}
+                  value={latencyThreshold}
+                  onChange={(event) =>
+                    setLatencyThreshold(Number(event.target.value))
+                  }
+                />
+              </Field>
+            )}
+            <Field label="说明" full>
+              <small className="csm-muted">
+                系统每 2 分钟自动探测一次全部节点，也支持手动探测。延迟仅表示 TCP 端口连通速度，不等同于代理真实延迟。没有可达探测记录的节点不会进入分组。
+              </small>
+            </Field>
+          </>
+        )}
+        <Field label={`成员预览（${previewMembers.length} 个）`} full>
+          <div className="csm-node-group-members">
+            {previewMembers.slice(0, 12).map((member) => (
+              <code key={member}>{member}</code>
+            ))}
+            {previewMembers.length > 12 && (
+              <small>等 {previewMembers.length} 个</small>
+            )}
+            {!previewMembers.length && (
+              <span className="csm-muted">当前条件下没有匹配到节点。</span>
+            )}
+          </div>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
 function RulesView({
   ruleSets,
   loading,
@@ -2231,7 +2859,7 @@ function RulesView({
   return (
     <div className="csm-panel">
       <Toolbar
-        title="规则库"
+        title="规则组"
         icon={<FileCode2 size={18} />}
         actions={
           <>
@@ -2255,11 +2883,11 @@ function RulesView({
         }
       />
       {loading ? (
-        <Loading text="加载规则库…" />
+        <Loading text="加载规则组…" />
       ) : !ruleSets.length ? (
         <EmptyState
           icon={<FileCode2 size={32} />}
-          title="暂无规则库"
+          title="暂无规则组"
           hint="可以使用默认模板手动新增，或只从订阅导入规则"
         />
       ) : (
@@ -2457,45 +3085,35 @@ function SourceModal({
 
 function ProfileModal({
   profile,
-  nodes,
   ruleSets,
   onClose,
   onSaved,
 }: {
   profile: Profile | null;
-  nodes: Node[];
   ruleSets: RuleSet[];
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
   const [name, setName] = useState(profile?.name ?? "");
   const [ruleSetId, setRuleSetId] = useState(profile?.ruleSetId ?? "");
-  const [selected, setSelected] = useState(
-    profile?.selectedStableIdentities ?? [],
-  );
   const [settings, setSettings] = useState<ProfileSettings>({
     mixedPort: 7890,
     allowLan: false,
     mode: "rule",
     ipv6: false,
+    ruleProviderOutputMode: "inline",
     ...(profile?.settings ?? {}),
   });
-  const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const visibleNodes = useMemo(
-    () =>
-      nodes.filter((node) =>
-        `${node.name} ${node.alias} ${node.displayName} ${node.protocol} ${node.server}`
-          .toLowerCase()
-          .includes(search.trim().toLowerCase()),
-      ),
-    [nodes, search],
-  );
-  const compatible = (node: Node) => node.supportedOutput;
+
   async function save() {
     if (!name.trim()) {
       setError("请输入配置名称。");
+      return;
+    }
+    if (!ruleSetId) {
+      setError("请选择规则组；输出节点将由规则组决定。");
       return;
     }
     setSaving(true);
@@ -2503,8 +3121,11 @@ function ProfileModal({
     try {
       const payload = {
         name: name.trim(),
-        settings,
-        ruleSetId: ruleSetId || null,
+        settings: {
+          ...settings,
+          mode: "rule",
+        },
+        ruleSetId,
       };
       const saved = profile
         ? (
@@ -2515,20 +3136,19 @@ function ProfileModal({
           ).profile
         : (await apiPost<{ profile: Profile }>(`${API}/profiles`, payload))
             .profile;
-      await apiPut(`${API}/profiles/${saved.id}/selections`, {
-        stableIdentities: selected,
-      });
-      await onSaved(profile ? "聚合配置已更新" : "聚合配置已创建");
+      await apiPost(`${API}/profiles/${saved.id}/publish`, {});
+      await onSaved(profile ? "聚合配置已更新并发布" : "聚合配置已创建并发布");
     } catch (caught) {
       setError(message(caught));
     } finally {
       setSaving(false);
     }
   }
+
   return (
     <Modal
       title={profile ? "编辑聚合配置" : "新建聚合配置"}
-      width={900}
+      width={640}
       onClose={() => !saving && onClose()}
       foot={
         <>
@@ -2552,7 +3172,7 @@ function ProfileModal({
                 保存中
               </>
             ) : (
-              "保存配置"
+              "保存并发布"
             )}
           </button>
         </>
@@ -2571,34 +3191,18 @@ function ProfileModal({
             onChange={(event) => setName(event.target.value)}
           />
         </Field>
-        <Field label="输出格式">
-          <input className="csm-input" value="Clash Meta YAML" disabled />
-        </Field>
-        <Field label="规则库">
+        <Field label="规则组">
           <select
             className="csm-select"
             value={ruleSetId}
             onChange={(event) => setRuleSetId(event.target.value)}
           >
-            <option value="">不使用规则库</option>
+            <option value="">请选择规则组</option>
             {ruleSets.map((rule) => (
               <option value={rule.id} key={rule.id}>
                 {rule.name}
               </option>
             ))}
-          </select>
-        </Field>
-        <Field label="运行模式">
-          <select
-            className="csm-select"
-            value={settings.mode ?? "rule"}
-            onChange={(event) =>
-              setSettings({ ...settings, mode: event.target.value })
-            }
-          >
-            <option value="rule">Rule</option>
-            <option value="global">Global</option>
-            <option value="direct">Direct</option>
           </select>
         </Field>
         <Field label="Mixed Port">
@@ -2615,6 +3219,26 @@ function ProfileModal({
               })
             }
           />
+        </Field>
+        <Field label="Rule Provider 输出">
+          <select
+            className="csm-select"
+            value={settings.ruleProviderOutputMode ?? "inline"}
+            onChange={(event) =>
+              setSettings({
+                ...settings,
+                ruleProviderOutputMode:
+                  event.target.value === "url" ? "url" : "inline",
+              })
+            }
+          >
+            <option value="inline">URL 拉取后优先</option>
+            <option value="url">URL 优先</option>
+          </select>
+          <small className="csm-muted">
+            URL 拉取后优先会在服务端下载规则并直接写入最终 YAML；URL
+            优先则由客户端按 rule-providers 中的 URL 拉取。
+          </small>
         </Field>
         <Field label="网络选项">
           <div className="csm-inline-checks">
@@ -2640,54 +3264,11 @@ function ProfileModal({
             </label>
           </div>
         </Field>
-        <Field label={`选择节点（已选 ${selected.length}）`} full>
-          <div className="csm-node-picker">
-            <label className="csm-search">
-              <Search size={15} />
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="按节点原名或别名搜索"
-              />
-            </label>
-            <div className="csm-node-options">
-              {visibleNodes.map((node) => {
-                const disabled = !compatible(node);
-                return (
-                  <label key={node.id} className={disabled ? "disabled" : ""}>
-                    <input
-                      type="checkbox"
-                      disabled={
-                        disabled && !selected.includes(node.stableIdentity)
-                      }
-                      checked={selected.includes(node.stableIdentity)}
-                      onChange={(event) =>
-                        setSelected(
-                          event.target.checked
-                            ? [...selected, node.stableIdentity]
-                            : selected.filter(
-                                (identity) => identity !== node.stableIdentity,
-                              ),
-                        )
-                      }
-                    />
-                    <span>
-                      <strong>{node.displayName || node.name}</strong>
-                      {node.alias && <small>原名：{node.name}</small>}
-                      <small>
-                        {node.protocol} · {node.server}:{node.port ?? "—"}
-                        {disabled ? " · Clash Meta 不支持" : ""}
-                      </small>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
+        <div className="csm-full-col">
           <small className="csm-muted">
-            新出现的节点不会自动加入；已选节点消失时发布校验会给出告警。
+            输出固定为 Clash Meta YAML，运行模式固定为 Rule；节点与策略组完全由所选规则组决定。
           </small>
-        </Field>
+        </div>
       </div>
     </Modal>
   );
@@ -2741,13 +3322,14 @@ function initialRuleGroups(
       ];
   }
   const drafts = rawGroups.map((rawGroup, index) => {
-    const { name, type, proxies, ...extra } = rawGroup;
+    const { name, type, proxies, nodeGroups: rawNodeGroups, ...extra } = rawGroup;
     const groupName = String(name ?? `PROXY-${index + 1}`);
     return {
       id: `strategy-${index}-${groupName}`,
       name: groupName,
       type: String(type ?? "select"),
       proxies: stringList(proxies),
+      nodeGroups: stringList(rawNodeGroups),
       providerIds: [
         ...new Set(bindings[groupName] ?? bindingsFromRules[groupName] ?? []),
       ],
@@ -2785,6 +3367,7 @@ function initialRuleGroups(
       name: fallbackName,
       type: source?.type ?? "select",
       proxies: source?.proxies.length ? [...source.proxies] : ["DIRECT"],
+      nodeGroups: [],
       providerIds: [],
       extra: { ...(source?.extra ?? {}) },
       fallback: true,
@@ -2797,6 +3380,7 @@ function RuleSetModal({
   ruleSet,
   nodes,
   providerLibrary,
+  nodeGroups,
   onClose,
   onSaved,
 }: {
@@ -2804,13 +3388,14 @@ function RuleSetModal({
   ruleSet?: RuleSet;
   nodes: Node[];
   providerLibrary: RuleProviderLibraryItem[];
+  nodeGroups: NodeGroup[];
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
   const isEdit = mode === "edit";
   const isImport = mode === "import";
   const [name, setName] = useState(
-    ruleSet?.name ?? (isImport ? "导入规则" : "新建规则库"),
+    ruleSet?.name ?? (isImport ? "导入规则" : "新建规则组"),
   );
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [yamlContent, setYamlContent] = useState("");
@@ -2842,6 +3427,7 @@ function RuleSetModal({
       name: nextName,
       type: "select",
       proxies: ["DIRECT"],
+      nodeGroups: [],
       providerIds: [],
       extra: {},
     };
@@ -2887,7 +3473,7 @@ function RuleSetModal({
 
   async function save() {
     if (!name.trim()) {
-      setError("请输入规则库名称。");
+      setError("请输入规则组名称。");
       return;
     }
     setSaving(true);
@@ -2907,11 +3493,18 @@ function RuleSetModal({
             id: _id,
             providerIds: _providerIds,
             fallback: _fallback,
+            nodeGroups: groupNodeGroups,
             name: groupName,
             type,
             proxies,
             extra,
-          }) => ({ ...extra, name: groupName, type, proxies }),
+          }) => ({
+            ...extra,
+            name: groupName,
+            type,
+            proxies,
+            nodeGroups: [...new Set(groupNodeGroups)],
+          }),
         );
         const bindings = Object.fromEntries(
           groups.map((group) => [group.name, [...new Set(group.providerIds)]]),
@@ -2947,10 +3540,10 @@ function RuleSetModal({
       }
       await onSaved(
         isEdit
-          ? "规则库已更新"
+          ? "规则组已更新"
           : isImport
             ? "规则已导入，可点击编辑调整策略组"
-            : "规则库已创建",
+            : "规则组已创建",
       );
     } catch (caught) {
       setError(message(caught));
@@ -2960,15 +3553,15 @@ function RuleSetModal({
   }
 
   const title = isEdit
-    ? "编辑规则库"
+    ? "编辑规则组"
     : isImport
       ? "导入 Clash 规则"
-      : "手动新增规则库";
+      : "手动新增规则组";
   const saveLabel = isEdit
-    ? "保存规则库"
+    ? "保存规则组"
     : isImport
       ? "仅导入规则"
-      : "创建规则库";
+      : "创建规则组";
   return (
     <>
       <Modal
@@ -3186,6 +3779,7 @@ function RuleSetModal({
           key={`${editing.index ?? "new"}-${editing.value.id}`}
           group={editing.value}
           nodes={nodes}
+          nodeGroups={nodeGroups}
           providers={providerLibrary}
           fallback={Boolean(editing.fallback)}
           onClose={() => setEditing(null)}
@@ -3199,6 +3793,7 @@ function RuleSetModal({
 function StrategyGroupModal({
   group,
   nodes,
+  nodeGroups,
   providers,
   fallback = false,
   onClose,
@@ -3206,6 +3801,7 @@ function StrategyGroupModal({
 }: {
   group: RuleGroupDraft;
   nodes: Node[];
+  nodeGroups: NodeGroup[];
   providers: RuleProviderLibraryItem[];
   fallback?: boolean;
   onClose: () => void;
@@ -3215,6 +3811,9 @@ function StrategyGroupModal({
   const [type, setType] = useState(group.type);
   const [proxies, setProxies] = useState(group.proxies);
   const [providerIds, setProviderIds] = useState(group.providerIds);
+  const [selectedNodeGroups, setSelectedNodeGroups] = useState<string[]>(
+    group.nodeGroups,
+  );
   const [nodeSearch, setNodeSearch] = useState("");
   const [providerSearch, setProviderSearch] = useState("");
   const [error, setError] = useState("");
@@ -3243,10 +3842,27 @@ function StrategyGroupModal({
       [node.name, node.alias, node.displayName].filter(Boolean),
     ),
   );
-  const unknownReferences = proxies.filter(
-    (proxy) =>
-      !nodeReferences.has(proxy) && !["DIRECT", "REJECT"].includes(proxy),
+  const groupSelectedMembers = useMemo(() => {
+    const selected = new Set(selectedNodeGroups);
+    const members = new Set<string>();
+    for (const item of nodeGroups) {
+      if (selected.has(item.id)) {
+        for (const member of item.members) members.add(member);
+      }
+    }
+    return members;
+  }, [nodeGroups, selectedNodeGroups]);
+  const effectiveProxies = useMemo(
+    () => [...new Set([...proxies, ...groupSelectedMembers])],
+    [proxies, groupSelectedMembers],
   );
+  function toggleNodeGroup(groupId: string, checked: boolean) {
+    setSelectedNodeGroups((current) =>
+      checked
+        ? [...new Set([...current, groupId])]
+        : current.filter((id) => id !== groupId),
+    );
+  }
 
   function toggleProxy(value: string, checked: boolean) {
     setProxies((current) =>
@@ -3271,8 +3887,8 @@ function StrategyGroupModal({
       setError("请输入有效的策略组名称，不能包含逗号或换行。");
       return;
     }
-    if (!proxies.length) {
-      setError("请至少选择一个节点或 DIRECT / REJECT。");
+    if (!effectiveProxies.length) {
+      setError("请至少选择一个节点、节点分组或 DIRECT / REJECT。");
       return;
     }
     const extra = { ...group.extra };
@@ -3284,7 +3900,8 @@ function StrategyGroupModal({
       ...group,
       name: cleanName,
       type,
-      proxies,
+      proxies: [...new Set(proxies)],
+      nodeGroups: [...new Set(selectedNodeGroups)],
       providerIds: fallback ? [] : [...new Set(providerIds)],
       extra,
     });
@@ -3352,7 +3969,7 @@ function StrategyGroupModal({
             <option value="load-balance">负载均衡（load-balance）</option>
           </select>
         </Field>
-        <Field label={`节点（已选 ${proxies.length}）`} full>
+        <Field label={`节点（已选 ${effectiveProxies.length}）`} full>
           <div className="csm-strategy-picker">
             <label className="csm-search">
               <Search size={15} />
@@ -3376,16 +3993,47 @@ function StrategyGroupModal({
                 </label>
               ))}
             </div>
+            {nodeGroups.length > 0 && (
+              <div className="csm-strategy-group-picker">
+                <div className="csm-strategy-group-picker-head">
+                  <strong>按节点分组选择</strong>
+                  <small>勾选后，分组内的节点会自动并入该策略组</small>
+                </div>
+                {nodeGroups.map((item) => {
+                  const checked = selectedNodeGroups.includes(item.id);
+                  return (
+                    <label key={item.id} className={checked ? "checked" : ""}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) =>
+                          toggleNodeGroup(item.id, event.target.checked)
+                        }
+                      />
+                      <span>
+                        <strong>{item.name}</strong>
+                        {nodeGroupKindBadge(item.kind)}
+                        <small>{nodeGroupSummary(item, nodes)}</small>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
             <div className="csm-strategy-node-list">
               {visibleNodes.map((node) => {
                 const value = node.alias || node.name;
                 const disabled = !node.supportedOutput;
+                const inGroup = groupSelectedMembers.has(value);
                 return (
-                  <label key={node.id} className={disabled ? "disabled" : ""}>
+                  <label
+                    key={node.id}
+                    className={disabled || inGroup ? "disabled" : ""}
+                  >
                     <input
                       type="checkbox"
-                      disabled={disabled && !proxies.includes(value)}
-                      checked={proxies.includes(value)}
+                      disabled={(disabled || inGroup) && !proxies.includes(value)}
+                      checked={effectiveProxies.includes(value)}
                       onChange={(event) =>
                         toggleProxy(value, event.target.checked)
                       }
@@ -3396,27 +4044,13 @@ function StrategyGroupModal({
                       <small>
                         {node.protocol} · {node.server}:{node.port ?? "—"}
                         {disabled ? " · Clash Meta 不支持" : ""}
+                        {inGroup ? " · 由节点分组带入" : ""}
                       </small>
                     </span>
                   </label>
                 );
               })}
             </div>
-            {unknownReferences.length > 0 && (
-              <div className="csm-preserved-refs">
-                <span>原配置中的其他引用</span>
-                {unknownReferences.map((value) => (
-                  <label key={value}>
-                    <input
-                      type="checkbox"
-                      checked
-                      onChange={() => toggleProxy(value, false)}
-                    />
-                    <code>{value}</code>
-                  </label>
-                ))}
-              </div>
-            )}
           </div>
         </Field>
         {!fallback && (
@@ -3516,92 +4150,6 @@ function StrategyGroupModal({
   );
 }
 
-function PreviewModal({
-  state,
-  publishing,
-  onClose,
-  onCopy,
-  onPublish,
-}: {
-  state: PreviewState;
-  publishing: boolean;
-  onClose: () => void;
-  onCopy: () => void;
-  onPublish: () => void;
-}) {
-  const errors = state.messages.filter((item) => item.level === "error");
-  return (
-    <Modal
-      title={`配置预览：${state.profile.name}`}
-      width={920}
-      onClose={() => !publishing && onClose()}
-      foot={
-        <>
-          <button
-            className="csm-btn csm-btn-secondary"
-            type="button"
-            disabled={publishing}
-            onClick={onCopy}
-          >
-            <Clipboard size={14} />
-            复制 YAML
-          </button>
-          <button
-            className="csm-btn csm-btn-secondary"
-            type="button"
-            disabled={publishing}
-            onClick={onClose}
-          >
-            关闭
-          </button>
-          <button
-            className="csm-btn csm-btn-primary"
-            type="button"
-            disabled={!state.valid || publishing}
-            onClick={onPublish}
-          >
-            {publishing ? (
-              <>
-                <Spin size={14} />
-                发布中
-              </>
-            ) : (
-              <>
-                <Upload size={14} />
-                发布有效配置
-              </>
-            )}
-          </button>
-        </>
-      }
-    >
-      <div className="csm-preview">
-        {state.valid ? (
-          <Alert type="success">校验通过，可以发布并替换当前有效版本。</Alert>
-        ) : (
-          <Alert type="error">
-            存在 {errors.length} 个错误，当前已发布版本不会被覆盖。
-          </Alert>
-        )}
-        {state.messages.length > 0 && (
-          <div className="csm-validation-list">
-            {state.messages.map((item, index) => (
-              <div
-                className={item.level === "error" ? "error" : "info"}
-                key={`${item.code}-${index}`}
-              >
-                <AlertTriangle size={14} />
-                <span>{item.message}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        <pre>{state.yaml}</pre>
-      </div>
-    </Modal>
-  );
-}
-
 function Toolbar({
   title,
   icon,
@@ -3623,13 +4171,22 @@ function Toolbar({
     </div>
   );
 }
-function PanelTitle({ title, icon }: { title: string; icon: React.ReactNode }) {
+function PanelTitle({
+  title,
+  icon,
+  action,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  action?: React.ReactNode;
+}) {
   return (
     <div className="csm-panel-title">
       <h2>
         {icon}
         {title}
       </h2>
+      {action && <div className="csm-panel-title-action">{action}</div>}
     </div>
   );
 }
@@ -3670,21 +4227,36 @@ function SourceBadge({
     <Badge color="amber">未刷新</Badge>
   );
 }
+function profileState(profile: Profile): {
+  label: string;
+  color: "default" | "green" | "amber" | "red";
+} {
+  const hasError = profile.validation.some((item) => item.level === "error");
+  if (profile.publishedStatus === "degraded" || hasError) {
+    return { label: "异常", color: "red" };
+  }
+  if (!profile.publishedAt) {
+    return { label: "未发布", color: "default" };
+  }
+  if (!profile.ruleSetId) {
+    return { label: "规则组缺失", color: "red" };
+  }
+  if (
+    profile.ruleSetUpdatedAt &&
+    new Date(profile.ruleSetUpdatedAt).getTime() >
+      new Date(profile.publishedAt).getTime()
+  ) {
+    return { label: "待发布", color: "amber" };
+  }
+  return { label: "已发布", color: "green" };
+}
+
 function PublishBadge({ profile }: { profile: Profile }) {
-  return profile.publishedStatus === "degraded" ? (
-    <Badge color="amber">已降级</Badge>
-  ) : profile.publishedAt ? (
-    <Badge color="green">已发布</Badge>
-  ) : (
-    <Badge>草稿</Badge>
-  );
+  const state = profileState(profile);
+  return <Badge color={state.color}>{state.label}</Badge>;
 }
 function publishLabel(profile: Profile) {
-  return profile.publishedStatus === "degraded"
-    ? "已降级"
-    : profile.publishedAt
-      ? "已发布"
-      : "草稿";
+  return profileState(profile).label;
 }
 function stamp(value?: string | null) {
   if (!value) return "从未";

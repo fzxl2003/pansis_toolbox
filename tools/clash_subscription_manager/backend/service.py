@@ -10,6 +10,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import sqlite3
@@ -60,6 +61,8 @@ PROXY_FIELDS: dict[str, set[str]] = {
 GROUP_FIELDS = {"name", "type", "proxies", "url", "interval", "lazy", "disable-udp", "strategy"}
 DNS_FIELDS = {"enable", "ipv6", "listen", "enhanced-mode", "fake-ip-range", "use-hosts", "nameserver", "fallback", "fallback-filter", "default-nameserver", "nameserver-policy", "fake-ip-filter", "proxy-server-nameserver", "respect-rules", "prefer-h3"}
 RULE_PROVIDER_FIELDS = {"type", "behavior", "url", "path", "interval"}
+RULE_PROVIDER_OUTPUT_MODES = {"url", "inline"}
+RULE_PROVIDER_OUTPUT_MODE_DEFAULT = "inline"
 CLASH_META_RULE_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR", "GEOIP", "GEOSITE", "DST-PORT", "SRC-PORT", "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"}
 BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
     {"id": "builtin-provider-ai", "name": "AI 平台", "providerKey": "ai-platforms", "description": "OpenAI、Claude、Gemini 等常见生成式 AI 平台。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.yaml", "path": "./ruleset/ai-platforms.yaml"}},
@@ -72,11 +75,46 @@ _initialized: set[str] = set()
 _init_lock = threading.Lock()
 
 register_tool_categories(TOOL_ID, [
-    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_profile_selections", "csm_rule_sets", "csm_rule_providers", "csm_published_snapshots"], None, "订阅源、节点、配置和最后有效发布版本"),
-    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_probe_results"], "created_at", "订阅刷新、快照和 TCP 探测记录"),
+    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_rule_sets", "csm_rule_providers", "csm_node_groups", "csm_published_snapshots"], None, "订阅源、节点、配置和最后有效发布版本"),
+    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_probe_results", "csm_subscription_requests"], "created_at", "订阅刷新、快照、TCP 探测和聚合订阅请求记录"),
     DataCategory("public_tokens", ["csm_public_tokens"], None, "公开订阅令牌索引", storage="platform_db", user_id_column="user_id"),
 ])
 
+
+NODE_GROUP_KINDS = {"custom", "region", "latency"}
+# Node names rarely carry machine-readable country data, so region groups rely on
+# a small heuristic over flags, common Chinese/English region names and 2-letter
+# codes.  Order matters: longer/more-specific patterns come first.
+COUNTRY_MATCHERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("HK", "香港", ("香港", "🇭🇰", "hong kong", "hongkong", "hk")),
+    ("TW", "台湾", ("台湾", "台北", "🇹🇼", "taiwan", "taipei", "tw")),
+    ("JP", "日本", ("日本", "东京", "大阪", "🇯🇵", "japan", "tokyo", "osaka", "jp")),
+    ("KR", "韩国", ("韩国", "首尔", "🇰🇷", "korea", "seoul", "kr")),
+    ("SG", "新加坡", ("新加坡", "🇸🇬", "singapore", "sg")),
+    ("US", "美国", ("美国", "洛杉矶", "圣何塞", "纽约", "🇺🇸", "united states", "usa", "los angeles", "new york", "us")),
+    ("GB", "英国", ("英国", "伦敦", "🇬🇧", "united kingdom", "britain", "london", "uk", "gb")),
+    ("DE", "德国", ("德国", "法兰克福", "🇩🇪", "germany", "frankfurt", "de")),
+    ("FR", "法国", ("法国", "巴黎", "🇫🇷", "france", "paris", "fr")),
+    ("NL", "荷兰", ("荷兰", "阿姆斯特丹", "🇳🇱", "netherlands", "amsterdam", "nl")),
+    ("CA", "加拿大", ("加拿大", "🇨🇦", "canada", "toronto", "vancouver", "ca")),
+    ("AU", "澳大利亚", ("澳大利亚", "澳洲", "悉尼", "🇦🇺", "australia", "sydney", "au")),
+    ("RU", "俄罗斯", ("俄罗斯", "莫斯科", "🇷🇺", "russia", "moscow", "ru")),
+    ("IN", "印度", ("印度", "孟买", "🇮🇳", "india", "mumbai", "in")),
+    ("TR", "土耳其", ("土耳其", "🇹🇷", "turkey", "tr")),
+    ("BR", "巴西", ("巴西", "🇧🇷", "brazil", "br")),
+    ("AR", "阿根廷", ("阿根廷", "🇦🇷", "argentina", "ar")),
+    ("CN", "中国", ("中国", "大陆", "🇨🇳", "china", "cn")),
+    ("TH", "泰国", ("泰国", "🇹🇭", "thailand", "bangkok", "th")),
+    ("MY", "马来西亚", ("马来西亚", "🇲🇾", "malaysia", "my")),
+    ("VN", "越南", ("越南", "🇻🇳", "vietnam", "vn")),
+    ("ID", "印度尼西亚", ("印度尼西亚", "印尼", "🇮🇩", "indonesia", "id")),
+    ("PH", "菲律宾", ("菲律宾", "🇵🇭", "philippines", "ph")),
+    ("CH", "瑞士", ("瑞士", "🇨🇭", "switzerland", "zurich", "ch")),
+    ("SE", "瑞典", ("瑞典", "🇸🇪", "sweden", "se")),
+    ("ES", "西班牙", ("西班牙", "🇪🇸", "spain", "madrid", "es")),
+    ("IT", "意大利", ("意大利", "🇮🇹", "italy", "milan", "it")),
+    ("AE", "阿联酋", ("阿联酋", "迪拜", "🇦🇪", "united arab emirates", "dubai", "uae", "ae")),
+)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -216,9 +254,6 @@ def init_database(user_id: str) -> None:
               settings_json TEXT NOT NULL DEFAULT '{}', rule_set_id TEXT, token_encrypted TEXT NOT NULL,
               published_at TEXT, published_status TEXT NOT NULL DEFAULT 'draft', last_validation_json TEXT NOT NULL DEFAULT '[]',
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS csm_profile_selections (
-              profile_id TEXT NOT NULL, node_identity TEXT NOT NULL, selected_at TEXT NOT NULL,
-              PRIMARY KEY(profile_id,node_identity), FOREIGN KEY(profile_id) REFERENCES csm_profiles(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS csm_rule_sets (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, rules_json TEXT NOT NULL DEFAULT '[]',
               providers_json TEXT NOT NULL DEFAULT '{}', groups_json TEXT NOT NULL DEFAULT '[]',
@@ -241,8 +276,18 @@ def init_database(user_id: str) -> None:
               id TEXT PRIMARY KEY, node_id TEXT NOT NULL, reachable INTEGER NOT NULL, dns_address TEXT NOT NULL DEFAULT '',
               latency_ms INTEGER, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
               FOREIGN KEY(node_id) REFERENCES csm_nodes(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS csm_node_groups (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+              config_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS csm_subscription_requests (
+              id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, requested_at TEXT NOT NULL,
+              client_ip TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '',
+              status_code INTEGER NOT NULL DEFAULT 200,
+              FOREIGN KEY(profile_id) REFERENCES csm_profiles(id) ON DELETE CASCADE);
             CREATE INDEX IF NOT EXISTS csm_nodes_seen ON csm_nodes(last_seen_at);
             CREATE INDEX IF NOT EXISTS csm_runs_source ON csm_refresh_runs(source_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS csm_subscription_requests_profile ON csm_subscription_requests(profile_id, requested_at DESC);
             """)
             # Lightweight, idempotent migrations for databases created by an
             # earlier version of the tool.
@@ -258,6 +303,19 @@ def init_database(user_id: str) -> None:
             conn.execute(f"UPDATE csm_nodes SET supported_output=CASE WHEN lower(protocol) IN ({placeholders}) THEN 1 ELSE 0 END", tuple(sorted(CLASH_META_PROXY_TYPES)))
             _seed_rule_providers(conn)
             _migrate_rule_provider_snapshots(conn)
+            # Manual profile node selection was replaced by rule-driven output.
+            conn.execute("DROP TABLE IF EXISTS csm_profile_selections")
+            # A subscription now exposes only its current publication. Remove
+            # legacy history once, then enforce one row per profile.
+            conn.execute("""DELETE FROM csm_published_snapshots WHERE id IN (
+              SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                  PARTITION BY profile_id ORDER BY created_at DESC, rowid DESC
+                ) AS position
+                FROM csm_published_snapshots
+              ) WHERE position <> 1
+            )""")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS csm_published_snapshots_profile ON csm_published_snapshots(profile_id)")
         with connection_context() as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS csm_public_tokens (
               token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile_id TEXT NOT NULL,
@@ -592,14 +650,32 @@ def refresh_source(source_id: str, user: User, *, auto_rebuild: bool = True) -> 
         raise ToolboxError("SOURCE_REFRESH_FAILED", f"刷新失败：{message[:240]}", status_code=422) from exc
 
 
+def _country_of(name: str) -> tuple[str | None, str | None]:
+    """Best-effort country detection from a node display name."""
+    text = str(name or "").strip()
+    if not text:
+        return None, None
+    lowered = text.lower()
+    for code, label, patterns in COUNTRY_MATCHERS:
+        for pattern in patterns:
+            if pattern.isascii():
+                if re.search(rf"(?<![a-z0-9]){re.escape(pattern)}(?![a-z0-9])", lowered):
+                    return code, label
+            elif pattern in text:
+                return code, label
+    return None, None
+
+
 def _node_dict(row: sqlite3.Row, source_names: list[str] | None = None, probe: sqlite3.Row | None = None,
                source_ids: list[str] | None = None) -> dict[str, Any]:
     alias = str(row["alias"] or "")
+    country, country_label = _country_of(row["name"])
     return {"id": row["id"], "stableIdentity": row["stable_identity"], "name": row["name"], "alias": alias,
             "displayName": alias or row["name"], "protocol": row["protocol"], "server": row["server"], "port": row["port"],
             "config": _loads(row["config_json"], {}), "supportedOutput": _compatible(str(row["protocol"])),
             "isCustom": bool(row["is_custom"]), "lastSeenAt": row["last_seen_at"], "sources": source_names or [],
-            "sourceIds": source_ids or [], "tcp": None if not probe else {
+            "sourceIds": source_ids or [], "country": country, "countryLabel": country_label,
+            "tcp": None if not probe else {
                 "reachable": bool(probe["reachable"]), "latencyMs": probe["latency_ms"], "error": probe["error"], "checkedAt": probe["created_at"]}}
 
 
@@ -757,23 +833,182 @@ def list_nodes(user: User, filters: dict[str, Any] | None = None) -> list[dict[s
         return result
 
 
+def _node_ref(row: sqlite3.Row) -> str:
+    return str(row["alias"] or row["name"] or "")
+
+
+def _group_scope_rows(conn: sqlite3.Connection, config: dict[str, Any]) -> list[sqlite3.Row]:
+    """Nodes within a group's configured explicit node selection (empty means all nodes)."""
+    node_ids = [str(item) for item in (config.get("nodeIds") or []) if item]
+    if not node_ids:
+        return list(conn.execute("SELECT * FROM csm_nodes").fetchall())
+    placeholders = ",".join("?" for _ in node_ids)
+    rows = conn.execute(f"SELECT * FROM csm_nodes WHERE id IN ({placeholders})", node_ids).fetchall()
+    rows_by_id = {row["id"]: row for row in rows}
+    return [rows_by_id[node_id] for node_id in node_ids if node_id in rows_by_id]
+
+
+def _resolve_group_members(conn: sqlite3.Connection, group: sqlite3.Row) -> list[str]:
+    kind = str(group["kind"])
+    config = _loads(group["config_json"], {})
+    if kind == "custom":
+        node_ids = [str(item) for item in (config.get("nodeIds") or []) if item]
+        if not node_ids:
+            return []
+        placeholders = ",".join("?" for _ in node_ids)
+        rows = conn.execute(f"SELECT * FROM csm_nodes WHERE id IN ({placeholders})", node_ids).fetchall()
+        rows_by_id = {row["id"]: row for row in rows}
+        return [_node_ref(rows_by_id[node_id]) for node_id in node_ids if node_id in rows_by_id]
+    rows = _group_scope_rows(conn, config)
+    if kind == "region":
+        countries = {str(item) for item in (config.get("countries") or []) if item}
+        if not countries:
+            return []
+        return [_node_ref(row) for row in rows if (_country_of(row["name"])[0] or "") in countries]
+    if kind == "latency":
+        mode = str(config.get("mode") or "top")
+        count = max(1, int(config.get("count") or 5))
+        threshold_ms = max(0, int(config.get("thresholdMs") or 0))
+        scored: list[tuple[int, sqlite3.Row]] = []
+        for row in rows:
+            probe = conn.execute("SELECT * FROM csm_probe_results WHERE node_id=? AND reachable=1 ORDER BY created_at DESC LIMIT 1", (row["id"],)).fetchone()
+            if probe and probe["latency_ms"] is not None:
+                scored.append((int(probe["latency_ms"]), row))
+        scored.sort(key=lambda item: item[0])
+        if mode == "threshold":
+            return [_node_ref(row) for latency, row in scored if latency <= threshold_ms]
+        return [_node_ref(row) for _, row in scored[:count]]
+    return []
+
+
+def _node_group_row(row: sqlite3.Row, members: list[str]) -> dict[str, Any]:
+    return {"id": row["id"], "name": row["name"], "kind": row["kind"],
+            "config": _loads(row["config_json"], {}), "members": members,
+            "memberCount": len(members), "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+
+
+def list_node_groups(user: User) -> list[dict[str, Any]]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        result = []
+        for row in conn.execute("SELECT * FROM csm_node_groups ORDER BY created_at DESC"):
+            result.append(_node_group_row(row, _resolve_group_members(conn, row)))
+        return result
+
+
+def _normalise_node_group(data: dict[str, Any], user: User) -> tuple[str, str, dict[str, Any]]:
+    name = str(data.get("name") or "").strip()[:120]
+    if not name:
+        raise ToolboxError("NODE_GROUP_NAME_REQUIRED", "请输入分组名称。", status_code=422)
+    if any(char in name for char in ",\r\n"):
+        raise ToolboxError("INVALID_NODE_GROUP_NAME", "分组名称不能包含逗号或换行。", status_code=422)
+    kind = str(data.get("kind") or "custom").strip().lower()
+    if kind not in NODE_GROUP_KINDS:
+        raise ToolboxError("INVALID_NODE_GROUP_KIND", "不支持的节点分组类型。", status_code=422)
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    if kind == "custom":
+        node_ids = [str(item) for item in (config.get("nodeIds") or []) if item]
+        config = {"nodeIds": list(dict.fromkeys(node_ids))}
+    elif kind == "region":
+        countries = [str(item).strip() for item in (config.get("countries") or []) if item]
+        if not countries:
+            raise ToolboxError("NODE_GROUP_COUNTRY_REQUIRED", "地域分组至少选择一个国家或地区。", status_code=422)
+        node_ids = [str(item) for item in (config.get("nodeIds") or []) if item]
+        config = {"countries": list(dict.fromkeys(countries)),
+                  "nodeIds": list(dict.fromkeys(node_ids))}
+    elif kind == "latency":
+        mode = str(config.get("mode") or "top").strip().lower()
+        if mode not in {"top", "threshold"}:
+            raise ToolboxError("INVALID_NODE_GROUP_LATENCY", "延迟分组模式无效。", status_code=422)
+        node_ids = [str(item) for item in (config.get("nodeIds") or []) if item]
+        config = {"mode": mode, "count": max(1, int(config.get("count") or 5)),
+                  "thresholdMs": max(0, int(config.get("thresholdMs") or 0)),
+                  "nodeIds": list(dict.fromkeys(node_ids))}
+    return name, kind, config
+
+
+def save_node_group(data: dict[str, Any], user: User, group_id: str | None = None) -> dict[str, Any]:
+    init_database(user.id)
+    name, kind, config = _normalise_node_group(data, user)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        now = _now()
+        if group_id:
+            row = conn.execute("SELECT * FROM csm_node_groups WHERE id=?", (group_id,)).fetchone()
+            if not row:
+                _not_found("节点分组")
+            conn.execute("UPDATE csm_node_groups SET name=?,kind=?,config_json=?,updated_at=? WHERE id=?",
+                         (name, kind, _json(config), now, group_id))
+        else:
+            group_id = _id()
+            conn.execute("""INSERT INTO csm_node_groups(id,name,kind,config_json,created_at,updated_at)
+              VALUES(?,?,?,?,?,?)""", (group_id, name, kind, _json(config), now, now))
+        row = conn.execute("SELECT * FROM csm_node_groups WHERE id=?", (group_id,)).fetchone()
+        return _node_group_row(row, _resolve_group_members(conn, row))
+
+
+def delete_node_group(group_id: str, user: User) -> None:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        if conn.execute("DELETE FROM csm_node_groups WHERE id=?", (group_id,)).rowcount == 0:
+            _not_found("节点分组")
+
+
+def _expand_node_group_members(conn: sqlite3.Connection, rule_set: dict[str, Any]) -> dict[str, Any]:
+    """Resolve node-group references in strategy groups to concrete node refs."""
+    groups = rule_set.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return rule_set
+    group_ids: list[str] = []
+    for group in groups:
+        raw = group.get("nodeGroups") if isinstance(group, dict) else None
+        if isinstance(raw, list):
+            group_ids.extend(str(item) for item in raw if item)
+    group_ids = list(dict.fromkeys(group_ids))
+    members_by_id: dict[str, list[str]] = {}
+    if group_ids:
+        placeholders = ",".join("?" for _ in group_ids)
+        rows = {row["id"]: row for row in conn.execute(
+            f"SELECT * FROM csm_node_groups WHERE id IN ({placeholders})", group_ids)}
+        for group_id in group_ids:
+            row = rows.get(group_id)
+            members_by_id[group_id] = _resolve_group_members(conn, row) if row else []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        proxies = list(group.get("proxies")) if isinstance(group.get("proxies"), list) else []
+        raw_ids = group.get("nodeGroups") if isinstance(group.get("nodeGroups"), list) else []
+        for group_id in raw_ids:
+            proxies.extend(members_by_id.get(str(group_id), []))
+        group["proxies"] = list(dict.fromkeys(proxies))
+    return rule_set
+
+
 def _compatible(protocol: str) -> bool:
     return protocol.lower() in CLASH_META_PROXY_TYPES
 
 
+_PROFILE_WITH_RULE_SET = """SELECT p.*,rs.name AS rule_set_name,rs.updated_at AS rule_set_updated_at
+FROM csm_profiles p LEFT JOIN csm_rule_sets rs ON rs.id=p.rule_set_id"""
+
+
 def _profile_row(row: sqlite3.Row, public_token: str | None = None) -> dict[str, Any]:
-    return {"id": row["id"], "name": row["name"], "settings": _loads(row["settings_json"], {}), "ruleSetId": row["rule_set_id"], "publishedAt": row["published_at"], "publishedStatus": row["published_status"], "validation": _loads(row["last_validation_json"], []), "subscriptionToken": public_token, "createdAt": row["created_at"]}
+    keys = set(row.keys())
+    return {
+        "id": row["id"], "name": row["name"], "settings": _loads(row["settings_json"], {}),
+        "ruleSetId": row["rule_set_id"],
+        "ruleSetName": row["rule_set_name"] if "rule_set_name" in keys else None,
+        "ruleSetUpdatedAt": row["rule_set_updated_at"] if "rule_set_updated_at" in keys else None,
+        "publishedAt": row["published_at"], "publishedStatus": row["published_status"],
+        "validation": _loads(row["last_validation_json"], []), "subscriptionToken": public_token,
+        "createdAt": row["created_at"],
+    }
 
 
 def list_profiles(user: User) -> list[dict[str, Any]]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        result = []
-        for row in conn.execute("SELECT * FROM csm_profiles ORDER BY created_at DESC"):
-            profile = _profile_row(row, _decrypt(row["token_encrypted"]))
-            profile["selectedStableIdentities"] = [item["node_identity"] for item in conn.execute("SELECT node_identity FROM csm_profile_selections WHERE profile_id=? ORDER BY selected_at", (row["id"],))]
-            result.append(profile)
-        return result
+        rows = conn.execute(f"{_PROFILE_WITH_RULE_SET} ORDER BY p.created_at DESC")
+        return [_profile_row(row, _decrypt(row["token_encrypted"])) for row in rows]
 
 
 def _create_token_index(user_id: str, profile_id: str, token: str) -> None:
@@ -781,11 +1016,19 @@ def _create_token_index(user_id: str, profile_id: str, token: str) -> None:
         now = _now(); conn.execute("INSERT INTO csm_public_tokens VALUES(?,?,?,?,?,?)", (_token_hash(token), user_id, profile_id, 1, now, now))
 
 
+def _profile_settings(value: Any) -> dict[str, Any]:
+    settings = dict(value) if isinstance(value, dict) else {}
+    settings["mode"] = "rule"
+    output_mode = str(settings.get("ruleProviderOutputMode") or RULE_PROVIDER_OUTPUT_MODE_DEFAULT).lower()
+    settings["ruleProviderOutputMode"] = output_mode if output_mode in RULE_PROVIDER_OUTPUT_MODES else RULE_PROVIDER_OUTPUT_MODE_DEFAULT
+    return settings
+
+
 def create_profile(data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id); profile_id, token, now = _id(), secrets.token_urlsafe(32), _now()
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        conn.execute("INSERT INTO csm_profiles VALUES(?,?,?,?,?,?,?,?,?,?,?)", (profile_id, str(data.get("name") or "未命名聚合")[:120], "clash-meta", _json(data.get("settings") or {}), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", now, now))
-        row = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
+        conn.execute("INSERT INTO csm_profiles VALUES(?,?,?,?,?,?,?,?,?,?,?)", (profile_id, str(data.get("name") or "未命名聚合")[:120], "clash-meta", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", now, now))
+        row = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (profile_id,)).fetchone()
     _create_token_index(user.id, profile_id, token)
     return _profile_row(row, token)
 
@@ -799,11 +1042,11 @@ def update_profile(profile_id: str, data: dict[str, Any], user: User) -> dict[st
         changed: dict[str, Any] = {}
         for inbound, column in allowed.items():
             if inbound in data: changed[column] = data[inbound]
-        if "settings" in data: changed["settings_json"] = _json(data["settings"] or {})
+        if "settings" in data: changed["settings_json"] = _json(_profile_settings(data["settings"]))
         if changed:
             sql = ",".join(f"{key}=?" for key in changed)
             conn.execute(f"UPDATE csm_profiles SET {sql},updated_at=? WHERE id=?", (*changed.values(), _now(), profile_id))
-        return _profile_row(conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone())
+        return _profile_row(conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (profile_id,)).fetchone())
 
 
 def delete_profile(profile_id: str, user: User) -> None:
@@ -811,15 +1054,6 @@ def delete_profile(profile_id: str, user: User) -> None:
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         if conn.execute("DELETE FROM csm_profiles WHERE id=?", (profile_id,)).rowcount == 0: _not_found("聚合配置")
     with connection_context() as conn: conn.execute("DELETE FROM csm_public_tokens WHERE user_id=? AND profile_id=?", (user.id, profile_id))
-
-
-def set_profile_selections(profile_id: str, identities: list[str], user: User) -> dict[str, Any]:
-    init_database(user.id)
-    with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        if not conn.execute("SELECT 1 FROM csm_profiles WHERE id=?", (profile_id,)).fetchone(): _not_found("聚合配置")
-        conn.execute("DELETE FROM csm_profile_selections WHERE profile_id=?", (profile_id,))
-        now = _now(); conn.executemany("INSERT INTO csm_profile_selections VALUES(?,?,?)", [(profile_id, str(value), now) for value in dict.fromkeys(identities)][:5000])
-    return {"profileId": profile_id, "selected": len(dict.fromkeys(identities))}
 
 
 def _normalise_legacy_manual_provider(config: dict[str, Any]) -> dict[str, Any]:
@@ -998,6 +1232,24 @@ def _remote_provider_output(config: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if key in RULE_PROVIDER_FIELDS and item not in (None, "")}
 
 
+def _inline_remote_provider_rules(config: dict[str, Any], target: str) -> list[str]:
+    """Fetch an HTTP Provider on the server and expand it into concrete rules."""
+    value = _normalise_legacy_manual_provider(config)
+    url = str(value.get("url") or "").strip()
+    if value.get("type") != "http" or not url:
+        raise ToolboxError(
+            "RULE_PROVIDER_INLINE_REQUIRES_URL",
+            "拉取后优先仅支持带 URL 的规则订阅；请改为 URL 优先，或为该 Rule Provider 配置 URL。",
+            status_code=422,
+        )
+    payload = _download_rule_provider_payload(url)
+    return _manual_provider_rules({
+        "type": "manual",
+        "behavior": str(value.get("behavior") or "domain").lower(),
+        "payload": payload,
+    }, target)
+
+
 def _manual_provider_rules(config: dict[str, Any], target: str) -> list[str]:
     value = _normalise_legacy_manual_provider(config)
     if value.get("type") not in {"manual", "cached"}:
@@ -1073,7 +1325,9 @@ def list_rule_sets(user: User) -> list[dict[str, Any]]:
         return [_rule_row(row) for row in conn.execute("SELECT * FROM csm_rule_sets ORDER BY name COLLATE NOCASE")]
 
 
-def _materialize_rule_provider_bindings(conn: sqlite3.Connection, rule_set: dict[str, Any]) -> dict[str, Any]:
+def _materialize_rule_provider_bindings(
+    conn: sqlite3.Connection, rule_set: dict[str, Any], *, inline_rule_providers: bool
+) -> dict[str, Any]:
     """Resolve saved Provider IDs at build time so rule sets never hold Provider snapshots."""
     meta = rule_set.get("importMeta") or {}
     bindings = meta.get("providerBindings") if isinstance(meta, dict) else None
@@ -1105,7 +1359,12 @@ def _materialize_rule_provider_bindings(conn: sqlite3.Connection, rule_set: dict
                 continue
             provider_key = str(row["provider_key"])
             stored = _loads(row["config_json"], {})
-            manual_rules = _manual_provider_rules(stored, group_name)
+            manual_rules = (
+                _manual_provider_rules(stored, group_name)
+                if not inline_rule_providers
+                else _manual_provider_rules(stored, group_name)
+                or _inline_remote_provider_rules(stored, group_name)
+            )
             if manual_rules:
                 generated_rules.extend(manual_rules)
             else:
@@ -1220,19 +1479,47 @@ def delete_rule_set(rule_set_id: str, user: User) -> None:
         if conn.execute("DELETE FROM csm_rule_sets WHERE id=?", (rule_set_id,)).rowcount == 0: _not_found("规则库")
 
 
-def _profile_material(conn: sqlite3.Connection, profile_id: str) -> tuple[sqlite3.Row, list[sqlite3.Row], dict[str, Any] | None, list[str]]:
+def _rule_referenced_nodes(conn: sqlite3.Connection, rule_set: dict[str, Any] | None) -> list[sqlite3.Row]:
+    """Return nodes explicitly used by strategy groups or direct rules."""
+    if rule_set is None: return []
+    references: list[str] = []
+    for group in rule_set.get("groups") or []:
+        if not isinstance(group, dict): continue
+        references.extend(str(item) for item in (group.get("proxies") or []) if item)
+    for rule in rule_set.get("rules") or []:
+        target = _rule_target(rule)
+        if target: references.append(target)
+    all_nodes = list(conn.execute("SELECT * FROM csm_nodes").fetchall())
+    nodes_by_id: dict[str, sqlite3.Row] = {}
+    for reference in dict.fromkeys(references):
+        for row in all_nodes:
+            if reference in {str(row["name"] or ""), str(row["alias"] or "")}:
+                nodes_by_id[str(row["id"])] = row
+    return list(nodes_by_id.values())
+
+
+def _profile_material(conn: sqlite3.Connection, profile_id: str) -> tuple[sqlite3.Row, list[sqlite3.Row], dict[str, Any] | None]:
     profile = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
     if not profile: _not_found("聚合配置")
-    selected = [r["node_identity"] for r in conn.execute("SELECT node_identity FROM csm_profile_selections WHERE profile_id=?", (profile_id,))]
-    nodes: list[sqlite3.Row] = []
-    missing: list[str] = []
-    for identity in selected:
-        row = conn.execute("SELECT * FROM csm_nodes WHERE stable_identity=?", (identity,)).fetchone()
-        if row: nodes.append(row)
-        else: missing.append(identity)
     rule = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)).fetchone() if profile["rule_set_id"] else None
-    rule_set = _materialize_rule_provider_bindings(conn, _rule_row(rule)) if rule else None
-    return profile, nodes, rule_set, missing
+    rule_set = (
+        _materialize_rule_provider_bindings(
+            conn,
+            _rule_row(rule),
+            inline_rule_providers=_profile_rule_provider_output_mode(profile) == "inline",
+        )
+        if rule
+        else None
+    )
+    if rule_set is not None:
+        rule_set = _expand_node_group_members(conn, rule_set)
+    return profile, _rule_referenced_nodes(conn, rule_set), rule_set
+
+
+def _profile_rule_provider_output_mode(profile: sqlite3.Row) -> str:
+    settings = _loads(profile["settings_json"], {})
+    value = str(settings.get("ruleProviderOutputMode") or RULE_PROVIDER_OUTPUT_MODE_DEFAULT).lower()
+    return value if value in RULE_PROVIDER_OUTPUT_MODES else RULE_PROVIDER_OUTPUT_MODE_DEFAULT
 
 
 def _rule_string_parts(rule: str) -> tuple[str, str, str]:
@@ -1253,13 +1540,14 @@ def _rule_target(rule: Any) -> str:
     return ""
 
 
-def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict[str, Any] | None, missing: list[str]) -> list[dict[str, str]]:
+def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict[str, Any] | None) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
+    if rule_set is None:
+        messages.append({"level": "error", "code": "PROFILE_RULE_SET_REQUIRED", "message": "聚合配置必须关联规则组；输出节点由规则组决定。"})
     for item in nodes:
         label = item["alias"] or item["name"]
         if not _compatible(str(item["protocol"])):
             messages.append({"level": "error", "code": "INCOMPATIBLE_OUTPUT", "message": f"节点 {label}（{item['protocol']}）不受 Clash Meta 支持。"})
-    for identity in missing: messages.append({"level": "error", "code": "MISSING_SELECTION", "message": f"已选节点 {identity[:12]}… 已从节点池消失。"})
     if not rule_set: return messages
     groups = rule_set["groups"]; names = {str(group.get("name")) for group in groups if group.get("name")}
     _, node_references, ambiguous_references = _node_output_material(nodes)
@@ -1316,10 +1604,10 @@ def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set:
 def validate_profile(profile_id: str, user: User) -> dict[str, Any]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        profile, nodes, rule_set, missing = _profile_material(conn, profile_id)
-        messages = _validate_material(profile, nodes, rule_set, missing)
+        profile, nodes, rule_set = _profile_material(conn, profile_id)
+        messages = _validate_material(profile, nodes, rule_set)
         conn.execute("UPDATE csm_profiles SET last_validation_json=?,updated_at=? WHERE id=?", (_json(messages), _now(), profile_id))
-    return {"profileId": profile_id, "valid": not any(m["level"] == "error" for m in messages), "messages": messages, "selectedNodeCount": len(nodes), "missingSelections": missing}
+    return {"profileId": profile_id, "valid": not any(m["level"] == "error" for m in messages), "messages": messages, "outputNodeCount": len(nodes)}
 
 
 def _proxy_output(config: dict[str, Any], protocol: str) -> dict[str, Any]:
@@ -1395,7 +1683,7 @@ def _rewrite_rule_material(rule_set: dict[str, Any], references: dict[str, str])
 def _build_config(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict[str, Any] | None) -> dict[str, Any]:
     settings = _loads(profile["settings_json"], {})
     proxies, references, _ = _node_output_material(nodes)
-    config: dict[str, Any] = {"mixed-port": int(settings.get("mixedPort", 7890)), "allow-lan": bool(settings.get("allowLan", False)), "mode": settings.get("mode") if settings.get("mode") in {"rule", "global", "direct"} else "rule", "ipv6": bool(settings.get("ipv6", False)), "proxies": proxies}
+    config: dict[str, Any] = {"mixed-port": int(settings.get("mixedPort", 7890)), "allow-lan": bool(settings.get("allowLan", False)), "mode": "rule", "ipv6": bool(settings.get("ipv6", False)), "proxies": proxies}
     dns = _dns_output(settings.get("dns"))
     if dns: config["dns"] = dns
     if rule_set:
@@ -1411,8 +1699,8 @@ def _build_config(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict
 def preview_profile(profile_id: str, user: User) -> dict[str, Any]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        profile, nodes, rule_set, missing = _profile_material(conn, profile_id)
-        messages = _validate_material(profile, nodes, rule_set, missing)
+        profile, nodes, rule_set = _profile_material(conn, profile_id)
+        messages = _validate_material(profile, nodes, rule_set)
         content = yaml.safe_dump(_build_config(profile, nodes, rule_set), allow_unicode=True, sort_keys=False)
     return {"yaml": content, "valid": not any(m["level"] == "error" for m in messages), "messages": messages}
 
@@ -1432,22 +1720,14 @@ def publish_profile(profile_id: str, user: User) -> dict[str, Any]:
 
 def _create_published_snapshot(conn: sqlite3.Connection, profile_id: str, content: str, now: str) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS csm_published_snapshots (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, content_encrypted TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL)")
+    conn.execute("DELETE FROM csm_published_snapshots WHERE profile_id=?", (profile_id,))
     conn.execute("INSERT INTO csm_published_snapshots VALUES(?,?,?,?,?)", (_id(), profile_id, _encrypt(content), hashlib.sha256(content.encode()).hexdigest(), now))
 
 
-def rotate_profile_token(profile_id: str, user: User) -> dict[str, Any]:
-    init_database(user.id); token = secrets.token_urlsafe(32); now = _now()
-    with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        if not conn.execute("SELECT 1 FROM csm_profiles WHERE id=?", (profile_id,)).fetchone(): _not_found("聚合配置")
-        conn.execute("UPDATE csm_profiles SET token_encrypted=?,updated_at=? WHERE id=?", (_encrypt(token), now, profile_id))
-    with connection_context() as conn:
-        conn.execute("UPDATE csm_public_tokens SET enabled=0,updated_at=? WHERE user_id=? AND profile_id=?", (now, user.id, profile_id))
-        conn.execute("INSERT INTO csm_public_tokens VALUES(?,?,?,?,?,?)", (_token_hash(token), user.id, profile_id, 1, now, now))
-    return {"profileId": profile_id, "subscriptionToken": token}
-
-
-def public_subscription(token: str) -> tuple[str, str, str, str] | None:
-    """Return last successful publication without exposing why a lookup fails."""
+def public_subscription(
+    token: str, *, client_ip: str = "", user_agent: str = ""
+) -> tuple[str, str, str, str] | None:
+    """Return the current publication and record an aggregate-link request."""
     if not token or len(token) > 300: return None
     with connection_context() as conn:
         index = conn.execute("SELECT user_id,profile_id FROM csm_public_tokens WHERE token_hash=? AND enabled=1", (_token_hash(token),)).fetchone()
@@ -1458,8 +1738,126 @@ def public_subscription(token: str) -> tuple[str, str, str, str] | None:
             profile = conn.execute("SELECT name FROM csm_profiles WHERE id=?", (index["profile_id"],)).fetchone()
             snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
             if not profile or not snapshot: return None
-            return _decrypt(snapshot["content_encrypted"]), snapshot["content_hash"], snapshot["created_at"], profile["name"]
+            content = _decrypt(snapshot["content_encrypted"])
+            try:
+                conn.execute(
+                    "INSERT INTO csm_subscription_requests VALUES(?,?,?,?,?,?)",
+                    (_id(), index["profile_id"], _now(), client_ip[:64], user_agent[:300], 200),
+                )
+            except sqlite3.Error:
+                pass
+            return content, snapshot["content_hash"], snapshot["created_at"], profile["name"]
     except (sqlite3.Error, ToolboxError): return None
+
+
+def _latest_node_probes(conn: sqlite3.Connection) -> tuple[dict[str, list[sqlite3.Row]], dict[str, list[sqlite3.Row]]]:
+    rows = conn.execute("""
+      SELECT n.id,n.name,n.alias,n.protocol,p.reachable,p.latency_ms,p.created_at AS probe_at
+      FROM csm_nodes n LEFT JOIN csm_probe_results p ON p.id=(
+        SELECT p2.id FROM csm_probe_results p2 WHERE p2.node_id=n.id
+        ORDER BY p2.created_at DESC,p2.rowid DESC LIMIT 1)
+      ORDER BY n.rowid
+    """).fetchall()
+    aliases: dict[str, list[sqlite3.Row]] = {}
+    originals: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        alias = str(row["alias"] or "")
+        name = str(row["name"] or "")
+        if alias: aliases.setdefault(alias, []).append(row)
+        if name: originals.setdefault(name, []).append(row)
+    return aliases, originals
+
+
+def _probe_for_output_name(name: str, aliases: dict[str, list[sqlite3.Row]], originals: dict[str, list[sqlite3.Row]]) -> sqlite3.Row | None:
+    if name in aliases: return aliases[name][0]
+    if name in originals: return originals[name][0]
+    match = re.fullmatch(r"(.+) \((\d+)\)", name)
+    if not match: return None
+    base, position = match.group(1), int(match.group(2)) - 1
+    values = aliases.get(base) or originals.get(base) or []
+    return values[position] if 0 <= position < len(values) else None
+
+
+def _public_group_details(conn: sqlite3.Connection, rule_row: sqlite3.Row | None, groups: list[dict[str, Any]]) -> None:
+    """Attach safe Provider payloads to the strategy groups that use them."""
+    if rule_row is None: return
+    meta = _loads(rule_row["import_meta_json"], {})
+    bindings = meta.get("providerBindings") if isinstance(meta, dict) else None
+    if not isinstance(bindings, dict): return
+    provider_ids = [str(item) for values in bindings.values() if isinstance(values, list) for item in values if item]
+    provider_rows: dict[str, sqlite3.Row] = {}
+    for provider_id in dict.fromkeys(provider_ids):
+        row = conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
+        if row: provider_rows[provider_id] = row
+    for group in groups:
+        raw_ids = bindings.get(str(group.get("name") or ""))
+        if not isinstance(raw_ids, list):
+            group["providers"] = []
+            continue
+        providers: list[dict[str, Any]] = []
+        for provider_id in dict.fromkeys(str(item) for item in raw_ids if item):
+            row = provider_rows.get(provider_id)
+            if not row: continue
+            config = _normalise_legacy_manual_provider(_loads(row["config_json"], {}))
+            payload = [str(item) for item in config.get("payload") or [] if str(item).strip()]
+            providers.append({
+                "name": str(row["name"]), "kind": "规则订阅" if config.get("type") in {"cached", "http"} else "自定义",
+                "behavior": str(config.get("behavior") or ""), "ruleCount": len(payload), "payload": payload[:200],
+            })
+        group["providers"] = providers
+
+
+def _public_subscription_requests(
+    conn: sqlite3.Connection, profile_id: str, limit: int = 50
+) -> list[dict[str, Any]]:
+    rows = conn.execute("""
+      SELECT id,requested_at,client_ip,user_agent,status_code
+      FROM csm_subscription_requests
+      WHERE profile_id=?
+      ORDER BY requested_at DESC,rowid DESC LIMIT ?
+    """, (profile_id, limit)).fetchall()
+    return [{"id": row["id"], "requestedAt": row["requested_at"], "clientIp": row["client_ip"],
+             "userAgent": row["user_agent"], "statusCode": row["status_code"]} for row in rows]
+
+
+def public_subscription_details(token: str) -> dict[str, Any] | None:
+    """Return a safe visual summary of the current published subscription."""
+    if not token or len(token) > 300: return None
+    with connection_context() as conn:
+        index = conn.execute("SELECT user_id,profile_id FROM csm_public_tokens WHERE token_hash=? AND enabled=1", (_token_hash(token),)).fetchone()
+    if not index: return None
+    try:
+        init_database(index["user_id"])
+        with user_tool_connection_context(index["user_id"], TOOL_ID) as conn:
+            profile = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (index["profile_id"],)).fetchone()
+            snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
+            if not profile or not snapshot: return None
+            content = _decrypt(snapshot["content_encrypted"])
+            rule_row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)).fetchone() if profile["rule_set_id"] else None
+            aliases, originals = _latest_node_probes(conn)
+            try: document = yaml.safe_load(content) or {}
+            except yaml.YAMLError: return None
+            if not isinstance(document, dict): return None
+            groups = [dict(item) for item in document.get("proxy-groups") or [] if isinstance(item, dict)]
+            try: _public_group_details(conn, rule_row, groups)
+            except sqlite3.Error: groups = [group for group in groups if "providers" not in group]
+            try: request_runs = _public_subscription_requests(conn, index["profile_id"])
+            except sqlite3.Error: request_runs = []
+    except (sqlite3.Error, ToolboxError): return None
+    proxies: list[dict[str, Any]] = []
+    for item in document.get("proxies") or []:
+        if not isinstance(item, dict): continue
+        value = {"name": str(item.get("name") or ""), "type": str(item.get("type") or ""),
+                 "server": str(item.get("server") or ""), "port": item.get("port")}
+        probe = _probe_for_output_name(value["name"], aliases, originals)
+        value.update({"latencyMs": probe["latency_ms"] if probe else None,
+                      "reachable": bool(probe["reachable"]) if probe else None,
+                      "checkedAt": probe["probe_at"] if probe else None})
+        proxies.append(value)
+    return {"name": profile["name"], "publishedAt": snapshot["created_at"], "contentHash": snapshot["content_hash"],
+            "mode": str(document.get("mode") or "rule"), "proxies": proxies, "groups": groups,
+            "ruleSetName": profile["rule_set_name"], "ruleSetUpdatedAt": profile["rule_set_updated_at"],
+            "requestRuns": request_runs, "yaml": content}
 
 
 def _probe_one(node: dict[str, Any]) -> dict[str, Any]:
@@ -1500,7 +1898,7 @@ def dashboard(user: User) -> dict[str, Any]:
         published = int(conn.execute("SELECT COUNT(*) FROM csm_profiles WHERE published_at IS NOT NULL").fetchone()[0])
         protocol = [{"name": r["protocol"], "value": r["count"]} for r in conn.execute("SELECT protocol,COUNT(*) count FROM csm_nodes GROUP BY protocol ORDER BY count DESC")]
         sources = [_row_source(r) for r in conn.execute("SELECT * FROM csm_sources ORDER BY CASE status WHEN 'error' THEN 0 ELSE 1 END,last_attempt_at DESC LIMIT 12")]
-        profiles = [_profile_row(r) for r in conn.execute("SELECT * FROM csm_profiles ORDER BY updated_at DESC LIMIT 12")]
+        profiles = [_profile_row(r) for r in conn.execute(f"{_PROFILE_WITH_RULE_SET} ORDER BY p.updated_at DESC LIMIT 12")]
         alerts = []
         for source in sources:
             if source["status"] == "error": alerts.append({"kind": "source", "level": "error", "message": f"订阅源 {source['name']} 刷新失败：{source['lastError']}"})
@@ -1541,3 +1939,47 @@ def refresh_due_sources() -> None:
         for source_id in due:
             try: refresh_source(source_id, ScheduledUser(), auto_rebuild=True)  # type: ignore[arg-type]
             except ToolboxError: pass
+
+
+def _rebuild_changed_published_profiles(user: User) -> None:
+    """Refresh published YAML only when its content actually changes.
+
+    Latency groups can alter strategy-group members after a probe. Comparing the
+    generated hash avoids creating a new snapshot every two minutes when the
+    ordered member list is unchanged.
+    """
+    for profile in list_profiles(user):
+        if not profile["publishedAt"]: continue
+        try:
+            preview = preview_profile(profile["id"], user)
+            if not preview["valid"]:
+                with user_tool_connection_context(user.id, TOOL_ID) as conn:
+                    conn.execute("UPDATE csm_profiles SET published_status='degraded',updated_at=? WHERE id=? AND published_status<>'degraded'", (_now(), profile["id"]))
+                continue
+            digest = hashlib.sha256(preview["yaml"].encode()).hexdigest()
+            with user_tool_connection_context(user.id, TOOL_ID) as conn:
+                snapshot = conn.execute("SELECT content_hash FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (profile["id"],)).fetchone()
+            if snapshot and snapshot["content_hash"] == digest:
+                if profile["publishedStatus"] != "published" or profile["validation"] != preview["messages"]:
+                    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+                        conn.execute("UPDATE csm_profiles SET published_status='published',last_validation_json=?,updated_at=? WHERE id=?", (_json(preview["messages"]), _now(), profile["id"]))
+                continue
+            publish_profile(profile["id"], user)
+        except ToolboxError:
+            with user_tool_connection_context(user.id, TOOL_ID) as conn:
+                conn.execute("UPDATE csm_profiles SET published_status='degraded',updated_at=? WHERE id=? AND published_status<>'degraded'", (_now(), profile["id"]))
+
+
+def probe_all_nodes() -> None:
+    """Scheduler entry: probe every node every two minutes for every user."""
+    for user_id, _path in list_user_tool_dbs(TOOL_ID):
+        init_database(user_id)
+        class ScheduledUser:  # noqa: D101
+            id = user_id
+        with user_tool_connection_context(user_id, TOOL_ID) as conn:
+            node_ids = [row["id"] for row in conn.execute("SELECT id FROM csm_nodes")]
+            has_latency_group = bool(conn.execute("SELECT 1 FROM csm_node_groups WHERE kind='latency' LIMIT 1").fetchone())
+        for offset in range(0, len(node_ids), 1000):
+            probe_nodes(node_ids[offset:offset + 1000], ScheduledUser())  # type: ignore[arg-type]
+        if has_latency_group:
+            _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]

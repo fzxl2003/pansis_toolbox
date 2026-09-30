@@ -6,6 +6,12 @@
 .csm-topnav button:hover { color: #4f46e5; background: #f8fafc; }
 .csm-topnav button.active { color: #4f46e5; background: #eef2ff; border-bottom: 3px solid #4f46e5; font-weight: 600; }
 
+.csm-subnav { display: flex; align-items: center; gap: 4px; width: fit-content; padding: 4px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px; }
+.csm-subnav button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 0; border-radius: 6px; color: #526071; background: transparent; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.csm-subnav button:hover { color: #4f46e5; }
+.csm-subnav button.active { color: #4f46e5; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.06); font-weight: 600; }
+.csm-subnav button small { color: #94a3b8; font-size: 11px; font-weight: 400; }
+
 .csm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 7px 14px; border: 1px solid transparent; border-radius: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
 .csm-btn:disabled { opacity: .55; cursor: not-allowed; }
 .csm-btn-primary { color: #fff; background: #4f46e5; }
@@ -24,6 +30,7 @@
 .csm-panel { min-width: 0; padding: 18px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; }
 .csm-toolbar,.csm-panel-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .csm-toolbar h2,.csm-panel-title h2 { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; font-weight: 600; }
+.csm-panel-title-action { display: inline-flex; align-items: center; gap: 4px; }
 .csm-toolbar-actions,.csm-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .csm-grid-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .csm-metrics { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 12px; }
@@ -137,9 +144,6 @@
 .csm-strategy-node-list > label > span { display: grid; min-width: 0; gap: 2px; }
 .csm-strategy-node-list strong { overflow: hidden; color: #334155; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .csm-strategy-node-list small { overflow: hidden; color: #64748b; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.csm-preserved-refs { display: flex; align-items: center; gap: 12px; padding: 9px 11px; overflow: auto; color: #7c3aed; background: #faf5ff; font-size: 11px; }
-.csm-preserved-refs > span { flex: 0 0 auto; font-weight: 600; }
-.csm-preserved-refs label { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; cursor: pointer; }
 .csm-strategy-picker > .csm-provider-picker-list { padding: 10px; max-height: 260px; overflow: auto; }
 .csm-provider-order { display: grid; gap: 6px; padding: 10px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
 .csm-provider-order-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #475569; }
@@ -153,6 +157,25 @@
 .csm-provider-order-name small { color: #64748b; font: 10px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .csm-provider-order-actions { display: flex; gap: 2px; }
 .csm-provider-order-actions .csm-btn { width: 28px; min-width: 28px; padding: 0; }
+
+/* Node group selection inside strategy editor + node group modal */
+.csm-strategy-group-picker { border-bottom: 1px solid #e2e8f0; background: #fbfdff; }
+.csm-strategy-group-picker-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 11px 5px; }
+.csm-strategy-group-picker-head strong { color: #334155; font-size: 12px; }
+.csm-strategy-group-picker-head small { color: #64748b; font-size: 10px; }
+.csm-strategy-group-picker > label { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 8px 11px; border-top: 1px solid #f1f5f9; cursor: pointer; }
+.csm-strategy-group-picker > label:hover { background: #f8fafc; }
+.csm-strategy-group-picker > label.checked { background: #eef2ff; }
+.csm-strategy-group-picker > label > span { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.csm-strategy-group-picker > label > span > strong { color: #334155; font-size: 12px; }
+.csm-strategy-group-picker > label > span > small { width: 100%; color: #64748b; font-size: 10px; }
+.csm-check-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 4px 0; }
+.csm-check-grid .csm-check { margin: 0; }
+.csm-node-group-members { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 38px; padding: 9px 11px; border: 1px solid #e2e8f0; border-radius: 7px; background: #f8fafc; }
+.csm-node-group-members code { padding: 2px 8px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; color: #334155; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.csm-node-group-members small { color: #64748b; font-size: 11px; }
+.csm-node-group-members .csm-muted { color: #94a3b8; font-size: 12px; }
+
 
 @media (max-width: 700px) {
   .csm-strategy-group-card { align-items: flex-start; }
@@ -227,4 +250,10 @@
   .csm-add-node-options > button { min-height: 145px; }
   .csm-node-group-head,.csm-custom-node-help { align-items: flex-start; flex-direction: column; }
   .csm-node-group-actions { justify-content: flex-start; }
+}
+.csm-cell-links {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }

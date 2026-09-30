@@ -231,9 +231,13 @@
 .csm-node-group td.csm-node-name-col > .csm-cell-note,
 .csm-node-group td.csm-node-name-col > .csm-probe-feedback { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .csm-node-group td.csm-node-name-col > strong { display: block; }
-.csm-probe-feedback { display: block; margin-top: 4px; font-size: 11px; font-weight: 600; }
+.csm-probe-feedback { display: block; font-size: 11px; font-weight: 600; }
+.csm-node-name-col .csm-probe-feedback { margin-top: 4px; }
 .csm-probe-feedback.reachable { color: #15803d; }
 .csm-probe-feedback.failed { color: #b91c1c; }
+.csm-node-group .csm-node-country-col { width: 118px; max-width: 118px; }
+.csm-node-group td.csm-node-country-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.csm-node-group .csm-node-probe-col { width: 142px; max-width: 142px; }
 .csm-node-group .csm-node-actions-col { width: 1%; white-space: nowrap; }
 .csm-node-group .csm-node-actions-col .csm-actions { flex-wrap: nowrap; }
 .csm-add-node-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }

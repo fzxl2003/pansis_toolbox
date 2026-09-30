@@ -88,6 +88,85 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     assert "vless" in details["yaml"]
 
 
+def test_public_details_returns_scheduled_http_rule_provider_snapshot(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="public-provider-user", username="public-provider", display_name="Public Provider")
+    service.init_database(user.id)
+    remote_payload = [f"service-{index}.example" for index in range(8)]
+    monkeypatch.setattr(service, "_download_rule_provider_payload", lambda url: remote_payload)
+
+    source = service.create_source({"name": "source", "url": "https://example.invalid/sub"}, user)
+    node = service.parse_uri("vless://00000000-0000-0000-0000-000000000002@example.org:443?security=reality&sni=example.org&fp=chrome&pbk=public-key&sid=abcd&flow=xtls-rprx-vision#http-provider-node")
+    assert node
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        service._store_nodes(conn, source["id"], [node])
+    provider = service.save_rule_provider({
+        "name": "HTTP 规则",
+        "providerKey": "http-rules",
+        "config": {"type": "http", "behavior": "domain", "url": "https://example.invalid/rules.yaml", "interval": 86400},
+    }, user)
+    assert provider["config"]["payload"] == remote_payload
+    assert provider["config"]["fetchedAt"]
+    assert provider["config"]["fetchError"] == ""
+
+    rule_set = service.save_rule_set({
+        "name": "http provider rules",
+        "groups": [{"name": "PROXY", "type": "select", "proxies": [node["name"]]}],
+        "rules": ["MATCH,PROXY"],
+        "providers": {},
+        "importMeta": {"providerBindings": {"PROXY": [provider["id"]]}},
+    }, user)
+    profile = service.create_profile({"name": "public provider sub", "ruleSetId": rule_set["id"]}, user)
+    published = service.publish_profile(profile["id"], user)
+
+    # Public visualization is served entirely from the persisted snapshot.
+    def fail_download(url: str) -> list[str]:
+        raise AssertionError("public details must not fetch URL Rule Providers")
+
+    monkeypatch.setattr(service, "_download_rule_provider_payload", fail_download)
+    details = service.public_subscription_details(published["subscriptionToken"])
+    assert details is not None
+    provider_details = details["groups"][0]["providers"][0]
+    assert provider_details["kind"] == "规则订阅"
+    assert provider_details["ruleCount"] == len(remote_payload)
+    assert provider_details["payload"] == remote_payload
+    assert provider_details["error"] == ""
+
+    # The scheduler refreshes due snapshots outside the public request path.
+    def expire_snapshot() -> None:
+        with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+            conn.execute(
+                "UPDATE csm_rule_providers SET config_json=json_set(config_json, '$.fetchedAt', ?) WHERE id=?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=86460)).isoformat(), provider["id"]),
+            )
+
+    def read_provider() -> dict[str, object]:
+        return next(item for item in service.list_rule_providers(user) if item["id"] == provider["id"])
+
+    expire_snapshot()
+    monkeypatch.setattr(
+        service,
+        "_download_rule_provider_payload",
+        lambda url: (_ for _ in ()).throw(ToolboxError("RULE_PROVIDER_FETCH_FAILED", "拉取失败", status_code=422)),
+    )
+    service.refresh_due_rule_providers()
+    failed_provider = read_provider()
+    assert failed_provider["config"]["payload"] == remote_payload
+    assert failed_provider["config"]["fetchError"] == "拉取失败"
+
+    expire_snapshot()
+    refreshed_payload = [f"refreshed-{index}.example" for index in range(8)]
+    monkeypatch.setattr(service, "_download_rule_provider_payload", lambda url: refreshed_payload)
+    service.refresh_due_rule_providers()
+    updated_provider = read_provider()
+    assert updated_provider["config"]["payload"] == refreshed_payload
+    assert updated_provider["config"]["fetchError"] == ""
+    assert updated_provider["config"]["fetchedAt"] > provider["config"]["fetchedAt"]
+
+
 def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)
@@ -116,6 +195,15 @@ def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
     result = service.validate_profile(profile["id"], user)
     assert not result["valid"]
     assert any(message["code"] == "INCOMPATIBLE_OUTPUT" for message in result["messages"])
+
+    preview = service.preview_profile(profile["id"], user)
+    assert not preview["valid"]
+    assert "proxies: []" in preview["yaml"]
+    assert any("不可输出 1 个" in line for line in preview["buildLog"])
+    assert any(line.endswith("ERROR INCOMPATIBLE_OUTPUT：节点 unsupported（naive）不受 Clash Meta 支持。") for line in preview["buildLog"])
+    with pytest.raises(ToolboxError) as publish_error:
+        service.publish_profile(profile["id"], user)
+    assert publish_error.value.code == "PUBLISH_VALIDATION_FAILED"
 
 
 def test_download_retries_transient_dns_failure(monkeypatch) -> None:
@@ -417,7 +505,13 @@ def test_profile_rule_provider_output_mode_controls_inline_expansion(tmp_path, m
     monkeypatch.setattr(database, "get_settings", lambda: settings)
     service._initialized.clear()
     user = User(id="provider-output-mode-user", username="output-mode", display_name="Output Mode")
+    downloads: list[str] = []
 
+    def fake_download(url: str) -> list[str]:
+        downloads.append(url)
+        return ["chat.example.com", "+.ai.example"]
+
+    monkeypatch.setattr(service, "_download_rule_provider_payload", fake_download)
     provider = service.save_rule_provider({
         "name": "AI 平台",
         "providerKey": "remote-test",
@@ -439,12 +533,6 @@ def test_profile_rule_provider_output_mode_controls_inline_expansion(tmp_path, m
     profile = service.create_profile({"name": "内联配置", "ruleSetId": rule_set["id"]}, user)
     assert profile["settings"]["ruleProviderOutputMode"] == "inline"
 
-    downloads: list[str] = []
-    def fake_download(url: str) -> list[str]:
-        downloads.append(url)
-        return ["chat.example.com", "+.ai.example"]
-
-    monkeypatch.setattr(service, "_download_rule_provider_payload", fake_download)
     inline_preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
     assert downloads == ["https://example.invalid/ai.yaml"]
     assert "rule-providers" not in inline_preview
@@ -522,6 +610,12 @@ def test_custom_nodes_can_be_created_edited_and_subscription_nodes_copied(tmp_pa
     assert copied["config"]["uuid"] == "00000000-0000-0000-0000-000000000001"
 
     stable_identity = copied["stableIdentity"]
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        conn.execute(
+            """UPDATE csm_nodes SET resolved_ip='1.1.1.1',country_code='SG',
+            country_label='新加坡',geo_checked_at=?,geo_error='' WHERE id=?""",
+            (service._now(), copied["id"]),
+        )
     updated = service.update_custom_node(copied["id"], """name: edited-node
 type: trojan
 server: trojan.example.org
@@ -535,6 +629,9 @@ sni: trojan.example.org
     assert updated["alias"] == "edited-alias"
     assert updated["displayName"] == "edited-alias"
     assert updated["config"]["password"] == "new-secret"
+    assert updated["resolvedIp"] == ""
+    assert updated["country"] is None
+    assert updated["geoCheckedAt"] is None
 
     created = service.create_custom_node("""name: hand-written
 type: socks5
@@ -555,6 +652,94 @@ password: local-pass
     assert all(node["id"] != created["id"] for node in service.list_nodes(user))
 
 
+def test_node_geoip_resolution_cache_failures_and_region_groups(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="geoip-user", username="geoip", display_name="GeoIP")
+    source = service.create_source({"name": "source", "url": "https://example.invalid/sub"}, user)
+
+    def _ss(fragment: str, server: str, port: int) -> dict:
+        uri = "ss://" + base64.urlsafe_b64encode(f"aes-128-gcm:pass{port}@{server}:{port}".encode()).decode().rstrip("=") + f"#{fragment}"
+        return service.parse_uri(uri)
+
+    direct = _ss("direct", "8.8.8.8", 10001)
+    domain_a = _ss("domain-a", "a.example", 10002)
+    domain_b = _ss("domain-b", "b.example", 10003)
+    failed = _ss("failed", "4.4.4.4", 10004)
+    reserved = _ss("reserved", "192.168.1.10", 10005)
+    assert all((direct, domain_a, domain_b, failed, reserved))
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        service._store_nodes(conn, source["id"], [direct, domain_a, domain_b, failed, reserved])
+        rows = {row["name"]: row for row in conn.execute("SELECT * FROM csm_nodes")}
+        conn.executemany(
+            "INSERT INTO csm_probe_results(id,node_id,reachable,dns_address,latency_ms,error,created_at) VALUES(?,?,1,?,10,'',?)",
+            [(service._id(), rows["domain-a"]["id"], "1.1.1.1", service._now()),
+             (service._id(), rows["domain-b"]["id"], "1.1.1.1", service._now())],
+        )
+
+    queried_ips: list[str] = []
+    results = {
+        "8.8.8.8": {"countryCode": "US", "countryLabel": "美国", "error": ""},
+        "1.1.1.1": {"countryCode": "SG", "countryLabel": "新加坡", "error": ""},
+        "4.4.4.4": {"countryCode": "", "countryLabel": "", "error": "IP.SB 查询失败"},
+    }
+    def fake_query(ip: str) -> dict[str, str]:
+        queried_ips.append(ip)
+        return results[ip]
+
+    monkeypatch.setattr(service, "_query_ip_sb", fake_query)
+    updated = service.refresh_node_geoip([], user)
+    updated_by_name = {node["name"]: node for node in updated}
+    assert updated_by_name["direct"]["country"] == "US"
+    assert updated_by_name["direct"]["countryLabel"] == "美国"
+    assert service._normalise_ip_sb_payload({"country_code": "US", "country": "United States"}) == {
+        "countryCode": "US", "countryLabel": "美国", "error": ""
+    }
+    assert updated_by_name["domain-a"]["country"] == "SG"
+    assert updated_by_name["domain-b"]["country"] == "SG"
+    assert updated_by_name["failed"]["country"] is None
+    assert updated_by_name["failed"]["geoError"] == "IP.SB 查询失败"
+    assert "保留地址" in updated_by_name["reserved"]["geoError"]
+    # Duplicate IPs use the persistent cache; a failed lookup is still cached.
+    assert set(queried_ips) == {"8.8.8.8", "1.1.1.1", "4.4.4.4"}
+
+    region = service.save_node_group({"name": "US/SG", "kind": "region", "config": {"countries": ["US", "SG"]}}, user)
+    assert set(region["members"]) == {"direct", "domain-a", "domain-b"}
+
+    # A changed probe IP invalidates the old node-level GeoIP result.
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        node_id = conn.execute("SELECT id FROM csm_nodes WHERE name='domain-a'").fetchone()["id"]
+        conn.execute("INSERT INTO csm_probe_results(id,node_id,reachable,dns_address,latency_ms,error,created_at) VALUES(?,?,1,?,9,'',?)",
+                     (service._id(), node_id, "9.9.9.9", service._now()))
+    results["9.9.9.9"] = {"countryCode": "JP", "countryLabel": "日本", "error": ""}
+    changed = {node["name"]: node for node in service.refresh_node_geoip([node_id], user)}
+    assert changed["domain-a"]["country"] == "JP"
+    assert changed["domain-a"]["resolvedIp"] == "9.9.9.9"
+    assert queried_ips[-1] == "9.9.9.9"
+
+
+def test_node_geoip_resolves_domain_without_probe_result(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="geoip-dns-user", username="geoip-dns", display_name="GeoIP DNS")
+    source = service.create_source({"name": "source", "url": "https://example.invalid/sub"}, user)
+    node = service.parse_uri("ss://" + base64.urlsafe_b64encode(b"aes-128-gcm:pass@dns.example:443").decode().rstrip("=") + "#dns-node")
+    assert node
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        service._store_nodes(conn, source["id"], [node])
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    monkeypatch.setattr(service, "_query_ip_sb", lambda ip: {"countryCode": "US", "countryLabel": "美国", "error": ""})
+    result = service.refresh_node_geoip([], user)[0]
+    assert result["resolvedIp"] == "93.184.216.34"
+    assert result["country"] == "US"
+    assert result["countryLabel"] == "美国"
+
+
 def test_node_groups_crud_resolution_and_strategy_expansion(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)
@@ -571,6 +756,17 @@ def test_node_groups_crud_resolution_and_strategy_expansion(tmp_path, monkeypatc
     assert node_a and node_b and node_c
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         service._store_nodes(conn, source["id"], [node_a, node_b, node_c])
+
+    # Region membership is now based on persisted GeoIP results, never node names.
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        geo_by_name = {
+            "🇭🇰 Hong Kong 01": ("203.0.114.1", "HK", "香港"),
+            "🇯🇵 Japan 01": ("203.0.114.2", "JP", "日本"),
+            "🇺🇸 US 01": ("203.0.114.3", "US", "美国"),
+        }
+        for name, (ip, code, label) in geo_by_name.items():
+            conn.execute("""UPDATE csm_nodes SET resolved_ip=?,country_code=?,country_label=?,
+              geo_checked_at=?,geo_error='' WHERE name=?""", (ip, code, label, service._now(), name))
 
     nodes = service.list_nodes(user)
     ids_by_name = {node["name"]: node["id"] for node in nodes}

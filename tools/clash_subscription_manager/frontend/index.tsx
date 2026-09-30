@@ -1,6 +1,6 @@
 import "./style.css";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -74,6 +74,9 @@ type Node = {
   lastSeenAt: string;
   country?: string | null;
   countryLabel?: string | null;
+  resolvedIp?: string;
+  geoError?: string;
+  geoCheckedAt?: string | null;
   config: Record<string, unknown>;
   tcp?: {
     reachable: boolean;
@@ -101,6 +104,12 @@ type Profile = {
   publishedStatus: string;
   validation: ValidationMessage[];
   subscriptionToken?: string;
+};
+type ProfilePreview = {
+  yaml: string;
+  valid: boolean;
+  messages: ValidationMessage[];
+  buildLog: string[];
 };
 type RuleSet = {
   id: string;
@@ -496,6 +505,16 @@ export default function ClashSubscriptionManager() {
                 nodes={nodes}
                 loading={loading}
                 pending={pending}
+                onNodesChange={(updatedNodes) =>
+                  setNodes((current) => {
+                    const updatedById = new Map(
+                      updatedNodes.map((node) => [node.id, node]),
+                    );
+                    return current.map(
+                      (node) => updatedById.get(node.id) ?? node,
+                    );
+                  })
+                }
                 onAdd={() => setAddNodeOpen(true)}
                 onEditSource={setSourceModal}
                 onRemoveSource={removeSource}
@@ -673,6 +692,12 @@ export default function ClashSubscriptionManager() {
         <NodeGroupModal
           group={nodeGroupModal}
           nodes={nodes}
+          onNodesChange={(updatedNodes) =>
+            setNodes((current) => {
+              const updatedById = new Map(updatedNodes.map((node) => [node.id, node]));
+              return current.map((node) => updatedById.get(node.id) ?? node);
+            })
+          }
           onClose={() => setNodeGroupModal(false)}
           onSaved={async (text) => {
             setNodeGroupModal(false);
@@ -1083,6 +1108,7 @@ function NodesView({
   onCopy,
   onAlias,
   onProbe,
+  onNodesChange,
 }: {
   sources: Source[];
   nodes: Node[];
@@ -1097,15 +1123,69 @@ function NodesView({
   onCopy: (node: Node) => void;
   onAlias: (node: Node) => void;
   onProbe: (ids: string[]) => void;
+  onNodesChange: (nodes: Node[]) => void;
 }) {
   const [search, setSearch] = useState("");
   const [protocol, setProtocol] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [probeClock, setProbeClock] = useState(() => Date.now());
+  const [geoStatus, setGeoStatus] = useState<"idle" | "loading" | "partial">(
+    "idle",
+  );
+  const geoAttemptedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const timer = window.setInterval(() => setProbeClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+  const pendingGeoNodes = useMemo(
+    () =>
+      nodes
+        .filter(
+          (node) =>
+            (!node.country || node.geoError) &&
+            !geoAttemptedRef.current.has(node.id),
+        )
+        .slice(0, 1000),
+    [nodes],
+  );
+  const pendingGeoKey = pendingGeoNodes.map((node) => node.id).join(",");
+  useEffect(() => {
+    if (!pendingGeoKey) {
+      setGeoStatus("idle");
+      return;
+    }
+    const requestIds = pendingGeoKey.split(",");
+    let stale = false;
+    setGeoStatus("loading");
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const data = await apiPost<{ nodes: Node[] }>(
+            `${API}/nodes/geoip`,
+            { nodeIds: requestIds },
+          );
+          if (stale) return;
+          requestIds.forEach((id) => geoAttemptedRef.current.add(id));
+          onNodesChange(data.nodes);
+          setGeoStatus(
+            data.nodes.some((node) => !node.country) ? "partial" : "idle",
+          );
+        } catch {
+          if (stale) return;
+          requestIds.forEach((id) => geoAttemptedRef.current.add(id));
+          setGeoStatus("partial");
+        }
+      })();
+    }, 400);
+
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+    // Node objects are refreshed by the response; the request is keyed by IDs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGeoKey]);
+
   const protocols = useMemo(
     () => Array.from(new Set(nodes.map((node) => node.protocol))).sort(),
     [nodes],
@@ -1179,6 +1259,8 @@ function NodesView({
               />
             </th>
             <th className="csm-node-name-col">节点</th>
+            <th className="csm-node-country-col">国家/地区</th>
+            <th className="csm-node-probe-col">TCP 状态</th>
             <th>协议</th>
             <th>端点</th>
             <th>兼容性</th>
@@ -1214,7 +1296,22 @@ function NodesView({
                 <small className="csm-cell-note">
                   最后更新：{stamp(node.lastSeenAt)}
                 </small>
-                {recentProbe(node) && node.tcp && (
+              </td>
+              <td
+                className="csm-node-country-col"
+                title={[
+                  node.country ? `国家/地区代码：${node.country}` : undefined,
+                  node.resolvedIp ? `识别 IP：${node.resolvedIp}` : undefined,
+                  node.geoError || undefined,
+                ]
+                  .filter(Boolean)
+                  .join("\n")}
+              >
+                {node.countryLabel || node.country ||
+                  (geoStatus === "loading" ? "识别中…" : "未知")}
+              </td>
+              <td className="csm-node-probe-col">
+                {recentProbe(node) && node.tcp ? (
                   <small
                     className={`csm-probe-feedback ${node.tcp.reachable ? "reachable" : "failed"}`}
                     title={node.tcp.error || undefined}
@@ -1223,6 +1320,8 @@ function NodesView({
                       ? `TCP 可达 · ${node.tcp.latencyMs ?? "—"} ms`
                       : `TCP 失败${node.tcp.error ? ` · ${node.tcp.error}` : ""}`}
                   </small>
+                ) : (
+                  <span className="csm-muted">—</span>
                 )}
               </td>
               <td>
@@ -2514,11 +2613,13 @@ function NodeGroupsView({
 function NodeGroupModal({
   group,
   nodes,
+  onNodesChange,
   onClose,
   onSaved,
 }: {
   group: NodeGroup | null;
   nodes: Node[];
+  onNodesChange: (nodes: Node[]) => void;
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
@@ -2543,6 +2644,10 @@ function NodeGroupModal({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [geoStatus, setGeoStatus] = useState<"idle" | "loading" | "partial">(
+    "idle",
+  );
+  const geoAttemptedRef = useRef<Set<string>>(new Set());
 
   const visibleNodes = useMemo(() => {
     const keyword = nodeSearch.trim().toLowerCase();
@@ -2555,9 +2660,69 @@ function NodeGroupModal({
     );
   }, [nodes, nodeSearch]);
 
+  const selectedNodes = useMemo(
+    () => nodes.filter((node) => nodeIds.includes(node.id)),
+    [nodes, nodeIds],
+  );
+  const pendingGeoNodes = useMemo(
+    () =>
+      kind === "region"
+        ? selectedNodes.filter(
+            (node) =>
+              (!node.country || node.geoError) &&
+              !geoAttemptedRef.current.has(node.id),
+          )
+        : [],
+    [kind, selectedNodes],
+  );
+  const pendingGeoKey = pendingGeoNodes.map((node) => node.id).join(",");
+
+  const hasUnknownCountry =
+    kind === "region" &&
+    selectedNodes.some((node) => !node.country || Boolean(node.geoError));
+
+  useEffect(() => {
+    if (!pendingGeoKey) {
+      setGeoStatus("idle");
+      return;
+    }
+    const requestIds = pendingGeoKey.split(",");
+    let stale = false;
+    setGeoStatus("loading");
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const data = await apiPost<{ nodes: Node[] }>(
+            `${API}/nodes/geoip`,
+            { nodeIds: requestIds },
+          );
+          if (stale) return;
+          requestIds.forEach((id) => geoAttemptedRef.current.add(id));
+          onNodesChange(data.nodes);
+          setGeoStatus(
+            data.nodes.some((node) => !node.country) ? "partial" : "idle",
+          );
+        } catch {
+          if (stale) return;
+          requestIds.forEach((id) => geoAttemptedRef.current.add(id));
+          setGeoStatus("partial");
+        }
+      })();
+    }, 400);
+
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+    // The key intentionally drives this effect; individual node objects are
+    // refreshed by the response and must not restart the same request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGeoKey]);
+
   const countryOptions = useMemo(() => {
     const seen = new Map<string, string>();
-    for (const node of nodes) {
+    const sourceNodes = nodeIds.length ? selectedNodes : nodes;
+    for (const node of sourceNodes) {
       if (node.country && !seen.has(node.country)) {
         seen.set(node.country, node.countryLabel || node.country);
       }
@@ -2566,7 +2731,7 @@ function NodeGroupModal({
       code,
       label,
     }));
-  }, [nodes]);
+  }, [nodes, selectedNodes, nodeIds.length]);
 
   const previewMembers = useMemo(() => {
     const refOf = (node: Node) => node.alias || node.name;
@@ -2754,6 +2919,13 @@ function NodeGroupModal({
           </Field>
         {kind === "region" && (
           <Field label={`国家 / 地区（多选，已选 ${countries.length}）`} full>
+              {(geoStatus !== "idle" || hasUnknownCountry) && (
+                <div className="csm-muted" style={{ marginBottom: 8 }}>
+                  {geoStatus === "loading"
+                    ? "正在识别国家/地区…"
+                    : "部分节点国家/地区识别失败，将按未知处理。"}
+                </div>
+              )}
               <div className="csm-check-grid">
                 {countryOptions.map((option) => (
                   <label className="csm-check" key={option.code}>
@@ -3106,6 +3278,7 @@ function ProfileModal({
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [diagnostic, setDiagnostic] = useState<ProfilePreview | null>(null);
 
   async function save() {
     if (!name.trim()) {
@@ -3118,6 +3291,8 @@ function ProfileModal({
     }
     setSaving(true);
     setError("");
+    setDiagnostic(null);
+    let saved: Profile | undefined;
     try {
       const payload = {
         name: name.trim(),
@@ -3127,7 +3302,7 @@ function ProfileModal({
         },
         ruleSetId,
       };
-      const saved = profile
+      saved = profile
         ? (
             await apiPut<{ profile: Profile }>(
               `${API}/profiles/${profile.id}`,
@@ -3139,7 +3314,24 @@ function ProfileModal({
       await apiPost(`${API}/profiles/${saved.id}/publish`, {});
       await onSaved(profile ? "聚合配置已更新并发布" : "聚合配置已创建并发布");
     } catch (caught) {
-      setError(message(caught));
+      const failureMessage = message(caught);
+      setError(failureMessage);
+      if (
+        saved &&
+        caught instanceof ApiError &&
+        caught.code === "PUBLISH_VALIDATION_FAILED"
+      ) {
+        try {
+          setDiagnostic(
+            await apiGet<ProfilePreview>(
+              `${API}/profiles/${saved.id}/preview`,
+            ),
+          );
+        } catch {
+          // Keep the original publish error visible if diagnostics cannot be
+          // fetched.
+        }
+      }
     } finally {
       setSaving(false);
     }
@@ -3268,6 +3460,104 @@ function ProfileModal({
           <small className="csm-muted">
             输出固定为 Clash Meta YAML，运行模式固定为 Rule；节点与策略组完全由所选规则组决定。
           </small>
+        </div>
+      </div>
+      {diagnostic && (
+        <ProfileDiagnosticModal
+          profileName={name || "未命名配置"}
+          preview={diagnostic}
+          onClose={() => setDiagnostic(null)}
+        />
+      )}
+    </Modal>
+  );
+}
+
+function ProfileDiagnosticModal({
+  profileName,
+  preview,
+  onClose,
+}: {
+  profileName: string;
+  preview: ProfilePreview;
+  onClose: () => void;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "success" | "failed">(
+    "idle",
+  );
+  const validationText = preview.messages
+    .map(
+      (item) =>
+        `${item.level.toUpperCase()} ${item.code ?? "UNKNOWN"}：${item.message}`,
+    )
+    .join("\n");
+  const diagnosticText = [
+    "Clash Meta 配置诊断",
+    `配置名称：${profileName}`,
+    `校验结果：${preview.valid ? "通过" : "未通过"}`,
+    "",
+    "===== 校验消息 =====",
+    validationText || "无",
+    "",
+    "===== 生成过程日志 =====",
+    preview.buildLog.join("\n"),
+    "",
+    "===== YAML 原文 =====",
+    preview.yaml,
+  ].join("\n");
+
+  async function copyDiagnostic() {
+    try {
+      await navigator.clipboard.writeText(diagnosticText);
+      setCopyState("success");
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
+  return (
+    <Modal
+      title="配置校验诊断"
+      width={900}
+      onClose={onClose}
+      foot={
+        <>
+          <span className="csm-footnote">
+            {copyState === "success"
+              ? "诊断信息已复制。"
+              : copyState === "failed"
+                ? "复制失败，请手动选择内容复制。"
+                : "复制内容包含校验消息、生成过程日志和 YAML 原文。"}
+          </span>
+          <button
+            className="csm-btn csm-btn-secondary"
+            type="button"
+            onClick={onClose}
+          >
+            关闭
+          </button>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            onClick={() => void copyDiagnostic()}
+          >
+            <Clipboard size={14} />
+            复制诊断信息
+          </button>
+        </>
+      }
+    >
+      <div className="csm-stack">
+        <Alert type="error">
+          配置校验未通过，已发布版本未被覆盖。请结合下方过程日志与 YAML 原文定位问题。
+        </Alert>
+        <div className="csm-preview">
+          <strong>校验消息</strong>
+          <pre>{validationText || "无"}</pre>
+          <strong>生成过程日志</strong>
+          <pre>{preview.buildLog.join("\n")}</pre>
+          <strong>YAML 原文</strong>
+          <pre>{preview.yaml}</pre>
         </div>
       </div>
     </Modal>

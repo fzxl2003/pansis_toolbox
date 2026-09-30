@@ -61,6 +61,10 @@ class ProbePayload(BaseModel):
     nodeIds: list[str] = Field(default_factory=list, max_length=1000)
 
 
+class NodeGeoIpPayload(BaseModel):
+    nodeIds: list[str] = Field(default_factory=list, max_length=1000)
+
+
 class NodeAliasPayload(BaseModel):
     alias: str = Field(default="", max_length=120)
 
@@ -137,6 +141,11 @@ def probe_nodes(request: Request, payload: ProbePayload) -> dict[str, Any]:
     return {"results": service.probe_nodes(payload.nodeIds, require_user(request)), "notice": "TCP 可达不代表代理可用或真实延迟。"}
 
 
+@router.post("/nodes/geoip")
+def refresh_node_geoip(request: Request, payload: NodeGeoIpPayload) -> dict[str, Any]:
+    return {"nodes": service.refresh_node_geoip(payload.nodeIds, require_user(request))}
+
+
 @router.post("/nodes/{node_id}/copy")
 def copy_node(request: Request, node_id: str) -> dict[str, Any]:
     return {"node": service.copy_subscription_node(node_id, require_user(request))}
@@ -200,6 +209,11 @@ def remove_profile(request: Request, profile_id: str) -> dict[str, bool]:
 @router.post("/profiles/{profile_id}/validate")
 def validate_profile(request: Request, profile_id: str) -> dict[str, Any]:
     return service.validate_profile(profile_id, require_user(request))
+
+
+@router.get("/profiles/{profile_id}/preview")
+def preview_profile(request: Request, profile_id: str) -> dict[str, Any]:
+    return service.preview_profile(profile_id, require_user(request))
 
 
 @router.post("/profiles/{profile_id}/publish")
@@ -341,19 +355,48 @@ def _subscription_details_html(token: str, details: dict[str, Any]) -> str:
 
     group_cards: list[str] = []
     group_modals: list[str] = []
+    provider_modals: list[str] = []
+    provider_modal_keys: set[str] = set()
+    provider_preview_limit = 5
     for index, group in enumerate(groups):
         members = [str(item) for item in group.get("proxies") or []]
         member_chips = "".join(f'<span class="chip">{e(member)}</span>' for member in members[:80])
         if len(members) > 80:
             member_chips += f'<span class="chip">另有 {len(members) - 80} 个成员</span>'
         provider_items: list[str] = []
-        for provider in group.get("providers") or []:
+        for provider_index, provider in enumerate(group.get("providers") or []):
             payload = [str(item) for item in provider.get("payload") or []]
-            payload_html = "".join(f"<li><code>{e(item)}</code></li>" for item in payload[:200])
+            error = str(provider.get("error") or "")
+            preview = payload[:provider_preview_limit]
+            payload_html = "".join(f"<li><code>{e(item)}</code></li>" for item in preview)
+            if error:
+                payload_html = f'<li class="error-text">{e(error)}</li>' + payload_html
+            provider_name = e(str(provider.get("name") or ""))
+            provider_meta = e(
+                f'{provider.get("kind") or ""} · {provider.get("behavior") or ""} · {provider.get("ruleCount") or 0} 条'
+            )
+            more_button = ""
+            if len(payload) > provider_preview_limit:
+                provider_id = str(provider.get("id") or f"{index}-{provider_index}")
+                provider_modal_id = f"provider-modal-{provider_id}"
+                if provider_id not in provider_modal_keys:
+                    provider_modal_keys.add(provider_id)
+                    provider_modals.append(
+                        f'<dialog class="modal" id="{provider_modal_id}" aria-label="规则内容详情"><article class="modal-panel">'
+                        f'<header class="modal-head"><div><strong>{provider_name}</strong><span>{provider_meta} · 全部 {len(payload)} 条</span></div>'
+                        f'<button type="button" class="modal-close" onclick="this.closest(\'dialog\').close()">关闭</button></header>'
+                        f'<div class="modal-body"><section><h3>规则内容</h3><ul class="payload payload-full">'
+                        + "".join(f"<li><code>{e(item)}</code></li>" for item in payload)
+                        + '</ul></section></div></article></dialog>'
+                    )
+                more_button = (
+                    f'<button type="button" class="provider-more" onclick="this.closest(\'dialog\').close();'
+                    f'document.getElementById(\'{provider_modal_id}\').showModal()">显示全部（{len(payload)} 条）</button>'
+                )
             provider_items.append(
-                f'<article class="provider-card"><header><strong>{e(str(provider.get("name") or ""))}</strong>'
-                f'<span>{e(str(provider.get("kind") or ""))} · {e(str(provider.get("behavior") or ""))} · {int(provider.get("ruleCount") or 0)} 条</span></header>'
-                f'<ul class="payload">{payload_html or no_payload}</ul></article>'
+                f'<article class="provider-card"><header><strong>{provider_name}</strong>'
+                f'<span>{provider_meta}</span></header>'
+                f'<ul class="payload">{payload_html or no_payload}</ul>{more_button}</article>'
             )
         group_name = e(str(group.get("name") or ""))
         group_meta = e(f'{group.get("type") or ""} · {len(members)} 个成员 · {len(group.get("providers") or [])} 组规则内容')
@@ -413,7 +456,8 @@ button.group-card:hover{border-color:#93c5fd;transform:translateY(-1px)}
 .group-name{font-size:15px;font-weight:700}.group-meta{color:var(--muted);font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:7px}.chip{max-width:100%;overflow:hidden;text-overflow:ellipsis;background:#eef2ff;color:#3730a3;border-radius:999px;padding:5px 10px;font-size:12px}
 .providers{display:grid;gap:10px}.provider-card{border:1px solid var(--line);border-radius:14px;padding:12px}.provider-card header{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.provider-card strong{font-size:13px}.provider-card header span{color:var(--muted);font-size:12px;white-space:nowrap}
-.payload{list-style:none;margin:10px 0 0;padding:0;max-height:210px;overflow:auto}.payload li{padding:7px 8px;border-top:1px solid var(--line);font-size:12px}.payload code{word-break:break-all}
+.payload{list-style:none;margin:10px 0 0;padding:0;max-height:210px;overflow:auto}.payload li{padding:7px 8px;border-top:1px solid var(--line);font-size:12px}.payload code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.payload-full{max-height:calc(100vh - 180px)}.payload-full code{display:inline;overflow:visible;text-overflow:clip;white-space:normal;word-break:break-all}
+.provider-more{margin-top:10px;border:0;border-radius:8px;padding:7px 10px;background:#eef2ff;color:#3730a3;font:inherit;font-size:12px;font-weight:700;cursor:pointer}.provider-more:hover{background:#e0e7ff}
 .modal{width:min(880px,calc(100vw - 32px));max-height:min(780px,calc(100vh - 40px));padding:0;border:0;border-radius:18px;background:var(--panel);color:var(--text);box-shadow:0 24px 70px rgba(15,23,42,.28)}
 .modal::backdrop{background:rgba(15,23,42,.56);backdrop-filter:blur(3px)}
 .modal-panel{display:flex;flex-direction:column;max-height:inherit}
@@ -504,6 +548,7 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 Clash Meta 配置</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code>{e(str(details.get("yaml") or ""))}</code></pre></div></article></dialog>
 <h2>订阅拉取日志</h2><p class="section-note">记录聚合订阅链接的请求，不包含上游订阅源刷新记录。</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端 IP</th><th>User-Agent</th><th>状态</th></tr></thead><tbody>{log_rows or '<tr><td colspan="4" class="muted">暂无拉取日志</td></tr>'}</tbody></table></div></div>
 {''.join(group_modals)}
+{''.join(provider_modals)}
 </main>{script}</body></html>'''
 
 def mount_extra(app: FastAPI) -> None:

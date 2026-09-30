@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -63,6 +63,11 @@ DNS_FIELDS = {"enable", "ipv6", "listen", "enhanced-mode", "fake-ip-range", "use
 RULE_PROVIDER_FIELDS = {"type", "behavior", "url", "path", "interval"}
 RULE_PROVIDER_OUTPUT_MODES = {"url", "inline"}
 RULE_PROVIDER_OUTPUT_MODE_DEFAULT = "inline"
+GEOIP_API_BASE = "https://api.ip.sb/geoip"
+GEOIP_USER_AGENT = "PansisToolbox-ClashSubscriptionManager/1.0"
+GEOIP_MAX_NODES = 1000
+GEOIP_FAILURE_RETRY_SECONDS = 10 * 60
+GEOIP_MIN_REQUEST_INTERVAL = 0.2
 CLASH_META_RULE_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR", "GEOIP", "GEOSITE", "DST-PORT", "SRC-PORT", "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"}
 BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
     {"id": "builtin-provider-ai", "name": "AI 平台", "providerKey": "ai-platforms", "description": "OpenAI、Claude、Gemini 等常见生成式 AI 平台。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.yaml", "path": "./ruleset/ai-platforms.yaml"}},
@@ -73,18 +78,21 @@ BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
 )
 _initialized: set[str] = set()
 _init_lock = threading.Lock()
+_geoip_request_lock = threading.Lock()
+_geoip_last_request_at = 0.0
+_geoip_job_users: set[str] = set()
+_geoip_job_lock = threading.Lock()
 
 register_tool_categories(TOOL_ID, [
     DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_rule_sets", "csm_rule_providers", "csm_node_groups", "csm_published_snapshots"], None, "订阅源、节点、配置和最后有效发布版本"),
-    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_probe_results", "csm_subscription_requests"], "created_at", "订阅刷新、快照、TCP 探测和聚合订阅请求记录"),
+    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_probe_results", "csm_ip_geo_cache", "csm_subscription_requests"], "created_at", "订阅刷新、快照、TCP 探测、GeoIP 缓存和聚合订阅请求记录"),
     DataCategory("public_tokens", ["csm_public_tokens"], None, "公开订阅令牌索引", storage="platform_db", user_id_column="user_id"),
 ])
 
 
 NODE_GROUP_KINDS = {"custom", "region", "latency"}
-# Node names rarely carry machine-readable country data, so region groups rely on
-# a small heuristic over flags, common Chinese/English region names and 2-letter
-# codes.  Order matters: longer/more-specific patterns come first.
+# Common Chinese display labels for ISO country codes returned by GeoIP.  The
+# matchers themselves are no longer used to decide region-group membership.
 COUNTRY_MATCHERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("HK", "香港", ("香港", "🇭🇰", "hong kong", "hongkong", "hk")),
     ("TW", "台湾", ("台湾", "台北", "🇹🇼", "taiwan", "taipei", "tw")),
@@ -115,6 +123,7 @@ COUNTRY_MATCHERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("IT", "意大利", ("意大利", "🇮🇹", "italy", "milan", "it")),
     ("AE", "阿联酋", ("阿联酋", "迪拜", "🇦🇪", "united arab emirates", "dubai", "uae", "ae")),
 )
+COUNTRY_LABELS = {code: label for code, label, _patterns in COUNTRY_MATCHERS}
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -243,7 +252,13 @@ def init_database(user_id: str) -> None:
               name TEXT NOT NULL, protocol TEXT NOT NULL, server TEXT NOT NULL DEFAULT '', port INTEGER,
               config_json TEXT NOT NULL, supported_output INTEGER NOT NULL DEFAULT 1,
               first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
-              alias TEXT NOT NULL DEFAULT '', is_custom INTEGER NOT NULL DEFAULT 0);
+              alias TEXT NOT NULL DEFAULT '', is_custom INTEGER NOT NULL DEFAULT 0,
+              resolved_ip TEXT NOT NULL DEFAULT '', country_code TEXT NOT NULL DEFAULT '',
+              country_label TEXT NOT NULL DEFAULT '', geo_checked_at TEXT, geo_error TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS csm_ip_geo_cache (
+              ip TEXT PRIMARY KEY, country_code TEXT NOT NULL DEFAULT '',
+              country_label TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'success',
+              error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS csm_node_sources (
               node_id TEXT NOT NULL, source_id TEXT NOT NULL, source_alias TEXT NOT NULL DEFAULT '',
               last_seen_at TEXT NOT NULL, PRIMARY KEY(node_id, source_id),
@@ -296,6 +311,21 @@ def init_database(user_id: str) -> None:
                 conn.execute("ALTER TABLE csm_nodes ADD COLUMN alias TEXT NOT NULL DEFAULT ''")
             if "is_custom" not in node_columns:
                 conn.execute("ALTER TABLE csm_nodes ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0")
+            for column, definition in (
+                ("resolved_ip", "TEXT NOT NULL DEFAULT ''"),
+                ("country_code", "TEXT NOT NULL DEFAULT ''"),
+                ("country_label", "TEXT NOT NULL DEFAULT ''"),
+                ("geo_checked_at", "TEXT"),
+                ("geo_error", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in node_columns:
+                    conn.execute(f"ALTER TABLE csm_nodes ADD COLUMN {column} {definition}")
+            cache_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_ip_geo_cache)")}
+            if "created_at" not in cache_columns:
+                if "checked_at" in cache_columns:
+                    conn.execute("ALTER TABLE csm_ip_geo_cache RENAME COLUMN checked_at TO created_at")
+                else:
+                    conn.execute("ALTER TABLE csm_ip_geo_cache ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
             rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_rule_sets)")}
             if "group_name" not in rule_columns:
                 conn.execute("ALTER TABLE csm_rule_sets ADD COLUMN group_name TEXT NOT NULL DEFAULT '默认分组'")
@@ -590,6 +620,18 @@ def _source_node_count(conn: sqlite3.Connection, source_id: str) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM csm_node_sources WHERE source_id=?", (source_id,)).fetchone()[0])
 
 
+def _preserved_geo_fields(conn: sqlite3.Connection, node_id: str, server: str) -> tuple[str, str, str, str | None, str]:
+    """Keep GeoIP data when a refreshed node still points at the same server."""
+    row = conn.execute(
+        "SELECT server,resolved_ip,country_code,country_label,geo_checked_at,geo_error FROM csm_nodes WHERE id=?",
+        (node_id,),
+    ).fetchone()
+    if row and str(row["server"] or "") == str(server or ""):
+        return (str(row["resolved_ip"] or ""), str(row["country_code"] or ""), str(row["country_label"] or ""),
+                row["geo_checked_at"], str(row["geo_error"] or ""))
+    return ("", "", "", None, "")
+
+
 def _store_nodes(conn: sqlite3.Connection, source_id: str, nodes: Iterable[dict[str, Any]]) -> int:
     now = _now(); count = 0
     for item in nodes:
@@ -598,19 +640,28 @@ def _store_nodes(conn: sqlite3.Connection, source_id: str, nodes: Iterable[dict[
             node_id = row["id"]
             # Keep the original stable identity when identical material is
             # encountered under another source alias; selections remain valid.
-            conn.execute("UPDATE csm_nodes SET name=?,protocol=?,server=?,port=?,config_json=?,supported_output=?,last_seen_at=? WHERE id=?", (item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, node_id))
+            geo = _preserved_geo_fields(conn, node_id, item["server"])
+            conn.execute("""UPDATE csm_nodes SET name=?,protocol=?,server=?,port=?,config_json=?,supported_output=?,
+              last_seen_at=?,resolved_ip=?,country_code=?,country_label=?,geo_checked_at=?,geo_error=? WHERE id=?""",
+              (item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]),
+               int(item["supported_output"]), now, *geo, node_id))
         else:
             node_id = _id()
             # Stable identities are intentionally unique across a user's pool.
             conflict = conn.execute("SELECT id FROM csm_nodes WHERE stable_identity=?", (item["stable_identity"],)).fetchone()
             if conflict:
                 node_id = conflict["id"]
-                conn.execute("UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,config_json=?,supported_output=?,last_seen_at=? WHERE id=?", (item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, node_id))
+                geo = _preserved_geo_fields(conn, node_id, item["server"])
+                conn.execute("""UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,config_json=?,
+                  supported_output=?,last_seen_at=?,resolved_ip=?,country_code=?,country_label=?,geo_checked_at=?,geo_error=? WHERE id=?""",
+                  (item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]),
+                   int(item["supported_output"]), now, *geo, node_id))
             else:
                 conn.execute("""INSERT INTO csm_nodes(
                   id,stable_identity,fingerprint,name,protocol,server,port,config_json,
-                  supported_output,first_seen_at,last_seen_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (node_id, item["stable_identity"], item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, now))
+                  supported_output,first_seen_at,last_seen_at,
+                  resolved_ip,country_code,country_label,geo_checked_at,geo_error)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (node_id, item["stable_identity"], item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, now, "", "", "", None, ""))
         conn.execute("INSERT INTO csm_node_sources(node_id,source_id,source_alias,last_seen_at) VALUES(?,?,?,?) ON CONFLICT(node_id,source_id) DO UPDATE SET source_alias=excluded.source_alias,last_seen_at=excluded.last_seen_at", (node_id, source_id, item["name"], now))
         count += 1
     return count
@@ -638,6 +689,7 @@ def refresh_source(source_id: str, user: User, *, auto_rebuild: bool = True) -> 
             conn.execute("INSERT INTO csm_source_snapshots VALUES(?,?,?,?,?,?,?)", (_id(), source_id, _encrypt(body.decode("utf-8", "replace")), digest, len(parsed), unsupported, now))
             conn.execute("""UPDATE csm_sources SET status='healthy',last_success_at=?,next_refresh_at=?,last_error='',updated_at=? WHERE id=?""", (now, datetime.fromtimestamp(time.time() + int(source["refresh_seconds"]), timezone.utc).isoformat(), now, source_id))
             conn.execute("UPDATE csm_refresh_runs SET status='success',finished_at=?,duration_ms=?,nodes_after=? WHERE id=?", (now, int((time.monotonic()-clock)*1000), after, run_id))
+        _start_geoip_refresh(user)
         if auto_rebuild: _rebuild_published_profiles(user)
         return {"runId": run_id, "status": "success", "parsedNodes": len(parsed), "unsupportedNodes": unsupported, "nodesBefore": before, "nodesAfter": after}
     except Exception as exc:
@@ -650,31 +702,216 @@ def refresh_source(source_id: str, user: User, *, auto_rebuild: bool = True) -> 
         raise ToolboxError("SOURCE_REFRESH_FAILED", f"刷新失败：{message[:240]}", status_code=422) from exc
 
 
-def _country_of(name: str) -> tuple[str | None, str | None]:
-    """Best-effort country detection from a node display name."""
-    text = str(name or "").strip()
-    if not text:
-        return None, None
-    lowered = text.lower()
-    for code, label, patterns in COUNTRY_MATCHERS:
-        for pattern in patterns:
-            if pattern.isascii():
-                if re.search(rf"(?<![a-z0-9]){re.escape(pattern)}(?![a-z0-9])", lowered):
-                    return code, label
-            elif pattern in text:
-                return code, label
-    return None, None
+def _parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _geo_retry_allowed(checked_at: str | None) -> bool:
+    checked = _parse_utc(checked_at)
+    if not checked:
+        return True
+    return datetime.now(timezone.utc) - checked >= timedelta(seconds=GEOIP_FAILURE_RETRY_SECONDS)
+
+
+def _public_ip_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        address = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return None
+    return address if address.is_global else None
+
+
+def _resolve_node_ip(conn: sqlite3.Connection, row: sqlite3.Row) -> tuple[str, str]:
+    """Resolve the public endpoint IP used for a node's GeoIP lookup."""
+    server = str(row["server"] or "").strip()
+    direct = _public_ip_address(server)
+    if direct:
+        return str(direct), ""
+    try:
+        ipaddress.ip_address(server)
+    except ValueError:
+        pass
+    else:
+        return "", "节点服务器地址是保留地址，无法识别国家/地区。"
+
+    probe = conn.execute(
+        "SELECT dns_address FROM csm_probe_results WHERE node_id=? ORDER BY created_at DESC LIMIT 1",
+        (row["id"],),
+    ).fetchone()
+    if probe:
+        probed = _public_ip_address(probe["dns_address"])
+        if probed:
+            return str(probed), ""
+        if str(probe["dns_address"] or "").strip():
+            return "", "节点最近解析到的 IP 是保留地址，无法识别国家/地区。"
+
+    if not server:
+        return "", "节点服务器地址为空，无法识别国家/地区。"
+    try:
+        addresses = socket.getaddrinfo(server, None)
+    except (socket.gaierror, OSError) as exc:
+        return "", f"节点域名解析失败：{str(exc)[:160]}"
+    for _, _, _, _, sockaddr in addresses:
+        probed = _public_ip_address(sockaddr[0])
+        if probed:
+            return str(probed), ""
+    return "", "节点域名未解析到公网 IP，无法识别国家/地区。"
+
+
+def _query_ip_sb(ip: str) -> dict[str, str]:
+    """Query IP.SB with a process-wide request-start rate limit."""
+    global _geoip_last_request_at
+    with _geoip_request_lock:
+        wait = GEOIP_MIN_REQUEST_INTERVAL - (time.monotonic() - _geoip_last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _geoip_last_request_at = time.monotonic()
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False,
+                          headers={"User-Agent": GEOIP_USER_AGENT, "Accept": "application/json"}) as client:
+            response = client.get(f"{GEOIP_API_BASE}/{ip}")
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"countryCode": "", "countryLabel": "", "error": f"IP.SB 查询失败：{str(exc)[:160]}"}
+    return _normalise_ip_sb_payload(payload)
+
+
+def _normalise_ip_sb_payload(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {"countryCode": "", "countryLabel": "", "error": "IP.SB 返回了无效的国家/地区数据。"}
+    code = str(payload.get("country_code") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", code):
+        return {"countryCode": "", "countryLabel": "", "error": "IP.SB 未返回有效的国家/地区代码。"}
+    label = COUNTRY_LABELS.get(code, str(payload.get("country") or code).strip() or code)
+    return {"countryCode": code, "countryLabel": label, "error": ""}
+
+
+def _cache_geoip(conn: sqlite3.Connection, ip: str, result: dict[str, str], now: str) -> None:
+    status = "success" if result.get("countryCode") else "failed"
+    conn.execute("""INSERT INTO csm_ip_geo_cache(
+      ip,country_code,country_label,status,error,created_at)
+      VALUES(?,?,?,?,?,?)
+      ON CONFLICT(ip) DO UPDATE SET country_code=excluded.country_code,
+        country_label=excluded.country_label,status=excluded.status,
+        error=excluded.error,created_at=excluded.created_at""",
+      (ip, result.get("countryCode", ""), result.get("countryLabel", ""),
+       status, result.get("error", "")[:240], now))
+
+
+def _update_node_geoip(conn: sqlite3.Connection, node_id: str, ip: str, result: dict[str, str], now: str) -> None:
+    conn.execute("""UPDATE csm_nodes SET resolved_ip=?,country_code=?,country_label=?,
+      geo_checked_at=?,geo_error=? WHERE id=?""",
+      (ip, result.get("countryCode", ""), result.get("countryLabel", ""), now,
+       result.get("error", "")[:240], node_id))
+
+
+def _refresh_node_geoip(node_ids: list[str], user: User) -> tuple[list[dict[str, Any]], bool]:
+    """Resolve GeoIP for explicit nodes, or all nodes when no ID is supplied."""
+    init_database(user.id)
+    ids = list(dict.fromkeys(str(value) for value in node_ids if value))[:GEOIP_MAX_NODES]
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            rows = conn.execute(f"SELECT * FROM csm_nodes WHERE id IN ({marks})", ids).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM csm_nodes ORDER BY last_seen_at DESC LIMIT ?", (GEOIP_MAX_NODES,)).fetchall()
+
+        now = _now(); changed = False; pending: list[tuple[sqlite3.Row, str]] = []
+        for row in rows:
+            ip, error = _resolve_node_ip(conn, row)
+            if not ip:
+                if str(row["resolved_ip"] or "") or str(row["country_code"] or "") or str(row["geo_error"] or "") != error:
+                    _update_node_geoip(conn, row["id"], "", {"countryCode": "", "countryLabel": "", "error": error}, now)
+                    changed = True
+                continue
+
+            cache = conn.execute("SELECT * FROM csm_ip_geo_cache WHERE ip=?", (ip,)).fetchone()
+            if cache and cache["status"] == "success":
+                result = {"countryCode": str(cache["country_code"] or ""), "countryLabel": str(cache["country_label"] or ""), "error": ""}
+                if (str(row["resolved_ip"] or "") != ip or str(row["country_code"] or "") != result["countryCode"]
+                        or str(row["country_label"] or "") != result["countryLabel"] or str(row["geo_error"] or "")):
+                    _update_node_geoip(conn, row["id"], ip, result, str(cache["created_at"] or now))
+                    changed = True
+                continue
+
+            same_ip = str(row["resolved_ip"] or "") == ip
+            if same_ip and str(row["country_code"] or "") and not str(row["geo_error"] or ""):
+                continue
+            if cache and cache["status"] == "failed" and not _geo_retry_allowed(str(cache["created_at"] or "")):
+                result = {"countryCode": "", "countryLabel": "", "error": str(cache["error"] or "IP.SB 查询失败")}
+                if str(row["geo_error"] or "") != result["error"]:
+                    _update_node_geoip(conn, row["id"], ip, result, str(cache["created_at"] or now))
+                    changed = True
+                continue
+            if same_ip and str(row["geo_error"] or "") and not _geo_retry_allowed(str(row["geo_checked_at"] or "")):
+                continue
+            pending.append((row, ip))
+
+    pending_ips = list(dict.fromkeys(ip for _row, ip in pending))
+    if pending_ips:
+        results = {ip: _query_ip_sb(ip) for ip in pending_ips}
+        now = _now()
+        with user_tool_connection_context(user.id, TOOL_ID) as conn:
+            for row, ip in pending:
+                result = results[ip]
+                _cache_geoip(conn, ip, result, now)
+                _update_node_geoip(conn, row["id"], ip, result, now)
+                changed = True
+
+    result_ids = [row["id"] for row in rows]
+    if not result_ids:
+        return [], changed
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        result_nodes = list_nodes(user)
+    return [node for node in result_nodes if node["id"] in set(result_ids)], changed
+
+
+def refresh_node_geoip(node_ids: list[str], user: User) -> list[dict[str, Any]]:
+    return _refresh_node_geoip(node_ids, user)[0]
+
+
+def _start_geoip_refresh(user: User) -> None:
+    """Run GeoIP resolution in the background without blocking a refresh."""
+    with _geoip_job_lock:
+        if user.id in _geoip_job_users:
+            return
+        _geoip_job_users.add(user.id)
+
+    def run() -> None:
+        try:
+            _nodes, changed = _refresh_node_geoip([], user)
+            if changed:
+                _rebuild_changed_published_profiles(user)
+        except Exception:
+            # GeoIP is an enhancement: it must never break subscription refresh
+            # or the global probe scheduler.
+            pass
+        finally:
+            with _geoip_job_lock:
+                _geoip_job_users.discard(user.id)
+
+    threading.Thread(target=run, name=f"csm-geoip-{user.id}", daemon=True).start()
 
 
 def _node_dict(row: sqlite3.Row, source_names: list[str] | None = None, probe: sqlite3.Row | None = None,
                source_ids: list[str] | None = None) -> dict[str, Any]:
     alias = str(row["alias"] or "")
-    country, country_label = _country_of(row["name"])
+    country = str(row["country_code"] or "")
+    country_label = str(row["country_label"] or "")
     return {"id": row["id"], "stableIdentity": row["stable_identity"], "name": row["name"], "alias": alias,
             "displayName": alias or row["name"], "protocol": row["protocol"], "server": row["server"], "port": row["port"],
             "config": _loads(row["config_json"], {}), "supportedOutput": _compatible(str(row["protocol"])),
             "isCustom": bool(row["is_custom"]), "lastSeenAt": row["last_seen_at"], "sources": source_names or [],
-            "sourceIds": source_ids or [], "country": country, "countryLabel": country_label,
+            "sourceIds": source_ids or [], "country": country or None, "countryLabel": country_label or country or None,
+            "resolvedIp": str(row["resolved_ip"] or ""), "geoError": str(row["geo_error"] or ""),
+            "geoCheckedAt": row["geo_checked_at"],
             "tcp": None if not probe else {
                 "reachable": bool(probe["reachable"]), "latencyMs": probe["latency_ms"], "error": probe["error"], "checkedAt": probe["created_at"]}}
 
@@ -757,10 +994,12 @@ def update_custom_node(node_id: str, content: str, user: User, alias: str | None
         material = _normalise_custom_node(content)
         clean_alias = row["alias"] if alias is None else _clean_node_alias(conn, node_id, material["name"], alias)
         fingerprint = _hash({"customNodeId": node_id, "config": material["config"]})
+        geo = _preserved_geo_fields(conn, node_id, material["server"])
         conn.execute("""UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,
-                      config_json=?,supported_output=1,last_seen_at=?,alias=? WHERE id=?""", (
+                      config_json=?,supported_output=1,last_seen_at=?,alias=?,
+                      resolved_ip=?,country_code=?,country_label=?,geo_checked_at=?,geo_error=? WHERE id=?""", (
             fingerprint, material["name"], material["protocol"], material["server"],
-            material["port"], _json(material["config"]), _now(), clean_alias, node_id))
+            material["port"], _json(material["config"]), _now(), clean_alias, *geo, node_id))
         return _node_dict(conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone())
 
 
@@ -864,7 +1103,7 @@ def _resolve_group_members(conn: sqlite3.Connection, group: sqlite3.Row) -> list
         countries = {str(item) for item in (config.get("countries") or []) if item}
         if not countries:
             return []
-        return [_node_ref(row) for row in rows if (_country_of(row["name"])[0] or "") in countries]
+        return [_node_ref(row) for row in rows if str(row["country_code"] or "") in countries]
     if kind == "latency":
         mode = str(config.get("mode") or "top")
         count = max(1, int(config.get("count") or 5))
@@ -1093,6 +1332,47 @@ def _download_rule_provider_payload(url: str) -> list[str]:
     return result
 
 
+def _rule_provider_source_url(config: dict[str, Any]) -> str:
+    provider_type = str(config.get("type") or "").strip().lower()
+    if provider_type == "http":
+        return str(config.get("url") or "").strip()
+    if provider_type == "cached":
+        return str(config.get("sourceUrl") or config.get("url") or "").strip()
+    return ""
+
+
+def _attach_rule_provider_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    """Persist a remote payload so public reads never perform network I/O."""
+    url = _rule_provider_source_url(config)
+    if not url:
+        return config
+    payload = _download_rule_provider_payload(url)
+    return {**config, "payload": payload, "fetchedAt": _now(), "fetchError": ""}
+
+
+def _rule_provider_snapshot_payload(config: dict[str, Any]) -> list[str]:
+    return [str(item) for item in config.get("payload") or [] if str(item).strip()]
+
+
+def _rule_provider_refresh_due(config: dict[str, Any], now: datetime) -> bool:
+    if not _rule_provider_source_url(config):
+        return False
+    try:
+        interval = max(60, int(config.get("interval") or 86400))
+    except (TypeError, ValueError):
+        interval = 86400
+    fetched_at = str(config.get("fetchedAt") or "")
+    if not fetched_at:
+        return True
+    try:
+        parsed = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return now >= parsed + timedelta(seconds=interval)
+
+
 def _normalise_rule_provider(data: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
     name = str(data.get("name") or "").strip()[:120]
     provider_key = str(data.get("providerKey") or "").strip()[:120]
@@ -1133,6 +1413,8 @@ def _normalise_rule_provider(data: dict[str, Any]) -> tuple[str, str, str, dict[
         config["behavior"] = behavior
         if not (config.get("url") or config.get("path")):
             raise ToolboxError("INVALID_PROVIDER_CONFIG", "订阅型 Rule Provider 至少需要 url 或 path。", status_code=422)
+        if provider_type == "http" and config.get("url"):
+            config = _attach_rule_provider_snapshot(config)
     else:
         raise ToolboxError("INVALID_PROVIDER_TYPE", "Rule Provider 仅支持规则订阅、http、file 或自定义规则。", status_code=422)
     return name, provider_key, description, config
@@ -1242,7 +1524,7 @@ def _inline_remote_provider_rules(config: dict[str, Any], target: str) -> list[s
             "拉取后优先仅支持带 URL 的规则订阅；请改为 URL 优先，或为该 Rule Provider 配置 URL。",
             status_code=422,
         )
-    payload = _download_rule_provider_payload(url)
+    payload = _rule_provider_snapshot_payload(value) or _download_rule_provider_payload(url)
     return _manual_provider_rules({
         "type": "manual",
         "behavior": str(value.get("behavior") or "domain").lower(),
@@ -1696,13 +1978,106 @@ def _build_config(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict
     return config
 
 
+def _build_process_log(
+    profile: sqlite3.Row,
+    nodes: list[sqlite3.Row],
+    rule_set: dict[str, Any] | None,
+    config: dict[str, Any],
+    messages: list[dict[str, str]],
+    content: str,
+) -> list[str]:
+    """Explain every materialization step used to create the output YAML."""
+    settings = _loads(profile["settings_json"], {})
+    output_mode = _profile_rule_provider_output_mode(profile)
+    lines: list[str] = []
+
+    def add(message: str) -> None:
+        lines.append(f"[{len(lines) + 1:03d}] {message}")
+
+    add(f"读取聚合配置「{profile['name']}」，运行模式固定为 rule。")
+    add(
+        "应用基础设置："
+        f"mixed-port={config.get('mixed-port', 7890)}，allow-lan={str(config.get('allow-lan', False)).lower()}，"
+        f"ipv6={str(config.get('ipv6', False)).lower()}，DNS={'保留' if config.get('dns') else '未配置'}。"
+    )
+    rule_set_name = str(rule_set.get("name") or "未关联") if rule_set else "未关联"
+    add(f"读取规则组：{rule_set_name}。")
+    add(
+        "Rule Provider 输出模式："
+        + ("拉取后优先，服务端将远程 payload 展开为具体规则。" if output_mode == "inline" else "URL 优先，输出 rule-providers 配置。")
+    )
+
+    if rule_set is None:
+        add("未找到规则组，输出仅包含基础配置与节点列表。")
+    else:
+        bindings = (rule_set.get("importMeta") or {}).get("providerBindings")
+        if isinstance(bindings, dict) and bindings:
+            for group_name, provider_ids in bindings.items():
+                if isinstance(provider_ids, list):
+                    add(f"策略组「{group_name}」绑定 Rule Provider：{', '.join(map(str, provider_ids)) or '无'}。")
+        else:
+            add("未发现策略组与 Rule Provider 的绑定。")
+        missing_ids = (rule_set.get("importMeta") or {}).get("missingProviderIds") or []
+        if missing_ids:
+            add(f"发现缺失的 Rule Provider：{', '.join(map(str, missing_ids))}。")
+
+    compatible_nodes = [row for row in nodes if _compatible(str(row["protocol"]))]
+    incompatible_nodes = [row for row in nodes if not _compatible(str(row["protocol"]))]
+    add(f"规则引用节点 {len(nodes)} 个，其中 Clash Meta 可输出 {len(compatible_nodes)} 个，不可输出 {len(incompatible_nodes)} 个。")
+    _, references, ambiguous = _node_output_material(nodes)
+    for row in nodes:
+        original = str(row["name"] or "")
+        alias = str(row["alias"] or "")
+        output_name = next((output for reference, output in references.items() if reference in {original, alias}), "")
+        if not output_name:
+            output_name = "（因不兼容或引用不明确被跳过）"
+        detail = f"别名「{alias}」" if alias else "未设置别名"
+        add(f"节点「{original}」{detail}，协议 {row['protocol']}，输出名称：{output_name}。")
+    for reference in sorted(ambiguous):
+        add(f"节点引用「{reference}」匹配多个输出节点，已标记为歧义引用。")
+
+    if rule_set is None:
+        add("没有策略组和规则可展开。")
+    else:
+        add("展开节点分组，并将节点分组成员合入策略组成员列表。")
+        for group in rule_set.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            name = str(group.get("name") or "")
+            node_group_ids = [str(item) for item in (group.get("nodeGroups") or []) if item]
+            proxies = [str(item) for item in (group.get("proxies") or [])]
+            add(
+                f"策略组「{name}」类型 {group.get('type') or 'select'}，"
+                f"节点分组 {len(node_group_ids)} 个，展开后成员 {len(proxies)} 个：{', '.join(proxies) or '无'}。"
+            )
+
+    add(f"生成 YAML：{len(content.encode('utf-8'))} 字节，{len(content.splitlines())} 行。")
+    providers = config.get("rule-providers") or {}
+    if providers:
+        for key, provider in providers.items():
+            add(
+                f"输出 Rule Provider「{key}」：type={provider.get('type')}，"
+                f"behavior={provider.get('behavior')}，url={provider.get('url', '')}，path={provider.get('path', '')}。"
+            )
+    else:
+        add("最终 YAML 不包含 rule-providers（没有远程 Provider，或已按拉取后优先展开为具体规则）。")
+
+    add(f"最终输出策略组 {len(config.get('proxy-groups') or [])} 个，规则 {len(config.get('rules') or [])} 条，节点 {len(config.get('proxies') or [])} 个。")
+    add("校验结果：" + ("通过，未发现错误。" if not any(item["level"] == "error" for item in messages) else "未通过。"))
+    for item in messages:
+        add(f"{item.get('level', 'info').upper()} {item.get('code', 'UNKNOWN')}：{item.get('message', '')}")
+    return lines
+
+
 def preview_profile(profile_id: str, user: User) -> dict[str, Any]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         profile, nodes, rule_set = _profile_material(conn, profile_id)
         messages = _validate_material(profile, nodes, rule_set)
-        content = yaml.safe_dump(_build_config(profile, nodes, rule_set), allow_unicode=True, sort_keys=False)
-    return {"yaml": content, "valid": not any(m["level"] == "error" for m in messages), "messages": messages}
+        config = _build_config(profile, nodes, rule_set)
+        content = yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+        build_log = _build_process_log(profile, nodes, rule_set, config, messages, content)
+    return {"yaml": content, "valid": not any(m["level"] == "error" for m in messages), "messages": messages, "buildLog": build_log}
 
 
 def publish_profile(profile_id: str, user: User) -> dict[str, Any]:
@@ -1789,6 +2164,25 @@ def _public_group_details(conn: sqlite3.Connection, rule_row: sqlite3.Row | None
     for provider_id in dict.fromkeys(provider_ids):
         row = conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
         if row: provider_rows[provider_id] = row
+
+    # A library Provider may be referenced by several strategy groups.  Public
+    # detail reads always use the locally persisted snapshot and never fetch the
+    # remote URL on the request path.
+    provider_payloads: dict[str, tuple[list[str], str]] = {}
+
+    def resolve_payload(provider_id: str, config: dict[str, Any]) -> tuple[list[str], str]:
+        if provider_id in provider_payloads:
+            return provider_payloads[provider_id]
+        payload = _rule_provider_snapshot_payload(config)
+        error = str(config.get("fetchError") or "")
+        if not payload and not error:
+            error = "规则快照尚未生成，等待定时拉取。"
+        elif not payload:
+            error = "规则快照为空，等待下次定时拉取。"
+        value = (payload, error)
+        provider_payloads[provider_id] = value
+        return value
+
     for group in groups:
         raw_ids = bindings.get(str(group.get("name") or ""))
         if not isinstance(raw_ids, list):
@@ -1799,10 +2193,13 @@ def _public_group_details(conn: sqlite3.Connection, rule_row: sqlite3.Row | None
             row = provider_rows.get(provider_id)
             if not row: continue
             config = _normalise_legacy_manual_provider(_loads(row["config_json"], {}))
-            payload = [str(item) for item in config.get("payload") or [] if str(item).strip()]
+            payload, error = resolve_payload(provider_id, config)
             providers.append({
-                "name": str(row["name"]), "kind": "规则订阅" if config.get("type") in {"cached", "http"} else "自定义",
-                "behavior": str(config.get("behavior") or ""), "ruleCount": len(payload), "payload": payload[:200],
+                "id": provider_id,
+                "name": str(row["name"]),
+                "kind": "规则订阅" if str(config.get("type") or "").lower() in {"cached", "http"} else "自定义",
+                "behavior": str(config.get("behavior") or ""), "ruleCount": len(payload),
+                "payload": payload, "error": error,
             })
         group["providers"] = providers
 
@@ -1970,6 +2367,38 @@ def _rebuild_changed_published_profiles(user: User) -> None:
                 conn.execute("UPDATE csm_profiles SET published_status='degraded',updated_at=? WHERE id=? AND published_status<>'degraded'", (_now(), profile["id"]))
 
 
+def refresh_due_rule_providers() -> None:
+    """Scheduler entry: keep URL Provider snapshots fresh without request-time I/O."""
+    now = datetime.now(timezone.utc)
+    for user_id, _path in list_user_tool_dbs(TOOL_ID):
+        init_database(user_id)
+        with user_tool_connection_context(user_id, TOOL_ID) as conn:
+            rows = conn.execute("SELECT id,config_json FROM csm_rule_providers").fetchall()
+        changed = False
+        for row in rows:
+            config = _loads(row["config_json"], {})
+            if not isinstance(config, dict) or not _rule_provider_refresh_due(config, now):
+                continue
+            url = _rule_provider_source_url(config)
+            if not url:
+                continue
+            try:
+                payload = _download_rule_provider_payload(url)
+                next_config = {**config, "payload": payload, "fetchedAt": _now(), "fetchError": ""}
+                changed = changed or payload != _rule_provider_snapshot_payload(config)
+            except ToolboxError as exc:
+                # Keep the last successful payload and record the failure; the
+                # provider interval acts as the retry cooldown.
+                next_config = {**config, "fetchedAt": _now(), "fetchError": str(exc.message)}
+            with user_tool_connection_context(user_id, TOOL_ID) as conn:
+                conn.execute("UPDATE csm_rule_providers SET config_json=? WHERE id=?",
+                             (_json(next_config), row["id"]))
+        if changed:
+            class ScheduledUser:  # noqa: D101
+                id = user_id
+            _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]
+
+
 def probe_all_nodes() -> None:
     """Scheduler entry: probe every node every two minutes for every user."""
     for user_id, _path in list_user_tool_dbs(TOOL_ID):
@@ -1981,5 +2410,6 @@ def probe_all_nodes() -> None:
             has_latency_group = bool(conn.execute("SELECT 1 FROM csm_node_groups WHERE kind='latency' LIMIT 1").fetchone())
         for offset in range(0, len(node_ids), 1000):
             probe_nodes(node_ids[offset:offset + 1000], ScheduledUser())  # type: ignore[arg-type]
+        _start_geoip_refresh(ScheduledUser())  # type: ignore[arg-type]
         if has_latency_group:
             _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]

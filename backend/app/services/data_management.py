@@ -53,6 +53,9 @@ class DataCategory:
     time_column: str | None
     description: str
     storage: str = "user_tool_db"  # "user_tool_db" | "platform_db"
+    # Platform-owned rows normally belong to the entire installation.  Tools
+    # that keep a small public lookup index can opt into user-scoped cleanup.
+    user_id_column: str | None = None
 
 
 # Global registry: tool_id -> list of categories
@@ -186,7 +189,7 @@ def delete_data(
                 deleted.update(_delete_user_tool_data(tool_id, uid, user_tool_cats, before_date, after_date))
 
     if platform_cats:
-        deleted.update(_delete_platform_data(tool_id, platform_cats, before_date, after_date))
+        deleted.update(_delete_platform_data(tool_id, platform_cats, before_date, after_date, user_id))
 
     return {"toolId": tool_id, "deleted": deleted}
 
@@ -221,6 +224,7 @@ def _delete_platform_data(
     categories: list[DataCategory],
     before_date: str | None,
     after_date: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, dict[str, int]]:
     """Delete rows from the shared platform database."""
     result: dict[str, dict[str, int]] = {}
@@ -228,7 +232,7 @@ def _delete_platform_data(
     try:
         for cat in categories:
             for table in cat.tables:
-                count = _delete_rows(conn, table, cat.time_column, before_date, after_date)
+                count = _delete_rows(conn, table, cat.time_column, before_date, after_date, user_id if cat.user_id_column else None, cat.user_id_column)
                 if count > 0:
                     result.setdefault(cat.name, {})[table] = count
         conn.commit()
@@ -243,6 +247,8 @@ def _delete_rows(
     time_column: str | None,
     before_date: str | None,
     after_date: str | None = None,
+    user_id: str | None = None,
+    user_id_column: str | None = None,
 ) -> int:
     """Delete rows from *table*, optionally filtered by a time range.
 
@@ -257,9 +263,10 @@ def _delete_rows(
         return 0
 
     has_time_filter = before_date is not None or after_date is not None
+    columns = {col["name"] for col in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if user_id is not None and (not user_id_column or user_id_column not in columns):
+        return 0
     if time_column is not None and has_time_filter:
-        # Verify the time_column exists
-        columns = {col["name"] for col in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if time_column not in columns:
             return 0
         clauses: list[str] = []
@@ -270,13 +277,15 @@ def _delete_rows(
         if before_date is not None:
             clauses.append(f'"{time_column}" < ?')
             params.append(before_date)
-        cursor = conn.execute(
-            f'DELETE FROM "{table}" WHERE {" AND ".join(clauses)}',
-            params,
-        )
+        if user_id is not None:
+            clauses.append(f'"{user_id_column}" = ?')
+            params.append(user_id)
+        cursor = conn.execute(f'DELETE FROM "{table}" WHERE {" AND ".join(clauses)}', params)
     elif time_column is None and not has_time_filter:
-        # Delete all rows (truncate)
-        cursor = conn.execute(f'DELETE FROM "{table}"')
+        if user_id is not None:
+            cursor = conn.execute(f'DELETE FROM "{table}" WHERE "{user_id_column}" = ?', (user_id,))
+        else:
+            cursor = conn.execute(f'DELETE FROM "{table}"')
     else:
         # time_column is None but a time filter is set: skip (config data)
         return 0

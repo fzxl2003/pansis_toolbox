@@ -48,6 +48,11 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/sub': {
+        target: 'http://127.0.0.1:8000',
+        ws: true,
+        changeOrigin: true,
+      },
       // TensorBoard sessions owned by tensorboard_progress_monitor.  This is
       // a root-level FastAPI proxy path, so the Vite dev server must forward it
       // just like the standalone dashboard's /tb path.

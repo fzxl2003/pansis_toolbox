@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI
@@ -106,7 +107,14 @@ def load_backend_module(tool: RegisteredTool):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot import router from {router_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Pydantic resolves postponed annotations through ``sys.modules``. Dynamic
+    # tool modules must therefore be registered before their classes are built.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
 
@@ -119,7 +127,12 @@ def register_tool_scheduled_tasks(tool: RegisteredTool, target_scheduler: Schedu
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot import scheduler from {scheduler_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     register_tasks = getattr(module, "register_tasks", None)
     if not callable(register_tasks):
         raise RuntimeError("Tool scheduler entry must expose a callable register_tasks(scheduler)")

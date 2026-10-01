@@ -48,6 +48,8 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     assert node
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         service._store_nodes(conn, source["id"], [node])
+        node_id = conn.execute("SELECT id FROM csm_nodes WHERE name=?", (node["name"],)).fetchone()["id"]
+    service.update_node_alias(node_id, "香港", user)
     provider = service.save_rule_provider({
         "name": "示例域名",
         "providerKey": "example-domains",
@@ -81,6 +83,7 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     details = service.public_subscription_details(published["subscriptionToken"])
     assert details is not None
     assert details["ruleSetName"] == "basic rules"
+    assert details["proxies"][0]["name"] == "香港-vless"
     assert details["proxies"][0]["latencyMs"] == 123
     assert details["groups"][0]["providers"][0]["payload"] == ["example.com"]
     assert details["requestRuns"][0]["clientIp"] == "127.0.0.1"
@@ -375,12 +378,12 @@ def test_node_alias_and_original_name_resolve_in_rule_material(tmp_path, monkeyp
     validation = service.validate_profile(profile["id"], user)
     assert validation["valid"]
     preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
-    assert preview["proxies"][0]["name"] == "friendly-name"
-    assert preview["proxy-groups"][0]["proxies"] == ["friendly-name", "friendly-name"]
+    assert preview["proxies"][0]["name"] == "friendly-name-source-name"
+    assert preview["proxy-groups"][0]["proxies"] == ["friendly-name-source-name", "friendly-name-source-name"]
     assert preview["rules"] == [
-        "DOMAIN,example.com,friendly-name",
-        "IP-CIDR,10.0.0.0/8,friendly-name,no-resolve",
-        "MATCH,friendly-name",
+        "DOMAIN,example.com,friendly-name-source-name",
+        "IP-CIDR,10.0.0.0/8,friendly-name-source-name,no-resolve",
+        "MATCH,friendly-name-source-name",
     ]
 
 
@@ -410,8 +413,8 @@ def test_rule_provider_library_crud_and_package(tmp_path, monkeypatch) -> None:
     user = User(id="provider-user", username="provider", display_name="Provider")
 
     builtins = service.list_rule_providers(user)
-    assert len(builtins) == 5
-    assert {item["providerKey"] for item in builtins} >= {"ai-platforms", "google", "common-overseas"}
+    assert len(builtins) == 11
+    assert {item["providerKey"] for item in builtins} >= {"ai-platforms", "google", "common-overseas", "ads", "china", "private-network", "microsoft", "apple", "steam"}
     assert all(item["builtin"] for item in builtins)
 
     selected = [next(item for item in builtins if item["providerKey"] == key)["id"] for key in ("ai-platforms", "google")]
@@ -866,7 +869,8 @@ def test_subscription_details_html_layout() -> None:
     page = _subscription_details_html("token", {
         "name": "visual sub", "ruleSetName": "basic rules", "publishedAt": "2026-01-01T00:00:00+00:00",
         "contentHash": "hash", "mode": "rule", "yaml": "mode: rule",
-        "proxies": [{"name": "node", "type": "socks5", "server": "example.org", "port": 443,
+        "proxies": [{"name": "node", "type": "vless", "server": "example.org", "port": 443,
+                     "shareUri": "vless://uuid@example.org:443#node",
                      "latencyMs": 123, "reachable": True, "checkedAt": "2026-01-01T00:01:00+00:00"}],
         "groups": [{"name": "PROXY", "type": "select", "proxies": ["node"],
                     "providers": [{"name": "示例域名", "kind": "自定义", "behavior": "domain",
@@ -880,6 +884,11 @@ def test_subscription_details_html_layout() -> None:
     assert '发布时间' not in page
     assert '内容校验' not in page
     assert '复制订阅链接' in page
+    assert '下载 Clash YAML' in page
+    assert '扫码导入 YAML 订阅' not in page
+    assert 'data:image/svg+xml;base64,' in page
+    assert 'data-copy-node-link' in page
+    assert '显示节点二维码' in page
     assert 'speed-dot good' in page
     assert '最近拉取' in page
     assert '5 分钟前' in page

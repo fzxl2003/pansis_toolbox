@@ -21,6 +21,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  QrCode,
   Search,
   Send,
   Server,
@@ -222,6 +223,7 @@ export default function ClashSubscriptionManager() {
   const [profileLogModal, setProfileLogModal] = useState<Profile | null>(null);
   const [profileRuns, setProfileRuns] = useState<ProfileRefreshRun[]>([]);
   const [sourceModal, setSourceModal] = useState<Source | null | false>(false);
+  const [sourceInitialUrl, setSourceInitialUrl] = useState("");
   const [profileModal, setProfileModal] = useState<Profile | null | false>(
     false,
   );
@@ -238,6 +240,7 @@ export default function ClashSubscriptionManager() {
     NodeGroup | null | false
   >(false);
   const [addNodeOpen, setAddNodeOpen] = useState(false);
+  const [qrImportOpen, setQrImportOpen] = useState(false);
   const [customNodeModal, setCustomNodeModal] = useState<Node | null | false>(
     false,
   );
@@ -679,20 +682,37 @@ export default function ClashSubscriptionManager() {
           onClose={() => setAddNodeOpen(false)}
           onAddSource={() => {
             setAddNodeOpen(false);
+            setSourceInitialUrl("");
             setSourceModal(null);
           }}
           onAddCustom={() => {
             setAddNodeOpen(false);
             setCustomNodeModal(null);
           }}
+          onImportQr={() => {
+            setAddNodeOpen(false);
+            setQrImportOpen(true);
+          }}
+        />
+      )}
+      {qrImportOpen && (
+        <QrImportModal
+          onClose={() => setQrImportOpen(false)}
+          onImport={(url) => {
+            setQrImportOpen(false);
+            setSourceInitialUrl(url);
+            setSourceModal(null);
+          }}
         />
       )}
       {sourceModal !== false && (
         <SourceModal
           source={sourceModal}
+          initialUrl={sourceInitialUrl}
           onClose={() => setSourceModal(false)}
           onSaved={async (text) => {
             setSourceModal(false);
+            setSourceInitialUrl("");
             setNotice(text);
             await loadAll();
           }}
@@ -1833,27 +1853,86 @@ function AddNodeModal({
   onClose,
   onAddSource,
   onAddCustom,
+  onImportQr,
 }: {
   onClose: () => void;
   onAddSource: () => void;
   onAddCustom: () => void;
+  onImportQr: () => void;
 }) {
   return (
-    <Modal title="添加到节点池" onClose={onClose} width={680}>
+    <Modal title="添加到节点池" onClose={onClose} width={720}>
       <div className="csm-add-node-options">
-        <button type="button" onClick={onAddSource}>
-          <span className="csm-add-node-icon">
-            <Server size={24} />
-          </span>
-          <strong>添加订阅源</strong>
-          <small>通过 HTTP(S) 订阅链接批量导入节点，并按设置自动刷新。</small>
+        <div className="csm-add-node-actions">
+          <button type="button" onClick={onAddSource}>
+            <span className="csm-add-node-icon">
+              <Server size={24} />
+            </span>
+            <span><strong>添加订阅源</strong><small>通过 HTTP(S) 订阅链接批量导入节点，并按设置自动刷新。</small></span>
+          </button>
+          <button type="button" onClick={onAddCustom}>
+            <span className="csm-add-node-icon">
+              <FileCode2 size={24} />
+            </span>
+            <span><strong>添加自定义节点</strong><small>直接编写一个 Clash Meta 节点，可随时编辑或删除。</small></span>
+          </button>
+        </div>
+        <button className="csm-qr-import-option" type="button" onClick={onImportQr}>
+          <span className="csm-add-node-icon"><QrCode size={42} strokeWidth={1.6} /></span>
+          <strong>二维码导入</strong>
+          <small>选择含订阅链接的二维码图片，识别后自动填入订阅地址。</small>
         </button>
-        <button type="button" onClick={onAddCustom}>
-          <span className="csm-add-node-icon">
-            <FileCode2 size={24} />
-          </span>
-          <strong>添加自定义节点</strong>
-          <small>直接编写一个 Clash Meta 节点，可随时编辑或删除。</small>
+      </div>
+    </Modal>
+  );
+}
+
+function QrImportModal({ onClose, onImport }: { onClose: () => void; onImport: (url: string) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState("");
+  const [scanning, setScanning] = useState(false);
+
+  async function scan(file: File) {
+    setScanning(true);
+    setError("");
+    try {
+      const BarcodeDetectorClass = (window as Window & {
+        BarcodeDetector?: new (options?: { formats?: string[] }) => { detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>> };
+      }).BarcodeDetector;
+      if (!BarcodeDetectorClass) {
+        throw new Error("当前浏览器不支持二维码识别，请使用 Chrome 或 Edge，或手动添加订阅链接。");
+      }
+      const image = await createImageBitmap(file);
+      try {
+        const codes = await new BarcodeDetectorClass({ formats: ["qr_code"] }).detect(image);
+        const value = codes[0]?.rawValue?.trim();
+        if (!value) throw new Error("未识别到二维码，请确认图片清晰且包含订阅链接。");
+        if (!/^https?:\/\//i.test(value)) throw new Error("二维码内容不是 HTTP(S) 订阅链接。");
+        onImport(value);
+      } finally {
+        image.close();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "二维码识别失败，请重试。");
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  return (
+    <Modal title="二维码导入订阅" onClose={() => !scanning && onClose()} width={520}>
+      <div className="csm-qr-import-modal">
+        <span className="csm-qr-import-preview"><QrCode size={100} strokeWidth={1.35} /></span>
+        <strong>上传订阅二维码</strong>
+        <p>从图片中读取 HTTP(S) 订阅链接，识别成功后会打开订阅源表单。</p>
+        {error && <Alert type="error">{error}</Alert>}
+        <input ref={inputRef} className="csm-visually-hidden" type="file" accept="image/*" onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void scan(file);
+          event.target.value = "";
+        }} />
+        <button className="csm-btn csm-btn-primary" type="button" disabled={scanning} onClick={() => inputRef.current?.click()}>
+          {scanning ? <><Spin size={14} />识别中</> : "选择二维码图片"}
         </button>
       </div>
     </Modal>
@@ -3524,16 +3603,18 @@ function RulesView({
 
 function SourceModal({
   source,
+  initialUrl,
   onClose,
   onSaved,
 }: {
   source: Source | null;
+  initialUrl: string;
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
   const [form, setForm] = useState({
     name: source?.name ?? "",
-    url: "",
+    url: source ? "" : initialUrl,
     userAgent: source?.userAgent ?? "",
     refreshSeconds: source?.refreshSeconds ?? 21600,
     enabled: source?.enabled ?? true,

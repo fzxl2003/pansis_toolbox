@@ -21,7 +21,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, unquote, urlsplit
 
 import httpx
 import yaml
@@ -79,6 +79,12 @@ BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
     {"id": "builtin-provider-overseas", "name": "常见国外平台", "providerKey": "common-overseas", "description": "常见非中国大陆互联网平台域名集合。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-!cn.yaml", "path": "./ruleset/common-overseas.yaml"}},
     {"id": "builtin-provider-github", "name": "GitHub", "providerKey": "github", "description": "GitHub 及其静态资源、代码托管相关域名。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/github.yaml", "path": "./ruleset/github.yaml"}},
     {"id": "builtin-provider-media", "name": "海外影音娱乐", "providerKey": "overseas-media", "description": "常见海外流媒体、直播与影音平台。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-entertainment.yaml", "path": "./ruleset/overseas-media.yaml"}},
+    {"id": "builtin-provider-ads", "name": "广告拦截", "providerKey": "ads", "description": "常见广告、追踪与营销域名集合，可用于 REJECT 策略。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ads-all.yaml", "path": "./ruleset/ads.yaml"}},
+    {"id": "builtin-provider-cn", "name": "中国大陆", "providerKey": "china", "description": "中国大陆常见网站与服务域名，可用于 DIRECT 策略。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.yaml", "path": "./ruleset/china.yaml"}},
+    {"id": "builtin-provider-private", "name": "私有网络", "providerKey": "private-network", "description": "局域网、私有域名及本地服务，可用于 DIRECT 策略。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.yaml", "path": "./ruleset/private-network.yaml"}},
+    {"id": "builtin-provider-microsoft", "name": "Microsoft", "providerKey": "microsoft", "description": "Windows、Office、OneDrive、Xbox 等 Microsoft 服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/microsoft.yaml", "path": "./ruleset/microsoft.yaml"}},
+    {"id": "builtin-provider-apple", "name": "Apple", "providerKey": "apple", "description": "App Store、iCloud、Apple 更新及相关服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/apple.yaml", "path": "./ruleset/apple.yaml"}},
+    {"id": "builtin-provider-steam", "name": "Steam", "providerKey": "steam", "description": "Steam 商店、客户端、游戏下载与社区服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/steam.yaml", "path": "./ruleset/steam.yaml"}},
 )
 _initialized: set[str] = set()
 _init_lock = threading.Lock()
@@ -592,6 +598,69 @@ def parse_uri(uri: str) -> dict[str, Any] | None:
             "grpc-opts": {"grpc-service-name": _query_one(parsed.query, "serviceName")},
         })
     return _node(name, kind, server, port, config)
+
+
+def proxy_share_uri(proxy: dict[str, Any]) -> str | None:
+    """Convert a published Clash proxy into a broadly compatible share URI."""
+    kind = str(proxy.get("type") or "").lower()
+    server = str(proxy.get("server") or "").strip()
+    try:
+        port = int(proxy.get("port"))
+    except (TypeError, ValueError):
+        return None
+    if not server or not 0 < port < 65536 or kind not in PARSEABLE_URIS:
+        return None
+    name = str(proxy.get("name") or kind)
+    fragment = quote(name, safe="")
+    host = f"[{server}]" if ":" in server and not server.startswith("[") else server
+
+    if kind == "ss":
+        cipher, password = str(proxy.get("cipher") or ""), str(proxy.get("password") or "")
+        if not cipher or not password:
+            return None
+        credentials = base64.urlsafe_b64encode(f"{cipher}:{password}@{host}:{port}".encode()).decode().rstrip("=")
+        plugin = str(proxy.get("plugin") or "")
+        query = f"?{urlencode({'plugin': plugin})}" if plugin else ""
+        return f"ss://{credentials}{query}#{fragment}"
+    if kind == "vmess":
+        payload = {
+            "v": "2", "ps": name, "add": server, "port": str(port), "id": str(proxy.get("uuid") or ""),
+            "aid": str(proxy.get("alterId") or 0), "scy": str(proxy.get("cipher") or "auto"),
+            "net": str(proxy.get("network") or "tcp"), "type": "none", "host": "", "path": "", "tls": str(proxy.get("tls") or ""),
+            "sni": str(proxy.get("servername") or proxy.get("sni") or ""),
+        }
+        if not payload["id"]:
+            return None
+        ws_options = proxy.get("ws-opts") if isinstance(proxy.get("ws-opts"), dict) else {}
+        payload["path"] = str(ws_options.get("path") or "")
+        headers = ws_options.get("headers") if isinstance(ws_options.get("headers"), dict) else {}
+        payload["host"] = str(headers.get("Host") or "")
+        encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()).decode()
+        return f"vmess://{encoded}"
+
+    identity = str(proxy.get("uuid") or proxy.get("password") or proxy.get("auth-str") or "")
+    if not identity:
+        return None
+    query: dict[str, str] = {}
+    for source, target in (("sni", "sni"), ("servername", "sni"), ("network", "type"), ("flow", "flow"), ("client-fingerprint", "fp"), ("packet-encoding", "packetEncoding"), ("obfs", "obfs"), ("obfs-password", "obfs-password"), ("up", "up"), ("down", "down"), ("congestion-controller", "congestion_control")):
+        value = proxy.get(source)
+        if value not in (None, ""):
+            query[target] = str(value)
+    if kind == "trojan":
+        query.setdefault("security", "tls")
+    elif kind == "vless":
+        reality = proxy.get("reality-opts") if isinstance(proxy.get("reality-opts"), dict) else {}
+        if reality.get("public-key"):
+            query["security"] = "reality"
+            query["pbk"] = str(reality["public-key"])
+            if reality.get("short-id"):
+                query["sid"] = str(reality["short-id"])
+        elif proxy.get("tls"):
+            query["security"] = str(proxy["tls"])
+    elif kind in {"hysteria", "hysteria2", "tuic"}:
+        query.setdefault("sni", str(proxy.get("sni") or proxy.get("servername") or ""))
+    query = {key: value for key, value in query.items() if value}
+    return f"{kind}://{quote(identity, safe='')}@{host}:{port}" + (f"?{urlencode(query)}" if query else "") + f"#{fragment}"
 
 
 def _clash_node(value: dict[str, Any]) -> dict[str, Any] | None:
@@ -1141,7 +1210,9 @@ def update_node_alias(node_id: str, alias: str, user: User) -> dict[str, Any]:
         if not row: _not_found("节点")
         clean = _clean_node_alias(conn, node_id, row["name"], alias)
         conn.execute("UPDATE csm_nodes SET alias=? WHERE id=?", (clean, node_id))
-        return _node_dict(conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone())
+        updated = _node_dict(conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone())
+    _rebuild_changed_published_profiles(user)
+    return updated
 
 
 def list_nodes(user: User, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -2020,7 +2091,7 @@ def _dns_output(value: Any) -> dict[str, Any] | None:
 
 
 def _node_output_material(nodes: list[sqlite3.Row]) -> tuple[list[dict[str, Any]], dict[str, str], set[str]]:
-    """Build proxy names and resolve references by node name only."""
+    """Build proxy names and resolve both original names and aliases."""
     used: dict[str, int] = {}; output = []; candidates: dict[str, set[str]] = {}
     for row in nodes:
         protocol = str(row["protocol"] or "").lower()
@@ -2028,12 +2099,13 @@ def _node_output_material(nodes: list[sqlite3.Row]) -> tuple[list[dict[str, Any]
             continue
         value = _proxy_output(_loads(row["config_json"], {}), protocol)
         original = str(row["name"] or value.get("name") or "")
-        base = original
+        alias = str(row["alias"] or "").strip()
+        base = f"{alias}-{original}" if alias else original
         count = used.get(base, 0); used[base] = count + 1
         output_name = f"{base} ({count + 1})" if count else base
         value["name"] = output_name
         output.append(value)
-        for reference in {original} - {""}:
+        for reference in {original, alias} - {""}:
             candidates.setdefault(reference, set()).add(output_name)
     ambiguous = {reference for reference, values in candidates.items() if len(values) > 1}
     references = {reference: next(iter(values)) for reference, values in candidates.items() if len(values) == 1}
@@ -2256,14 +2328,25 @@ def _latest_node_probes(conn: sqlite3.Connection) -> tuple[dict[str, list[sqlite
         ORDER BY p2.created_at DESC,p2.rowid DESC LIMIT 1)
       ORDER BY n.rowid
     """).fetchall()
+    output_names: dict[str, list[sqlite3.Row]] = {}
     originals: dict[str, list[sqlite3.Row]] = {}
+    used: dict[str, int] = {}
     for row in rows:
         name = str(row["name"] or "")
         if name: originals.setdefault(name, []).append(row)
-    return {}, originals
+        alias = str(row["alias"] or "").strip()
+        base = f"{alias}-{name}" if alias else name
+        if not base:
+            continue
+        count = used.get(base, 0)
+        used[base] = count + 1
+        output_name = f"{base} ({count + 1})" if count else base
+        output_names.setdefault(output_name, []).append(row)
+    return output_names, originals
 
 
 def _probe_for_output_name(name: str, aliases: dict[str, list[sqlite3.Row]], originals: dict[str, list[sqlite3.Row]]) -> sqlite3.Row | None:
+    if name in aliases: return aliases[name][0]
     if name in originals: return originals[name][0]
     match = re.fullmatch(r"(.+) \((\d+)\)", name)
     if not match: return None
@@ -2453,7 +2536,8 @@ def public_subscription_details(token: str) -> dict[str, Any] | None:
     for item in document.get("proxies") or []:
         if not isinstance(item, dict): continue
         value = {"name": str(item.get("name") or ""), "type": str(item.get("type") or ""),
-                 "server": str(item.get("server") or ""), "port": item.get("port")}
+                 "server": str(item.get("server") or ""), "port": item.get("port"),
+                 "shareUri": proxy_share_uri(item)}
         probe = _probe_for_output_name(value["name"], aliases, originals)
         value.update({"latencyMs": probe["latency_ms"] if probe else None,
                       "reachable": bool(probe["reachable"]) if probe else None,

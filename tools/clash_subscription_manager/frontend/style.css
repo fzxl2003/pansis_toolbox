@@ -240,18 +240,28 @@
 .csm-node-group .csm-node-probe-col { width: 142px; max-width: 142px; }
 .csm-node-group .csm-node-actions-col { width: 1%; white-space: nowrap; }
 .csm-node-group .csm-node-actions-col .csm-actions { flex-wrap: nowrap; }
-.csm-add-node-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
-.csm-add-node-options > button { display: grid; justify-items: start; gap: 9px; min-height: 180px; padding: 20px; text-align: left; color: #334155; background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; cursor: pointer; }
-.csm-add-node-options > button:hover { border-color: #818cf8; background: #f8faff; box-shadow: 0 4px 14px rgba(79,70,229,.08); }
+.csm-add-node-options { display: grid; grid-template-columns: minmax(0,1fr) 220px; gap: 14px; }
+.csm-add-node-actions { display: grid; gap: 14px; }
+.csm-add-node-actions > button,.csm-qr-import-option { display: grid; justify-items: start; gap: 9px; padding: 20px; text-align: left; color: #334155; background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; cursor: pointer; }
+.csm-add-node-actions > button { grid-template-columns: auto minmax(0,1fr); align-items: center; min-height: 112px; }
+.csm-add-node-actions > button > span:last-child { display: grid; gap: 6px; }
+.csm-add-node-actions > button:hover,.csm-qr-import-option:hover { border-color: #818cf8; background: #f8faff; box-shadow: 0 4px 14px rgba(79,70,229,.08); }
+.csm-qr-import-option { align-content: center; justify-items: center; min-height: 238px; text-align: center; }
+.csm-qr-import-option .csm-add-node-icon { width: 84px; height: 84px; }
 .csm-add-node-options strong { color: #1e293b; font-size: 15px; }
 .csm-add-node-options small { color: #64748b; font-size: 12px; line-height: 1.65; }
 .csm-add-node-icon { display: inline-grid; place-items: center; width: 46px; height: 46px; color: #4f46e5; background: #eef2ff; border-radius: 10px; }
+.csm-qr-import-modal { display: grid; justify-items: center; gap: 12px; text-align: center; }
+.csm-qr-import-modal > p { max-width: 360px; margin: -4px 0 4px; color: #64748b; font-size: 13px; line-height: 1.65; }
+.csm-qr-import-preview { display: inline-grid; place-items: center; width: 138px; height: 138px; color: #4f46e5; background: #f8faff; border: 1px solid #dbe4ff; border-radius: 14px; }
+.csm-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
 .csm-custom-node-editor { min-height: 340px; resize: vertical; }
 .csm-custom-node-help { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #64748b; font-size: 12px; }
 
 @media (max-width: 680px) {
   .csm-add-node-options { grid-template-columns: 1fr; }
-  .csm-add-node-options > button { min-height: 145px; }
+  .csm-add-node-actions > button { min-height: 112px; }
+  .csm-qr-import-option { min-height: 150px; }
   .csm-node-group-head,.csm-custom-node-help { align-items: flex-start; flex-direction: column; }
   .csm-node-group-actions { justify-content: flex-start; }
 }

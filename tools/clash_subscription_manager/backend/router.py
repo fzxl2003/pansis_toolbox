@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
 import html
+from io import BytesIO
 from email.utils import format_datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
+import qrcode
+import qrcode.image.svg
 
 from backend.app.core.security import require_user
 from tools.clash_subscription_manager.backend import service
@@ -321,8 +325,23 @@ def get_refresh_runs(request: Request, limit: int = 100) -> dict[str, Any]:
     return {"runs": service.refresh_runs(require_user(request), limit)}
 
 
-def _subscription_details_html(token: str, details: dict[str, Any]) -> str:
+def _subscription_qr_data_url(download_url: str) -> str:
+    """Encode the public YAML download URL as a self-contained SVG QR code."""
+    image = qrcode.make(download_url, image_factory=qrcode.image.svg.SvgPathImage, border=2)
+    buffer = BytesIO()
+    image.save(buffer)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def _subscription_details_html(
+    token: str,
+    details: dict[str, Any],
+    download_url: str | None = None,
+) -> str:
     e = html.escape
+    download_url = download_url or f"/sub/clash/{token}"
+    qr_data_url = _subscription_qr_data_url(download_url)
     proxies = details.get("proxies") or []
     groups = details.get("groups") or []
     runs = details.get("requestRuns") or []
@@ -378,14 +397,34 @@ def _subscription_details_html(token: str, details: dict[str, Any]) -> str:
         if months < 12: return f"{months} 个月前"
         return f"{months // 12} 年前"
 
-    node_rows = "".join(
-        f'<tr><td class="node-name">{e(str(item.get("name") or ""))}</td>'
-        f'<td>{e(str(item.get("type") or ""))}</td>'
-        f'<td class="mono">{e(str(item.get("server") or ""))}</td>'
-        f'<td>{e(str(item.get("port") or ""))}</td>'
-        f'<td>{latency(item)}</td></tr>'
-        for item in proxies
-    )
+    node_qr_dialogs: list[str] = []
+    node_rows_list: list[str] = []
+    for index, item in enumerate(proxies):
+        share_uri = str(item.get("shareUri") or "")
+        actions = '<span class="muted">不支持</span>'
+        if share_uri:
+            modal_id = f"node-qr-modal-{index}"
+            node_qr_dialogs.append(
+                f'<dialog class="modal node-qr-modal" id="{modal_id}" aria-label="节点二维码"><article class="modal-panel">'
+                f'<header class="modal-head"><div><strong>{e(str(item.get("name") or "节点"))}</strong><span>扫描二维码导入此节点</span></div>'
+                f'<button type="button" class="modal-close" onclick="this.closest(\'dialog\').close()">关闭</button></header>'
+                f'<div class="modal-body"><img class="node-qr-image" src="{_subscription_qr_data_url(share_uri)}" alt="{e(str(item.get("name") or "节点"))} 导入链接二维码"></div>'
+                f'</article></dialog>'
+            )
+            actions = (
+                f'<div class="node-actions"><button type="button" class="node-action" data-copy-node-link '
+                f'data-node-link="{e(share_uri, quote=True)}" title="复制节点导入链接" aria-label="复制节点导入链接"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="10" height="11" rx="1"></rect><path d="M15 9V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h4"></path></svg></button>'
+                f'<button type="button" class="node-action" title="显示节点二维码" aria-label="显示节点二维码" '
+                f'onclick="document.getElementById(\'{modal_id}\').showModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v4h-2zM14 18h4v2h-4z"></path></svg></button></div>'
+            )
+        node_rows_list.append(
+            f'<tr><td class="node-name">{e(str(item.get("name") or ""))}</td>'
+            f'<td>{e(str(item.get("type") or ""))}</td>'
+            f'<td class="mono">{e(str(item.get("server") or ""))}</td>'
+            f'<td>{e(str(item.get("port") or ""))}</td>'
+            f'<td>{latency(item)}</td><td>{actions}</td></tr>'
+        )
+    node_rows = "".join(node_rows_list)
 
     speed_dots = "".join(speed_dot(item) for item in proxies[:max_speed_dots])
     if len(proxies) > max_speed_dots:
@@ -473,9 +512,11 @@ main{max-width:1180px;margin:0 auto;padding:34px 20px 70px}
 .hero-inner{position:relative;z-index:1;display:flex;justify-content:space-between;gap:24px;align-items:flex-start;flex-wrap:wrap}
 .eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.78}h1{margin:8px 0 12px;font-size:clamp(24px,4vw,35px);line-height:1.15}
 .meta{margin:0;font-size:13px;line-height:1.8;opacity:.86}.meta b{font-weight:650}
-.hero-actions{display:flex;flex-wrap:wrap;gap:10px}
-.button{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#1d4ed8;border-radius:12px;padding:12px 17px;text-decoration:none;font-weight:700;box-shadow:0 10px 22px rgba(15,23,42,.14)}
+.hero-actions{display:grid;align-content:center;gap:10px}
+.subscription-access{display:flex;align-items:center;gap:10px}
+.button{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#fff;color:#1d4ed8;border-radius:12px;padding:12px 17px;text-decoration:none;font:700 14px/1.2 Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;box-shadow:0 10px 22px rgba(15,23,42,.14)}
 button.button{border:0;cursor:pointer;font:inherit}.copy-feedback{display:block;min-height:18px;margin-top:6px;font-size:12px;font-weight:600;color:#fff;opacity:.9}.copy-feedback.copy-success{color:#bbf7d0}.copy-feedback.copy-error{color:#fecaca}button.copy-success{background:#dcfce7;color:#166534}button.copy-error{background:#fee2e2;color:#991b1b}
+.subscription-qr{display:grid;place-items:center;min-width:132px;padding:10px;border-radius:16px;background:#fff;color:#1e3a8a;box-shadow:0 10px 22px rgba(15,23,42,.14)}.subscription-qr img{display:block;width:104px;height:104px;image-rendering:pixelated}
 h2{display:flex;align-items:center;gap:9px;margin:34px 0 13px;font-size:19px}.section-note{margin:0 0 12px;color:var(--muted);font-size:13px}
 .section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:34px 0 13px}.section-head h2{margin:0}
 .domain-test-form{display:grid;gap:14px}
@@ -497,6 +538,7 @@ h2{display:flex;align-items:center;gap:9px;margin:34px 0 13px;font-size:19px}.se
 .speed-more{color:#fff;font-size:11px;font-weight:700;opacity:.82}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:0 2px 8px rgba(15,23,42,.04);overflow:hidden}
 .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:720px}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px;white-space:nowrap}th{background:#f8fafc;color:var(--muted);font-size:12px;letter-spacing:.02em}tbody tr:last-child td{border-bottom:0}.node-name{max-width:320px;overflow:hidden;text-overflow:ellipsis}.mono,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.node-actions{display:flex;gap:7px}.node-action{display:grid;place-items:center;width:29px;height:29px;border:1px solid var(--line);border-radius:8px;background:#f8fafc;color:#1d4ed8;cursor:pointer}.node-action svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round}.node-action:nth-child(2) svg{fill:currentColor;stroke:none}.node-action:hover{border-color:#93c5fd;background:#eff6ff}.node-qr-modal{width:min(360px,calc(100vw - 32px))}.node-qr-modal .modal-body{display:grid;place-items:center}.node-qr-image{display:block;width:240px;height:240px;image-rendering:pixelated}
 .user-agent{max-width:380px;overflow:hidden;text-overflow:ellipsis}
 .latency,.status{display:inline-flex;align-items:center;min-width:68px;justify-content:center;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:650}.latency.good,.status.ok{background:#dcfce7;color:#166534}.latency.warn{background:#fef3c7;color:#92400e}.latency.bad,.status.bad{background:#fee2e2;color:#991b1b}.latency.muted,.status.running{background:#e2e8f0;color:#475569}
 .group-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}
@@ -515,7 +557,7 @@ button.group-card:hover{border-color:#93c5fd;transform:translateY(-1px)}
 .modal-close{border:0;border-radius:9px;padding:8px 12px;background:#e2e8f0;color:#334155;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
 .modal-body{padding:18px 20px;overflow:auto}.modal-body h3{margin:0 0 10px;font-size:13px;color:var(--muted)}.modal-body section+section{margin-top:18px}
 pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;background:#0b1120;color:#e2e8f0;border-radius:0;font-size:12px;line-height:1.65}.muted,.error-text{color:var(--muted)}
-@media(max-width:720px){.hero{padding:25px}.summary-card b{font-size:19px}.summary-time{font-size:13px}.table-wrap{margin:0 -20px}.modal{width:calc(100vw - 20px)}.user-agent{max-width:220px}}
+@media(max-width:720px){.hero{padding:25px}.subscription-access{width:100%}.summary-card b{font-size:19px}.summary-time{font-size:13px}.table-wrap{margin:0 -20px}.modal{width:calc(100vw - 20px)}.user-agent{max-width:220px}}
 @media(prefers-color-scheme:dark){:root{--line:#28324a;--muted:#94a3b8;--panel:#111827;--bg:#080d19;--text:#e6eaf3}th{background:#0f172a}.chip{background:#1e293b;color:#bfdbfe}.button{background:#e2e8f0}.latency.good,.status.ok{background:#14532d;color:#bbf7d0}.latency.warn{background:#78350f;color:#fde68a}.latency.bad,.status.bad{background:#7f1d1d;color:#fecaca}.latency.muted,.status.running{background:#1e293b;color:#cbd5e1}button.group-card,.provider-card{box-shadow:none}.modal-close{background:#1e293b;color:#e2e8f0}.provider-card{background:#0f172a}}
 '''
     script = '''
@@ -594,6 +636,17 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
     area.remove();
     return copied;
   }
+  document.querySelectorAll("[data-copy-node-link]").forEach(function(nodeButton){
+    nodeButton.addEventListener("click", function(){
+      var text = nodeButton.getAttribute("data-node-link") || "";
+      if(!text) return;
+      var originalTitle = nodeButton.title;
+      function done(){ nodeButton.title = "已复制"; setTimeout(function(){ nodeButton.title = originalTitle; }, 1600); }
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(done).catch(function(){ if(fallbackCopy(text)) done(); });
+      } else if(fallbackCopy(text)){ done(); }
+    });
+  });
   button.addEventListener("click", function(){
     var link = document.querySelector("[data-subscription-link]");
     if(!link){ setStatus("copy-error", "复制失败：未找到订阅链接"); return; }
@@ -625,9 +678,9 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅详情 · {e(str(details.get("name") or ""))}</title><style>{css}</style></head>
 <body><main>
-<header class="hero"><div class="hero-inner"><div><p class="eyebrow">Clash Meta 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="hero-actions"><a class="button" data-subscription-link href="/sub/clash/{e(token)}">下载 Clash Meta YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div></div>
+<header class="hero"><div class="hero-inner"><div><p class="eyebrow">Clash Meta 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="subscription-access"><div class="hero-actions"><a class="button" data-subscription-link href="{e(download_url, quote=True)}">下载 Clash YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div><div class="subscription-qr"><img src="{qr_data_url}" alt="Clash YAML 下载链接二维码"></div></div></div>
 <section class="summary"><div class="summary-card"><b>{e(str(details.get("mode") or "rule").upper())}</b><span>运行模式</span></div><div class="summary-card"><b>{len(proxies)}</b><div class="speed-dots">{speed_dots}</div><span>输出节点</span></div><div class="summary-card"><b>{len(groups)}</b><span>策略组</span></div><div class="summary-card"><b class="summary-time" title="{e(latest_request_raw or '暂无拉取记录')}">{e(latest_request)}</b><span>最近拉取</span></div></section></header>
-<h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>延迟</th></tr></thead><tbody>{node_rows or '<tr><td colspan="5" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
+<h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>延迟</th><th>导入</th></tr></thead><tbody>{node_rows or '<tr><td colspan="6" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
 <div class="section-head"><h2>策略组</h2><button class="button" type="button" onclick="document.getElementById('domain-test-modal').showModal()">测试域名</button></div><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
 <dialog class="modal" id="domain-test-modal" aria-label="测试域名命中"><article class="modal-panel"><header class="modal-head"><div><strong>测试域名命中</strong><span>输入域名，查看最终命中的策略</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><form class="domain-test-form" data-domain-test-form><input class="domain-input" type="text" name="domain" placeholder="example.com" autocomplete="off" required><button class="button" type="submit">测试命中</button><div class="domain-test-result" data-domain-test-result hidden></div></form></div></article></dialog>
 <div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" onclick="document.getElementById('yaml-modal').showModal()">打开预览</button></div>
@@ -635,15 +688,17 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <h2>订阅拉取日志</h2><p class="section-note">记录聚合订阅链接的请求，不包含上游订阅源刷新记录。</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端 IP</th><th>User-Agent</th><th>状态</th></tr></thead><tbody>{log_rows or '<tr><td colspan="4" class="muted">暂无拉取日志</td></tr>'}</tbody></table></div></div>
 {''.join(group_modals)}
 {''.join(provider_modals)}
+{''.join(node_qr_dialogs)}
 </main>{script}</body></html>'''
 
 def mount_extra(app: FastAPI) -> None:
     @app.get("/sub/clash/details/{token}", include_in_schema=False)
-    def public_clash_subscription_details(token: str) -> HTMLResponse:
+    def public_clash_subscription_details(token: str, request: Request) -> HTMLResponse:
         details = service.public_subscription_details(token)
         if details is None:
             return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>订阅不存在</title><body><h1>订阅不存在或已失效</h1></body></html>", status_code=404)
-        return HTMLResponse(_subscription_details_html(token, details))
+        download_url = f"{str(request.base_url).rstrip('/')}/sub/clash/{token}"
+        return HTMLResponse(_subscription_details_html(token, details, download_url))
 
     @app.post("/sub/clash/details/{token}/test-domain", include_in_schema=False)
     def public_clash_subscription_domain_test(token: str, payload: DomainTestPayload) -> Response:

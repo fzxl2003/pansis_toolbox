@@ -1515,16 +1515,22 @@ def _remote_provider_output(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _inline_remote_provider_rules(config: dict[str, Any], target: str) -> list[str]:
-    """Fetch an HTTP Provider on the server and expand it into concrete rules."""
+    """Expand a Provider from its locally scheduled snapshot, never on demand."""
     value = _normalise_legacy_manual_provider(config)
-    url = str(value.get("url") or "").strip()
-    if value.get("type") != "http" or not url:
+    url = str(value.get("url") or value.get("sourceUrl") or "").strip()
+    if str(value.get("type") or "").lower() not in {"http", "cached"} or not url:
         raise ToolboxError(
             "RULE_PROVIDER_INLINE_REQUIRES_URL",
             "拉取后优先仅支持带 URL 的规则订阅；请改为 URL 优先，或为该 Rule Provider 配置 URL。",
             status_code=422,
         )
-    payload = _rule_provider_snapshot_payload(value) or _download_rule_provider_payload(url)
+    payload = _rule_provider_snapshot_payload(value)
+    if not payload:
+        raise ToolboxError(
+            "RULE_PROVIDER_SNAPSHOT_NOT_READY",
+            "规则快照尚未生成，等待定时拉取后再试。",
+            status_code=422,
+        )
     return _manual_provider_rules({
         "type": "manual",
         "behavior": str(value.get("behavior") or "domain").lower(),
@@ -2217,6 +2223,95 @@ def _public_subscription_requests(
              "userAgent": row["user_agent"], "statusCode": row["status_code"]} for row in rows]
 
 
+
+def _clean_test_domain(value: str) -> str:
+    raw = str(value or "").strip()
+    parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+    domain = (parsed.hostname or raw).strip().rstrip(".").lower()
+    if (
+        not domain
+        or any(char.isspace() for char in domain)
+        or "://" in raw
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.port is not None
+    ):
+        raise ToolboxError("INVALID_TEST_DOMAIN", "请只输入域名，不要包含协议、路径或端口。", status_code=422)
+    return domain
+
+
+def _domain_pattern_matches(domain: str, pattern: str) -> bool:
+    value = str(pattern or "").strip().lower().lstrip("+")
+    if not value:
+        return False
+    if value.startswith("."):
+        value = value[1:]
+    return domain == value or domain.endswith(f".{value}")
+
+
+def _classical_provider_item_matches_domain(item: str, domain: str) -> bool:
+    parts = [part.strip() for part in str(item or "").split(",")]
+    if not parts:
+        return False
+    rule_type = parts[0].upper()
+    if rule_type == "DOMAIN" and len(parts) >= 2:
+        return domain == parts[1].lower()
+    if rule_type == "DOMAIN-SUFFIX" and len(parts) >= 2:
+        return _domain_pattern_matches(domain, parts[1])
+    if rule_type == "DOMAIN-KEYWORD" and len(parts) >= 2:
+        return parts[1].lower() in domain
+    return False
+
+
+def _rule_provider_matches_domain(config: dict[str, Any], domain: str) -> bool:
+    behavior = str(config.get("behavior") or "domain").lower()
+    payload = _rule_provider_snapshot_payload(config)
+    if behavior == "domain":
+        return any(_domain_pattern_matches(domain, item) for item in payload)
+    if behavior == "classical":
+        return any(_classical_provider_item_matches_domain(item, domain) for item in payload)
+    return False
+
+
+def _domain_rule_matches(rule: str, domain: str, providers: dict[str, dict[str, Any]]) -> tuple[bool, str]:
+    parts = [part.strip() for part in str(rule or "").split(",")]
+    rule_type = parts[0].upper() if parts else ""
+    target = _rule_target(rule)
+    if rule_type == "MATCH":
+        return True, target
+    if rule_type == "DOMAIN" and len(parts) >= 2:
+        return domain == parts[1].lower(), target
+    if rule_type == "DOMAIN-SUFFIX" and len(parts) >= 2:
+        return _domain_pattern_matches(domain, parts[1]), target
+    if rule_type == "DOMAIN-KEYWORD" and len(parts) >= 2:
+        return parts[1].lower() in domain, target
+    if rule_type == "RULE-SET" and len(parts) >= 2:
+        provider = providers.get(parts[1], {})
+        return _rule_provider_matches_domain(provider, domain), target
+    return False, target
+
+
+def _test_domain_result(domain: str, rules: list[Any], providers: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, str):
+            continue
+        matched, target = _domain_rule_matches(rule, domain, providers)
+        if not matched:
+            continue
+        matches.append({"index": index, "rule": rule, "target": target})
+        break
+    effective = matches[0] if matches else None
+    return {
+        "domain": domain,
+        "matched": effective is not None,
+        "target": effective["target"] if effective else "",
+        "rule": effective["rule"] if effective else "",
+        "ruleIndex": effective["index"] if effective else None,
+        "matches": matches,
+    }
+
 def public_subscription_details(token: str) -> dict[str, Any] | None:
     """Return a safe visual summary of the current published subscription."""
     if not token or len(token) > 300: return None
@@ -2256,6 +2351,65 @@ def public_subscription_details(token: str) -> dict[str, Any] | None:
             "ruleSetName": profile["rule_set_name"], "ruleSetUpdatedAt": profile["rule_set_updated_at"],
             "requestRuns": request_runs, "yaml": content}
 
+
+
+def test_rule_set_domain(rule_set_id: str, domain: str, user: User) -> dict[str, Any]:
+    """Test a domain against a live rule set using only local Provider snapshots."""
+    clean_domain = _clean_test_domain(domain)
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (rule_set_id,)).fetchone()
+        if not row:
+            _not_found("规则组")
+        rule_set = _materialize_rule_provider_bindings(conn, _rule_row(row), inline_rule_providers=True)
+    return _test_domain_result(clean_domain, rule_set["rules"], {})
+
+
+def test_public_subscription_domain(token: str, domain: str) -> dict[str, Any] | None:
+    """Test a domain against the published rules and local Provider snapshots."""
+    clean_domain = _clean_test_domain(domain)
+    if not token or len(token) > 300:
+        return None
+    with connection_context() as conn:
+        index = conn.execute("SELECT user_id,profile_id FROM csm_public_tokens WHERE token_hash=? AND enabled=1", (_token_hash(token),)).fetchone()
+    if not index:
+        return None
+    init_database(index["user_id"])
+    with user_tool_connection_context(index["user_id"], TOOL_ID) as conn:
+        profile = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (index["profile_id"],)).fetchone()
+        snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
+        if not profile or not snapshot:
+            return None
+        document = yaml.safe_load(_decrypt(snapshot["content_encrypted"])) or {}
+        rules = [str(item) for item in document.get("rules") or [] if isinstance(item, str)]
+        providers: dict[str, dict[str, Any]] = {}
+        rule_row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)).fetchone() if profile["rule_set_id"] else None
+        if rule_row:
+            meta = _loads(rule_row["import_meta_json"], {})
+            bindings = meta.get("providerBindings") if isinstance(meta, dict) else {}
+            provider_ids = {
+                str(item)
+                for values in bindings.values() if isinstance(values, list)
+                for item in values if item
+            }
+            for provider_id in provider_ids:
+                provider_row = conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
+                if provider_row:
+                    providers[str(provider_row["provider_key"])] = _normalise_legacy_manual_provider(
+                        _loads(provider_row["config_json"], {})
+                    )
+        for rule in rules:
+            parts = [part.strip() for part in rule.split(",")]
+            if parts[0].upper() != "RULE-SET" or len(parts) < 2:
+                continue
+            provider = providers.get(parts[1])
+            if provider and not _rule_provider_snapshot_payload(provider):
+                raise ToolboxError(
+                    "RULE_PROVIDER_SNAPSHOT_NOT_READY",
+                    "规则快照尚未生成，等待定时拉取后再试。",
+                    status_code=422,
+                )
+    return _test_domain_result(clean_domain, rules, providers)
 
 def _probe_one(node: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic(); host, port = node["server"], node["port"]

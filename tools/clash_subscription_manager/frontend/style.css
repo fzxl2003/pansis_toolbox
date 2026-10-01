@@ -261,3 +261,16 @@
   gap: 12px;
   flex-wrap: wrap;
 }
+.csm-node-group .csm-node-updated-col { width: 112px; max-width: 112px; }
+.csm-node-group td.csm-node-updated-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.csm-domain-test-form { display: grid; gap: 14px; }
+.csm-domain-test-form .csm-btn { justify-self: flex-start; }
+.csm-domain-test-result { display: grid; gap: 7px; padding: 14px; border: 1px solid rgba(148,163,184,.28); border-radius: 14px; background: rgba(248,250,252,.8); }
+.csm-domain-test-result > span { color: #64748b; font-size: 12px; font-weight: 700; }
+.csm-domain-test-result > strong { font-size: 18px; }
+.csm-domain-test-result > code { overflow-wrap: anywhere; }
+.csm-domain-test-result > small { color: #64748b; }
+@media(prefers-color-scheme:dark) {
+  .csm-domain-test-result { border-color: rgba(148,163,184,.24); background: rgba(15,23,42,.75); }
+  .csm-domain-test-result > span, .csm-domain-test-result > small { color: #94a3b8; }
+}

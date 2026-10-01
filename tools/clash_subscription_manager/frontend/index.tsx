@@ -9,6 +9,7 @@ import {
   BarChart3,
   Check,
   Clipboard,
+  Crosshair,
   Eye,
   ExternalLink,
   FileCode2,
@@ -120,6 +121,15 @@ type RuleSet = {
   importMeta?: Record<string, unknown>;
   updatedAt?: string;
 };
+type DomainTestResult = {
+  domain: string;
+  matched: boolean;
+  target: string;
+  rule: string;
+  ruleIndex: number | null;
+  matches: { index: number; rule: string; target: string }[];
+};
+
 type RuleProviderLibraryItem = {
   id: string;
   name: string;
@@ -193,12 +203,11 @@ export default function ClashSubscriptionManager() {
   const [providerModal, setProviderModal] = useState<
     RuleProviderLibraryItem | null | false
   >(false);
-  const [providerCopy, setProviderCopy] = useState<RuleProviderLibraryItem | null>(
-    null,
-  );
-  const [nodeGroupModal, setNodeGroupModal] = useState<NodeGroup | null | false>(
-    false,
-  );
+  const [providerCopy, setProviderCopy] =
+    useState<RuleProviderLibraryItem | null>(null);
+  const [nodeGroupModal, setNodeGroupModal] = useState<
+    NodeGroup | null | false
+  >(false);
   const [addNodeOpen, setAddNodeOpen] = useState(false);
   const [customNodeModal, setCustomNodeModal] = useState<Node | null | false>(
     false,
@@ -381,7 +390,10 @@ export default function ClashSubscriptionManager() {
     }
     void action(
       `provider-copy-${provider.id}`,
-      () => apiPost(`${API}/rule-providers/${provider.id}/copy`, { mode: "original" }),
+      () =>
+        apiPost(`${API}/rule-providers/${provider.id}/copy`, {
+          mode: "original",
+        }),
       "Rule Provider 已复制",
     );
   }
@@ -694,7 +706,9 @@ export default function ClashSubscriptionManager() {
           nodes={nodes}
           onNodesChange={(updatedNodes) =>
             setNodes((current) => {
-              const updatedById = new Map(updatedNodes.map((node) => [node.id, node]));
+              const updatedById = new Map(
+                updatedNodes.map((node) => [node.id, node]),
+              );
               return current.map((node) => updatedById.get(node.id) ?? node);
             })
           }
@@ -768,13 +782,7 @@ function runStatusColor(run: RefreshRun) {
       : "blue";
 }
 
-function RefreshRunLog({
-  title,
-  runs,
-}: {
-  title: string;
-  runs: RefreshRun[];
-}) {
+function RefreshRunLog({ title, runs }: { title: string; runs: RefreshRun[] }) {
   if (!runs.length) return null;
   return (
     <div className="csm-dashboard-log">
@@ -1160,10 +1168,9 @@ function NodesView({
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const data = await apiPost<{ nodes: Node[] }>(
-            `${API}/nodes/geoip`,
-            { nodeIds: requestIds },
-          );
+          const data = await apiPost<{ nodes: Node[] }>(`${API}/nodes/geoip`, {
+            nodeIds: requestIds,
+          });
           if (stale) return;
           requestIds.forEach((id) => geoAttemptedRef.current.add(id));
           onNodesChange(data.nodes);
@@ -1261,6 +1268,7 @@ function NodesView({
             <th className="csm-node-name-col">节点</th>
             <th className="csm-node-country-col">国家/地区</th>
             <th className="csm-node-probe-col">TCP 状态</th>
+            <th className="csm-node-updated-col">最后更新</th>
             <th>协议</th>
             <th>端点</th>
             <th>兼容性</th>
@@ -1293,9 +1301,6 @@ function NodesView({
                     原名：{node.name}
                   </small>
                 )}
-                <small className="csm-cell-note">
-                  最后更新：{stamp(node.lastSeenAt)}
-                </small>
               </td>
               <td
                 className="csm-node-country-col"
@@ -1307,7 +1312,8 @@ function NodesView({
                   .filter(Boolean)
                   .join("\n")}
               >
-                {node.countryLabel || node.country ||
+                {node.countryLabel ||
+                  node.country ||
                   (geoStatus === "loading" ? "识别中…" : "未知")}
               </td>
               <td className="csm-node-probe-col">
@@ -1323,6 +1329,12 @@ function NodesView({
                 ) : (
                   <span className="csm-muted">—</span>
                 )}
+              </td>
+              <td
+                className="csm-node-updated-col"
+                title={node.lastSeenAt ? stamp(node.lastSeenAt) : undefined}
+              >
+                {relativeStamp(node.lastSeenAt)}
               </td>
               <td>
                 <code className="csm-code">{node.protocol}</code>
@@ -1572,8 +1584,8 @@ function NodesView({
         </div>
       )}
       <p className="csm-footnote">
-        同一节点属于多个订阅源时会显示在对应的每个分组中。别名用于最终输出；规则组同时接受节点原名和别名。系统每 2
-        分钟自动探测全部节点，探测结果会在节点名称下短暂显示；TCP
+        同一节点属于多个订阅源时会显示在对应的每个分组中。别名用于最终输出；规则组同时接受节点原名和别名。系统每
+        2 分钟自动探测全部节点，探测结果会在节点名称下短暂显示；TCP
         可达仅表示目标地址和端口能够建立连接。
       </p>
     </div>
@@ -1894,7 +1906,9 @@ function ProfilesView({
               const errors = profile.validation.filter(
                 (item) => item.level === "error",
               ).length;
-              const published = Boolean(profile.subscriptionToken && profile.publishedAt);
+              const published = Boolean(
+                profile.subscriptionToken && profile.publishedAt,
+              );
               return (
                 <tr key={profile.id}>
                   <td>
@@ -2025,7 +2039,9 @@ function RuleProvidersView({
         }
       />
       <Alert type="info">
-        Rule Provider 支持规则订阅和自定义两种方式。规则订阅由服务器下载并保存具体内容；绑定到策略组后会展开为通用 Clash 规则，最终订阅中不会出现该规则订阅 URL。
+        Rule Provider
+        支持规则订阅和自定义两种方式。规则订阅由服务器下载并保存具体内容；绑定到策略组后会展开为通用
+        Clash 规则，最终订阅中不会出现该规则订阅 URL。
       </Alert>
       <div className="csm-filterbar csm-provider-filter">
         <label className="csm-search">
@@ -2061,7 +2077,8 @@ function RuleProvidersView({
           <tbody>
             {filtered.map((provider) => {
               const payload = stringList(provider.config.payload);
-              const handwritten = String(provider.config.type ?? "") === "manual";
+              const handwritten =
+                String(provider.config.type ?? "") === "manual";
               const source = handwritten
                 ? `自定义 ${payload.length} 条规则`
                 : String(
@@ -2081,7 +2098,9 @@ function RuleProvidersView({
                     )}
                   </td>
                   <td>
-                    <code className="csm-code">{providerKeyText(provider)}</code>
+                    <code className="csm-code">
+                      {providerKeyText(provider)}
+                    </code>
                   </td>
                   <td>
                     <code className="csm-code">
@@ -2164,9 +2183,7 @@ function RuleProviderCopyModal({
     try {
       await apiPost(`${API}/rule-providers/${provider.id}/copy`, { mode });
       await onSaved(
-        mode === "manual"
-          ? "已复制并转换为自定义规则"
-          : "规则订阅已原样复制",
+        mode === "manual" ? "已复制并转换为自定义规则" : "规则订阅已原样复制",
       );
     } catch (caught) {
       setError(message(caught));
@@ -2201,7 +2218,9 @@ function RuleProviderCopyModal({
         >
           <span>
             <strong>原样复制规则订阅</strong>
-            <small>保留原订阅链接、Behavior 和内容来源，创建一个独立副本。</small>
+            <small>
+              保留原订阅链接、Behavior 和内容来源，创建一个独立副本。
+            </small>
           </span>
           {saving === "original" ? <Spin size={16} /> : <Clipboard size={16} />}
         </button>
@@ -2213,7 +2232,9 @@ function RuleProviderCopyModal({
         >
           <span>
             <strong>下载并转为自定义规则</strong>
-            <small>服务器重新下载链接内容，将规则保存到副本中；副本不再保留订阅链接。</small>
+            <small>
+              服务器重新下载链接内容，将规则保存到副本中；副本不再保留订阅链接。
+            </small>
           </span>
           {saving === "manual" ? <Spin size={16} /> : <FileCode2 size={16} />}
         </button>
@@ -2239,15 +2260,11 @@ function RuleProviderModal({
   const initialConfig = provider?.config ?? defaultConfig;
   const initialPayload = stringList(initialConfig.payload);
   const [name, setName] = useState(provider?.name ?? "自定义 Provider");
-  const [providerKey, setProviderKey] = useState(
-    provider?.providerKey ?? "",
-  );
+  const [providerKey, setProviderKey] = useState(provider?.providerKey ?? "");
   const [description, setDescription] = useState(provider?.description ?? "");
   const [config, setConfig] = useState<Record<string, unknown>>(initialConfig);
   const [sourceMode, setSourceMode] = useState<"subscription" | "manual">(
-    String(initialConfig.type ?? "") === "manual"
-      ? "manual"
-      : "subscription",
+    String(initialConfig.type ?? "") === "manual" ? "manual" : "subscription",
   );
   const [manualContent, setManualContent] = useState(initialPayload.join("\n"));
   const [saving, setSaving] = useState(false);
@@ -2370,9 +2387,7 @@ function RuleProviderModal({
             maxLength={120}
             onChange={(event) => setProviderKey(event.target.value)}
             placeholder={
-              autoGeneratedProviderKey
-                ? "已自动生成"
-                : "留空时由服务器自动生成"
+              autoGeneratedProviderKey ? "已自动生成" : "留空时由服务器自动生成"
             }
           />
           <small className="csm-muted">
@@ -2423,7 +2438,8 @@ function RuleProviderModal({
           <>
             <div className="csm-full-col">
               <Alert type="info">
-                保存时由服务器下载并保存规则内容；最终订阅只会包含展开后的具体规则，不会包含此 URL。
+                保存时由服务器下载并保存规则内容；最终订阅只会包含展开后的具体规则，不会包含此
+                URL。
               </Alert>
             </div>
             <Field label="规则订阅链接" full>
@@ -2466,11 +2482,16 @@ function RuleProviderModal({
 }
 
 function nodeGroupKindText(kind: NodeGroup["kind"]): string {
-  return kind === "custom" ? "自定义分组" : kind === "region" ? "地域分组" : "延迟分组";
+  return kind === "custom"
+    ? "自定义分组"
+    : kind === "region"
+      ? "地域分组"
+      : "延迟分组";
 }
 
 function nodeGroupKindBadge(kind: NodeGroup["kind"]) {
-  const color = kind === "custom" ? "green" : kind === "region" ? "blue" : "amber";
+  const color =
+    kind === "custom" ? "green" : kind === "region" ? "blue" : "amber";
   return <Badge color={color}>{nodeGroupKindText(kind)}</Badge>;
 }
 
@@ -2603,8 +2624,8 @@ function NodeGroupsView({
         </Table>
       )}
       <p className="csm-footnote">
-        地域与延迟分组为动态规则：策略组在发布时会按当前节点池实时解析成员；自定义分组则固定保存所选节点。系统每 2
-        分钟自动进行一次全局 TCP 探测，延迟分组会随最新结果更新。
+        地域与延迟分组为动态规则：策略组在发布时会按当前节点池实时解析成员；自定义分组则固定保存所选节点。系统每
+        2 分钟自动进行一次全局 TCP 探测，延迟分组会随最新结果更新。
       </p>
     </div>
   );
@@ -2626,9 +2647,7 @@ function NodeGroupModal({
   const config = group?.config ?? {};
   const [name, setName] = useState(group?.name ?? "节点分组");
   const [kind, setKind] = useState<NodeGroup["kind"]>(group?.kind ?? "custom");
-  const [nodeIds, setNodeIds] = useState<string[]>(
-    stringList(config.nodeIds),
-  );
+  const [nodeIds, setNodeIds] = useState<string[]>(stringList(config.nodeIds));
   const [nodeSearch, setNodeSearch] = useState("");
   const [countries, setCountries] = useState<string[]>(
     stringList(config.countries),
@@ -2692,10 +2711,9 @@ function NodeGroupModal({
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const data = await apiPost<{ nodes: Node[] }>(
-            `${API}/nodes/geoip`,
-            { nodeIds: requestIds },
-          );
+          const data = await apiPost<{ nodes: Node[] }>(`${API}/nodes/geoip`, {
+            nodeIds: requestIds,
+          });
           if (stale) return;
           requestIds.forEach((id) => geoAttemptedRef.current.add(id));
           onNodesChange(data.nodes);
@@ -2755,7 +2773,15 @@ function NodeGroupModal({
         .map(refOf);
     }
     return withLatency.slice(0, latencyCount).map(refOf);
-  }, [kind, nodeIds, nodes, countries, latencyMode, latencyCount, latencyThreshold]);
+  }, [
+    kind,
+    nodeIds,
+    nodes,
+    countries,
+    latencyMode,
+    latencyCount,
+    latencyThreshold,
+  ]);
 
   function buildConfig(): Record<string, unknown> {
     if (kind === "custom") return { nodeIds };
@@ -2846,7 +2872,11 @@ function NodeGroupModal({
           />
         </Field>
         <Field label="分组类型">
-          <div className="csm-provider-source-switch" role="group" aria-label="分组类型">
+          <div
+            className="csm-provider-source-switch"
+            role="group"
+            aria-label="分组类型"
+          >
             <button
               className={`csm-btn csm-btn-sm ${kind === "custom" ? "csm-btn-primary" : "csm-btn-secondary"}`}
               type="button"
@@ -2878,75 +2908,77 @@ function NodeGroupModal({
           }
           full
         >
-            <div className="csm-strategy-picker">
-              <label className="csm-search">
-                <Search size={15} />
-                <input
-                  value={nodeSearch}
-                  onChange={(event) => setNodeSearch(event.target.value)}
-                  placeholder="按节点名称、别名、协议或地址搜索"
-                />
-              </label>
-              <div className="csm-strategy-node-list">
-                {visibleNodes.map((node) => (
-                  <label key={node.id}>
-                    <input
-                      type="checkbox"
-                      checked={nodeIds.includes(node.id)}
-                      onChange={(event) =>
-                        setNodeIds((current) =>
-                          event.target.checked
-                            ? [...new Set([...current, node.id])]
-                            : current.filter((id) => id !== node.id),
-                        )
-                      }
-                    />
-                    <span>
-                      <strong>{node.displayName || node.name}</strong>
-                      {node.alias && <small>原名：{node.name}</small>}
-                      <small>
-                        {node.protocol} · {node.server}:{node.port ?? "—"}
-                        {node.country ? ` · ${node.countryLabel ?? node.country}` : ""}
-                      </small>
-                    </span>
-                  </label>
-                ))}
-                {!visibleNodes.length && (
-                  <div className="csm-inline-empty">没有符合条件的节点</div>
-                )}
-              </div>
+          <div className="csm-strategy-picker">
+            <label className="csm-search">
+              <Search size={15} />
+              <input
+                value={nodeSearch}
+                onChange={(event) => setNodeSearch(event.target.value)}
+                placeholder="按节点名称、别名、协议或地址搜索"
+              />
+            </label>
+            <div className="csm-strategy-node-list">
+              {visibleNodes.map((node) => (
+                <label key={node.id}>
+                  <input
+                    type="checkbox"
+                    checked={nodeIds.includes(node.id)}
+                    onChange={(event) =>
+                      setNodeIds((current) =>
+                        event.target.checked
+                          ? [...new Set([...current, node.id])]
+                          : current.filter((id) => id !== node.id),
+                      )
+                    }
+                  />
+                  <span>
+                    <strong>{node.displayName || node.name}</strong>
+                    {node.alias && <small>原名：{node.name}</small>}
+                    <small>
+                      {node.protocol} · {node.server}:{node.port ?? "—"}
+                      {node.country
+                        ? ` · ${node.countryLabel ?? node.country}`
+                        : ""}
+                    </small>
+                  </span>
+                </label>
+              ))}
+              {!visibleNodes.length && (
+                <div className="csm-inline-empty">没有符合条件的节点</div>
+              )}
             </div>
-          </Field>
+          </div>
+        </Field>
         {kind === "region" && (
           <Field label={`国家 / 地区（多选，已选 ${countries.length}）`} full>
-              {(geoStatus !== "idle" || hasUnknownCountry) && (
-                <div className="csm-muted" style={{ marginBottom: 8 }}>
-                  {geoStatus === "loading"
-                    ? "正在识别国家/地区…"
-                    : "部分节点国家/地区识别失败，将按未知处理。"}
-                </div>
-              )}
-              <div className="csm-check-grid">
-                {countryOptions.map((option) => (
-                  <label className="csm-check" key={option.code}>
-                    <input
-                      type="checkbox"
-                      checked={countries.includes(option.code)}
-                      onChange={(event) =>
-                        setCountries((current) =>
-                          event.target.checked
-                            ? [...new Set([...current, option.code])]
-                            : current.filter((code) => code !== option.code),
-                        )
-                      }
-                    />
-                    {option.label}
-                  </label>
-                ))}
-                {!countryOptions.length && (
-                  <span className="csm-muted">暂无可识别的国家/地区。</span>
-                )}
+            {(geoStatus !== "idle" || hasUnknownCountry) && (
+              <div className="csm-muted" style={{ marginBottom: 8 }}>
+                {geoStatus === "loading"
+                  ? "正在识别国家/地区…"
+                  : "部分节点国家/地区识别失败，将按未知处理。"}
               </div>
+            )}
+            <div className="csm-check-grid">
+              {countryOptions.map((option) => (
+                <label className="csm-check" key={option.code}>
+                  <input
+                    type="checkbox"
+                    checked={countries.includes(option.code)}
+                    onChange={(event) =>
+                      setCountries((current) =>
+                        event.target.checked
+                          ? [...new Set([...current, option.code])]
+                          : current.filter((code) => code !== option.code),
+                      )
+                    }
+                  />
+                  {option.label}
+                </label>
+              ))}
+              {!countryOptions.length && (
+                <span className="csm-muted">暂无可识别的国家/地区。</span>
+              )}
+            </div>
           </Field>
         )}
         {kind === "latency" && (
@@ -2971,7 +3003,9 @@ function NodeGroupModal({
                   min={1}
                   max={500}
                   value={latencyCount}
-                  onChange={(event) => setLatencyCount(Number(event.target.value))}
+                  onChange={(event) =>
+                    setLatencyCount(Number(event.target.value))
+                  }
                 />
               </Field>
             ) : (
@@ -2990,7 +3024,9 @@ function NodeGroupModal({
             )}
             <Field label="说明" full>
               <small className="csm-muted">
-                系统每 2 分钟自动探测一次全部节点，也支持手动探测。延迟仅表示 TCP 端口连通速度，不等同于代理真实延迟。没有可达探测记录的节点不会进入分组。
+                系统每 2 分钟自动探测一次全部节点，也支持手动探测。延迟仅表示
+                TCP
+                端口连通速度，不等同于代理真实延迟。没有可达探测记录的节点不会进入分组。
               </small>
             </Field>
           </>
@@ -3013,6 +3049,98 @@ function NodeGroupModal({
   );
 }
 
+function RuleDomainTestModal({
+  ruleSet,
+  onClose,
+}: {
+  ruleSet: RuleSet;
+  onClose: () => void;
+}) {
+  const [domain, setDomain] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<DomainTestResult | null>(null);
+  const [error, setError] = useState("");
+
+  async function test(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const value = domain.trim();
+    if (!value) {
+      setError("请输入要测试的域名。");
+      return;
+    }
+    setTesting(true);
+    setError("");
+    setResult(null);
+    try {
+      const data = await apiPost<DomainTestResult>(
+        `${API}/rule-sets/${ruleSet.id}/test-domain`,
+        { domain: value },
+      );
+      setResult(data);
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`测试域名 · ${ruleSet.name}`}
+      onClose={() => !testing && onClose()}
+      foot={
+        <button
+          className="csm-btn csm-btn-secondary"
+          type="button"
+          disabled={testing}
+          onClick={onClose}
+        >
+          关闭
+        </button>
+      }
+    >
+      <form
+        className="csm-domain-test-form"
+        onSubmit={(event) => void test(event)}
+      >
+        <Field label="域名">
+          <input
+            className="csm-input"
+            type="text"
+            value={domain}
+            placeholder="example.com"
+            autoComplete="off"
+            onChange={(event) => setDomain(event.target.value)}
+          />
+        </Field>
+        <button
+          className="csm-btn csm-btn-primary"
+          type="submit"
+          disabled={testing}
+        >
+          {testing ? <Spin size={14} /> : <Crosshair size={14} />}
+          测试命中
+        </button>
+        {error && <Alert type="error">{error}</Alert>}
+        {result && (
+          <div className="csm-domain-test-result">
+            <span>命中策略</span>
+            <strong>
+              {result.matched ? result.target || "未知策略" : "未命中"}
+            </strong>
+            <code>
+              {result.matched ? result.rule : `没有规则匹配 ${result.domain}`}
+            </code>
+            {result.ruleIndex !== null && (
+              <small>第 {result.ruleIndex + 1} 条规则</small>
+            )}
+          </div>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
 function RulesView({
   ruleSets,
   loading,
@@ -3028,6 +3156,7 @@ function RulesView({
   onEdit: (rule: RuleSet) => void;
   onRemove: (rule: RuleSet) => void;
 }) {
+  const [testingRule, setTestingRule] = useState<RuleSet | null>(null);
   return (
     <div className="csm-panel">
       <Toolbar
@@ -3089,6 +3218,14 @@ function RulesView({
                     <button
                       className="csm-btn csm-btn-sm csm-btn-ghost"
                       type="button"
+                      title="测试域名"
+                      onClick={() => setTestingRule(rule)}
+                    >
+                      <Crosshair size={13} />
+                    </button>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-ghost"
+                      type="button"
                       title="编辑"
                       onClick={() => onEdit(rule)}
                     >
@@ -3113,6 +3250,12 @@ function RulesView({
         从订阅导入时只保存 rules、proxy-groups 和
         rule-providers，不会导入或覆盖节点池中的节点。
       </p>
+      {testingRule && (
+        <RuleDomainTestModal
+          ruleSet={testingRule}
+          onClose={() => setTestingRule(null)}
+        />
+      )}
     </div>
   );
 }
@@ -3323,9 +3466,7 @@ function ProfileModal({
       ) {
         try {
           setDiagnostic(
-            await apiGet<ProfilePreview>(
-              `${API}/profiles/${saved.id}/preview`,
-            ),
+            await apiGet<ProfilePreview>(`${API}/profiles/${saved.id}/preview`),
           );
         } catch {
           // Keep the original publish error visible if diagnostics cannot be
@@ -3458,7 +3599,8 @@ function ProfileModal({
         </Field>
         <div className="csm-full-col">
           <small className="csm-muted">
-            输出固定为 Clash Meta YAML，运行模式固定为 Rule；节点与策略组完全由所选规则组决定。
+            输出固定为 Clash Meta YAML，运行模式固定为
+            Rule；节点与策略组完全由所选规则组决定。
           </small>
         </div>
       </div>
@@ -3549,7 +3691,8 @@ function ProfileDiagnosticModal({
     >
       <div className="csm-stack">
         <Alert type="error">
-          配置校验未通过，已发布版本未被覆盖。请结合下方过程日志与 YAML 原文定位问题。
+          配置校验未通过，已发布版本未被覆盖。请结合下方过程日志与 YAML
+          原文定位问题。
         </Alert>
         <div className="csm-preview">
           <strong>校验消息</strong>
@@ -3612,7 +3755,13 @@ function initialRuleGroups(
       ];
   }
   const drafts = rawGroups.map((rawGroup, index) => {
-    const { name, type, proxies, nodeGroups: rawNodeGroups, ...extra } = rawGroup;
+    const {
+      name,
+      type,
+      proxies,
+      nodeGroups: rawNodeGroups,
+      ...extra
+    } = rawGroup;
     const groupName = String(name ?? `PROXY-${index + 1}`);
     return {
       id: `strategy-${index}-${groupName}`,
@@ -3753,10 +3902,18 @@ function RuleSetModal({
   function moveGroup(index: number, offset: -1 | 1) {
     setGroups((current) => {
       const target = index + offset;
-      if (index < 0 || index >= current.length || target < 0 || target >= current.length)
+      if (
+        index < 0 ||
+        index >= current.length ||
+        target < 0 ||
+        target >= current.length
+      )
         return current;
       const reordered = [...current];
-      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      [reordered[index], reordered[target]] = [
+        reordered[target],
+        reordered[index],
+      ];
       return reordered;
     });
   }
@@ -3936,7 +4093,9 @@ function RuleSetModal({
               <div className="csm-strategy-section-head">
                 <div>
                   <strong>策略组</strong>
-                  <span>越靠上的策略组规则越先匹配；兜底策略在下方单独配置</span>
+                  <span>
+                    越靠上的策略组规则越先匹配；兜底策略在下方单独配置
+                  </span>
                 </div>
                 <button
                   className="csm-btn csm-btn-sm csm-btn-primary"
@@ -4023,7 +4182,9 @@ function RuleSetModal({
                 <div className="csm-fallback-strategy-head">
                   <div>
                     <strong>默认兜底策略</strong>
-                    <span>固定用于 MATCH，不参与规则排序，不能删除或设置代理规则</span>
+                    <span>
+                      固定用于 MATCH，不参与规则排序，不能删除或设置代理规则
+                    </span>
                   </div>
                 </div>
                 <article className="csm-strategy-group-card csm-fallback-strategy-card">
@@ -4164,10 +4325,18 @@ function StrategyGroupModal({
   function moveProvider(index: number, offset: -1 | 1) {
     setProviderIds((current) => {
       const target = index + offset;
-      if (index < 0 || index >= current.length || target < 0 || target >= current.length)
+      if (
+        index < 0 ||
+        index >= current.length ||
+        target < 0 ||
+        target >= current.length
+      )
         return current;
       const reordered = [...current];
-      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      [reordered[index], reordered[target]] = [
+        reordered[target],
+        reordered[index],
+      ];
       return reordered;
     });
   }
@@ -4244,7 +4413,9 @@ function StrategyGroupModal({
             placeholder="例如：AI平台"
           />
           {fallback && (
-            <small className="csm-muted">固定用于最终 MATCH，名称不可修改。</small>
+            <small className="csm-muted">
+              固定用于最终 MATCH，名称不可修改。
+            </small>
           )}
         </Field>
         <Field label="节点选择方法">
@@ -4322,7 +4493,9 @@ function StrategyGroupModal({
                   >
                     <input
                       type="checkbox"
-                      disabled={(disabled || inGroup) && !proxies.includes(value)}
+                      disabled={
+                        (disabled || inGroup) && !proxies.includes(value)
+                      }
                       checked={effectiveProxies.includes(value)}
                       onChange={(event) =>
                         toggleProxy(value, event.target.checked)
@@ -4344,7 +4517,7 @@ function StrategyGroupModal({
           </div>
         </Field>
         {!fallback && (
-        <Field label={`代理规则（已选 ${providerIds.length}）`} full>
+          <Field label={`代理规则（已选 ${providerIds.length}）`} full>
             <div className="csm-strategy-picker">
               {providerIds.length > 0 && (
                 <div className="csm-provider-order">
@@ -4353,13 +4526,21 @@ function StrategyGroupModal({
                     <small>越靠上的规则越先输出和匹配</small>
                   </div>
                   {providerIds.map((providerId, index) => {
-                    const provider = providers.find((item) => item.id === providerId);
+                    const provider = providers.find(
+                      (item) => item.id === providerId,
+                    );
                     return (
                       <div className="csm-provider-order-row" key={providerId}>
-                        <span className="csm-provider-order-index">{index + 1}</span>
+                        <span className="csm-provider-order-index">
+                          {index + 1}
+                        </span>
                         <span className="csm-provider-order-name">
-                          <strong>{provider?.name ?? "已失效的 Rule Provider"}</strong>
-                          {provider && <small>{providerKeyText(provider)}</small>}
+                          <strong>
+                            {provider?.name ?? "已失效的 Rule Provider"}
+                          </strong>
+                          {provider && (
+                            <small>{providerKeyText(provider)}</small>
+                          )}
                         </span>
                         <span className="csm-provider-order-actions">
                           <button
@@ -4552,6 +4733,21 @@ function stamp(value?: string | null) {
   if (!value) return "从未";
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
+}
+function relativeStamp(value?: string | null) {
+  if (!value) return "从未";
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  const seconds = Math.max(0, Math.floor((Date.now() - date.valueOf()) / 1000));
+  if (seconds < 10) return "刚刚";
+  if (seconds < 60) return `${seconds} 秒钟前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days <= 7) return `${days} 天前`;
+  return date.toLocaleDateString();
 }
 function duration(seconds: number) {
   if (seconds % 86400 === 0) return `${seconds / 86400} 天`;

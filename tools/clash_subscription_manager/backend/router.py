@@ -6,7 +6,7 @@ from email.utils import format_datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from backend.app.core.security import require_user
@@ -94,6 +94,10 @@ class NodeGroupPayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     kind: str = Field(pattern="^(custom|region|latency)$")
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class DomainTestPayload(BaseModel):
+    domain: str = Field(min_length=1, max_length=300)
 
 
 @router.get("/dashboard")
@@ -276,6 +280,11 @@ def import_rule_set(request: Request, payload: RuleImportPayload) -> dict[str, A
     return {"ruleSet": service.import_rule_set(payload.model_dump(), require_user(request))}
 
 
+@router.post("/rule-sets/{rule_set_id}/test-domain")
+def test_rule_set_domain(request: Request, rule_set_id: str, payload: DomainTestPayload) -> dict[str, Any]:
+    return service.test_rule_set_domain(rule_set_id, payload.domain, require_user(request))
+
+
 @router.get("/refresh-runs")
 def get_refresh_runs(request: Request, limit: int = 100) -> dict[str, Any]:
     return {"runs": service.refresh_runs(require_user(request), limit)}
@@ -438,6 +447,15 @@ main{max-width:1180px;margin:0 auto;padding:34px 20px 70px}
 button.button{border:0;cursor:pointer;font:inherit}.copy-feedback{display:block;min-height:18px;margin-top:6px;font-size:12px;font-weight:600;color:#fff;opacity:.9}.copy-feedback.copy-success{color:#bbf7d0}.copy-feedback.copy-error{color:#fecaca}button.copy-success{background:#dcfce7;color:#166534}button.copy-error{background:#fee2e2;color:#991b1b}
 h2{display:flex;align-items:center;gap:9px;margin:34px 0 13px;font-size:19px}.section-note{margin:0 0 12px;color:var(--muted);font-size:13px}
 .section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:34px 0 13px}.section-head h2{margin:0}
+.domain-test-form{display:grid;gap:14px}
+.domain-input{width:100%;border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:#fff;color:var(--text);font:inherit}
+.domain-input:focus{outline:2px solid #93c5fd;outline-offset:1px}
+.domain-test-result{display:grid;gap:7px;padding:14px;border:1px solid var(--line);border-radius:14px;background:rgba(248,250,252,.85)}
+.domain-test-result span{color:var(--muted);font-size:12px;font-weight:700}
+.domain-test-result strong{font-size:18px}
+.domain-test-result code{overflow-wrap:anywhere}
+.domain-test-result small{color:var(--muted)}
+.domain-test-result.error strong{color:#b91c1c}
 .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:18px}
 .summary-card{background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.2);border-radius:16px;padding:16px;backdrop-filter:blur(10px)}
 .summary-card b{display:block;font-size:22px;margin-bottom:6px}.summary-card span{font-size:12px;opacity:.82}
@@ -475,6 +493,42 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
   document.querySelectorAll("dialog.modal").forEach(function(dialog){
     dialog.addEventListener("click", function(event){ if(event.target === dialog) dialog.close(); });
   });
+  var domainForm = document.querySelector("[data-domain-test-form]");
+  var domainResult = document.querySelector("[data-domain-test-result]");
+  if(domainForm && domainResult){
+    domainForm.addEventListener("submit", function(event){
+      event.preventDefault();
+      var input = domainForm.querySelector("input[name='domain']");
+      var submit = domainForm.querySelector("button[type='submit']");
+      var domain = input.value.trim();
+      if(!domain) return;
+      domainResult.hidden = false;
+      domainResult.className = "domain-test-result";
+      domainResult.innerHTML = "<span>测试中</span><strong>正在匹配规则…</strong>";
+      submit.disabled = true;
+      fetch(window.location.pathname + "/test-domain", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({domain: domain})
+      }).then(function(response){
+        if(!response.ok) throw new Error("测试失败：" + response.status);
+        return response.json();
+      }).then(function(data){
+        domainResult.className = "domain-test-result";
+        if(data.matched){
+          domainResult.innerHTML = "<span>命中策略</span><strong>" + data.target + "</strong><code>" + data.rule + "</code><small>第 " + (data.ruleIndex + 1) + " 条规则</small>";
+        } else {
+          domainResult.className = "domain-test-result error";
+          domainResult.innerHTML = "<span>测试结果</span><strong>未命中</strong><code>没有规则匹配 " + domain + "</code>";
+        }
+      }).catch(function(error){
+        domainResult.className = "domain-test-result error";
+        domainResult.innerHTML = "<span>测试失败</span><strong>" + error.message + "</strong>";
+      }).finally(function(){
+        submit.disabled = false;
+      });
+    });
+  }
   var button = document.querySelector("[data-copy-subscription]");
   var feedback = document.querySelector("[data-copy-feedback]");
   if(!button) return;
@@ -543,7 +597,8 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <header class="hero"><div class="hero-inner"><div><p class="eyebrow">Clash Meta 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="hero-actions"><a class="button" data-subscription-link href="/sub/clash/{e(token)}">下载 Clash Meta YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div></div>
 <section class="summary"><div class="summary-card"><b>{e(str(details.get("mode") or "rule").upper())}</b><span>运行模式</span></div><div class="summary-card"><b>{len(proxies)}</b><div class="speed-dots">{speed_dots}</div><span>输出节点</span></div><div class="summary-card"><b>{len(groups)}</b><span>策略组</span></div><div class="summary-card"><b class="summary-time" title="{e(latest_request_raw or '暂无拉取记录')}">{e(latest_request)}</b><span>最近拉取</span></div></section></header>
 <h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>延迟</th></tr></thead><tbody>{node_rows or '<tr><td colspan="5" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
-<h2>策略组</h2><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
+<div class="section-head"><h2>策略组</h2><button class="button" type="button" onclick="document.getElementById('domain-test-modal').showModal()">测试域名</button></div><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
+<dialog class="modal" id="domain-test-modal" aria-label="测试域名命中"><article class="modal-panel"><header class="modal-head"><div><strong>测试域名命中</strong><span>输入域名，查看最终命中的策略</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><form class="domain-test-form" data-domain-test-form><input class="domain-input" type="text" name="domain" placeholder="example.com" autocomplete="off" required><button class="button" type="submit">测试命中</button><div class="domain-test-result" data-domain-test-result hidden></div></form></div></article></dialog>
 <div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" onclick="document.getElementById('yaml-modal').showModal()">打开预览</button></div>
 <dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 Clash Meta 配置</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code>{e(str(details.get("yaml") or ""))}</code></pre></div></article></dialog>
 <h2>订阅拉取日志</h2><p class="section-note">记录聚合订阅链接的请求，不包含上游订阅源刷新记录。</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端 IP</th><th>User-Agent</th><th>状态</th></tr></thead><tbody>{log_rows or '<tr><td colspan="4" class="muted">暂无拉取日志</td></tr>'}</tbody></table></div></div>
@@ -558,6 +613,13 @@ def mount_extra(app: FastAPI) -> None:
         if details is None:
             return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>订阅不存在</title><body><h1>订阅不存在或已失效</h1></body></html>", status_code=404)
         return HTMLResponse(_subscription_details_html(token, details))
+
+    @app.post("/sub/clash/details/{token}/test-domain", include_in_schema=False)
+    def public_clash_subscription_domain_test(token: str, payload: DomainTestPayload) -> Response:
+        result = service.test_public_subscription_domain(token, payload.domain)
+        if result is None:
+            return Response(status_code=404)
+        return JSONResponse(result)
 
     @app.get("/sub/clash/{token}", include_in_schema=False)
     def public_clash_subscription(token: str, request: Request) -> Response:

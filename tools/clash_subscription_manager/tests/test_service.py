@@ -167,6 +167,53 @@ def test_public_details_returns_scheduled_http_rule_provider_snapshot(tmp_path, 
     assert updated_provider["config"]["fetchedAt"] > provider["config"]["fetchedAt"]
 
 
+def test_rule_set_and_public_domain_matching_use_local_snapshots(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="domain-test-user", username="domain-test", display_name="Domain Test")
+    service.init_database(user.id)
+    provider = service.save_rule_provider({
+        "name": "AI 域名",
+        "providerKey": "ai-domains",
+        "config": {"type": "manual", "behavior": "domain", "payload": ["+.openai.example"]},
+    }, user)
+    rule_set = service.save_rule_set({
+        "name": "domain rules",
+        "groups": [{"name": "AI", "type": "select", "proxies": ["DIRECT"]}],
+        "rules": ["MATCH,DIRECT"],
+        "providers": {},
+        "importMeta": {"providerBindings": {"AI": [provider["id"]]}},
+    }, user)
+
+    hit = service.test_rule_set_domain(rule_set["id"], "chat.openai.example", user)
+    assert hit["matched"] is True
+    assert hit["target"] == "AI"
+    assert hit["rule"] == "DOMAIN-SUFFIX,openai.example,AI"
+    fallback = service.test_rule_set_domain(rule_set["id"], "example.org", user)
+    assert fallback["matched"] is True
+    assert fallback["target"] == "DIRECT"
+    assert fallback["rule"] == "MATCH,DIRECT"
+
+    profile = service.create_profile({"name": "domain sub", "ruleSetId": rule_set["id"]}, user)
+    published = service.publish_profile(profile["id"], user)
+
+    def fail_download(url: str) -> list[str]:
+        raise AssertionError("domain matching must use local snapshots")
+
+    monkeypatch.setattr(service, "_download_rule_provider_payload", fail_download)
+    public_hit = service.test_public_subscription_domain(published["subscriptionToken"], "chat.openai.example")
+    assert public_hit is not None
+    assert public_hit["matched"] is True
+    assert public_hit["target"] == "AI"
+    assert public_hit["rule"] == "DOMAIN-SUFFIX,openai.example,AI"
+
+    with pytest.raises(ToolboxError) as invalid:
+        service.test_rule_set_domain(rule_set["id"], "https://example.com/path", user)
+    assert invalid.value.code == "INVALID_TEST_DOMAIN"
+
+
 def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)

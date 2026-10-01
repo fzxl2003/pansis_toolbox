@@ -9,8 +9,10 @@ import {
   BarChart3,
   Check,
   Clipboard,
+  Clock,
   Crosshair,
   Eye,
+  Globe2,
   ExternalLink,
   FileCode2,
   FolderOpen,
@@ -22,8 +24,10 @@ import {
   Search,
   Send,
   Server,
+  Settings2,
   ShieldAlert,
   Trash2,
+  Zap,
 } from "lucide-react";
 
 import {
@@ -44,7 +48,7 @@ import {
 } from "./components";
 
 const API = "/api/tools/clash-subscription-manager";
-type View = "dashboard" | "nodes" | "profiles" | "rules";
+type View = "dashboard" | "nodes" | "profiles" | "rules" | "auto-update";
 type ValidationMessage = { level: string; code?: string; message: string };
 type Source = {
   id: string;
@@ -105,6 +109,26 @@ type Profile = {
   publishedStatus: string;
   validation: ValidationMessage[];
   subscriptionToken?: string;
+  refreshSeconds: number;
+  nextRefreshAt?: string | null;
+  updatedAt?: string;
+};
+type ProfileRefreshRun = {
+  id: string;
+  profileId: string;
+  profileName: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  error?: string;
+};
+type AutoUpdateSettings = {
+  sourceRefreshSeconds: number;
+  ruleProviderRefreshSeconds: number;
+  nodeProbeSeconds: number;
+  profileRefreshSeconds: number;
+  lastRunAt: Partial<Record<AutoUpdateTaskKey, string | null>>;
 };
 type ProfilePreview = {
   yaml: string;
@@ -173,7 +197,9 @@ type RefreshRun = {
 };
 type Dashboard = {
   metrics: Record<string, number>;
+  health: Record<string, number>;
   protocolDistribution: { name: string; value: number }[];
+  regionDistribution: { name: string; value: number }[];
   sources: Source[];
   profiles: Profile[];
   alerts: { kind?: string; message: string }[];
@@ -192,6 +218,9 @@ export default function ClashSubscriptionManager() {
   >([]);
   const [nodeGroups, setNodeGroups] = useState<NodeGroup[]>([]);
   const [runs, setRuns] = useState<RefreshRun[]>([]);
+  const [autoUpdateSettings, setAutoUpdateSettings] = useState<AutoUpdateSettings | null>(null);
+  const [profileLogModal, setProfileLogModal] = useState<Profile | null>(null);
+  const [profileRuns, setProfileRuns] = useState<ProfileRefreshRun[]>([]);
   const [sourceModal, setSourceModal] = useState<Source | null | false>(false);
   const [profileModal, setProfileModal] = useState<Profile | null | false>(
     false,
@@ -231,6 +260,7 @@ export default function ClashSubscriptionManager() {
         providerData,
         nodeGroupData,
         runData,
+        autoUpdateData,
       ] = await Promise.all([
         apiGet<Dashboard>(`${API}/dashboard`),
         apiGet<{ sources: Source[] }>(`${API}/sources`),
@@ -242,6 +272,7 @@ export default function ClashSubscriptionManager() {
         ),
         apiGet<{ groups: NodeGroup[] }>(`${API}/node-groups`),
         apiGet<{ runs: RefreshRun[] }>(`${API}/refresh-runs?limit=100`),
+        apiGet<AutoUpdateSettings>(`${API}/auto-update-settings`),
       ]);
       setDashboard(dashboardData);
       setSources(sourceData.sources);
@@ -251,6 +282,7 @@ export default function ClashSubscriptionManager() {
       setProviderLibrary(providerData.providers);
       setNodeGroups(nodeGroupData.groups);
       setRuns(runData.runs);
+      setAutoUpdateSettings(autoUpdateData);
       setError("");
     } catch (caught) {
       setError(message(caught));
@@ -479,6 +511,13 @@ export default function ClashSubscriptionManager() {
         >
           聚合配置
         </Tab>
+        <Tab
+          active={view === "auto-update"}
+          icon={<Settings2 size={14} />}
+          onClick={() => setView("auto-update")}
+        >
+          自动更新
+        </Tab>
       </nav>
       <div className="csm-body">
         {error && <Alert type="error">{error}</Alert>}
@@ -487,6 +526,7 @@ export default function ClashSubscriptionManager() {
           <DashboardView
             data={dashboard}
             runs={runs}
+            autoUpdateSettings={autoUpdateSettings}
             loading={loading}
             onNavigate={setView}
           />
@@ -572,17 +612,24 @@ export default function ClashSubscriptionManager() {
             onAdd={() => setProfileModal(null)}
             onEdit={setProfileModal}
             onRemove={removeProfile}
-            onValidate={(profile) =>
-              void action(
-                `validate-${profile.id}`,
-                () => apiPost(`${API}/profiles/${profile.id}/validate`, {}),
-                "配置校验完成",
-              )
-            }
+            onRefresh={(profile) => void action(`profile-refresh-${profile.id}`, () => apiPost(`${API}/profiles/${profile.id}/refresh`, {}), "聚合配置更新完成")}
+            onLogs={async (profile) => {
+              try {
+                const result = await apiGet<{ runs: ProfileRefreshRun[] }>(`${API}/profile-refresh-runs?profileId=${encodeURIComponent(profile.id)}&limit=100`);
+                setProfileRuns(result.runs);
+                setProfileLogModal(profile);
+              } catch (caught) { setError(message(caught)); }
+            }}
             onCopy={(profile) =>
               void copy(subscriptionUrl(profile), "订阅链接已复制")
             }
           />
+        )}
+        {view === "auto-update" && autoUpdateSettings && (
+          <AutoUpdateView settings={autoUpdateSettings} onSaved={setAutoUpdateSettings} />
+        )}
+        {profileLogModal && (
+          <ProfileRefreshLogModal profile={profileLogModal} runs={profileRuns} onClose={() => setProfileLogModal(null)} />
         )}
         {view === "rules" && (
           <div className="csm-stack">
@@ -917,14 +964,107 @@ function DashboardDetailModal({
   );
 }
 
+type AutoUpdateTaskKey =
+  | "sourceRefreshSeconds"
+  | "ruleProviderRefreshSeconds"
+  | "nodeProbeSeconds"
+  | "profileRefreshSeconds";
+
+function AutoUpdateView({
+  settings,
+  onSaved,
+}: {
+  settings: AutoUpdateSettings;
+  onSaved: (settings: AutoUpdateSettings) => void;
+}) {
+  const [form, setForm] = useState(settings);
+  const [saving, setSaving] = useState(false);
+  const [runningTask, setRunningTask] = useState<AutoUpdateTaskKey | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  useEffect(() => setForm(settings), [settings]);
+  const options = [
+    [3600, "每小时"], [21600, "每 6 小时"], [43200, "每 12 小时"], [86400, "每天"],
+  ] as const;
+  const runTasks = {
+    sourceRefreshSeconds: "sources",
+    ruleProviderRefreshSeconds: "ruleProviders",
+    nodeProbeSeconds: "probe",
+    profileRefreshSeconds: "profiles",
+  } as const;
+  async function save() {
+    setSaving(true); setError("");
+    try {
+      const next = await apiPut<AutoUpdateSettings>(`${API}/auto-update-settings`, form);
+      onSaved(next);
+    } catch (caught) { setError(message(caught)); }
+    finally { setSaving(false); }
+  }
+  async function run(key: AutoUpdateTaskKey) {
+    setRunningTask(key); setError(""); setNotice("");
+    try {
+      const result = await apiPost<{ message: string; lastRunAt: Partial<Record<AutoUpdateTaskKey, string | null>> }>(
+        `${API}/auto-update/run/${runTasks[key]}`,
+        {},
+      );
+      setNotice(result.message);
+      onSaved({ ...settings, lastRunAt: result.lastRunAt });
+    } catch (caught) { setError(message(caught)); }
+    finally { setRunningTask(null); }
+  }
+  return (
+    <div className="csm-panel">
+      <Toolbar title="自动更新" icon={<Settings2 size={18} />} />
+      <p className="csm-footnote">统一设置后会同步已有订阅源、远程 Rule Provider 和已发布聚合订阅链接的周期。</p>
+      {error && <Alert type="error">{error}</Alert>}
+      {notice && <Alert type="success">{notice}</Alert>}
+      <div className="csm-form-grid">
+        {([
+          ["sourceRefreshSeconds", "节点订阅源", "拉取上游节点订阅"],
+          ["ruleProviderRefreshSeconds", "Rule Provider", "拉取远程规则订阅"],
+          ["nodeProbeSeconds", "节点可用性探测", "TCP 探测全部节点"],
+          ["profileRefreshSeconds", "聚合订阅链接", "自动重新生成公开 Clash Meta YAML"],
+        ] as const).map(([key, label, hint]) => (
+          <Field label={label} key={key}>
+            <div className="csm-cycle-row">
+              <select className="csm-select" value={form[key]} onChange={(event) => setForm({ ...form, [key]: Number(event.target.value) })}>
+                {options.map(([value, text]) => <option value={value} key={value}>{text}</option>)}
+              </select>
+              <button
+                className="csm-btn csm-btn-sm csm-btn-secondary csm-btn-square"
+                type="button"
+                title="立即触发"
+                aria-label={`立即触发${label}`}
+                disabled={runningTask !== null}
+                onClick={() => void run(key)}
+              >
+                {runningTask === key ? <Spin size={13} /> : <RefreshCw size={13} />}
+              </button>
+            </div>
+            <small className="csm-muted">{hint}</small>
+            <small className="csm-muted csm-cycle-last-run">
+              最近触发：{stamp(settings.lastRunAt?.[key] ?? null)}
+            </small>
+          </Field>
+        ))}
+        <div className="csm-full-col">
+          <button className="csm-btn csm-btn-primary" type="button" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : "保存自动更新设置"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DashboardView({
   data,
   runs,
+  autoUpdateSettings,
   loading,
   onNavigate,
 }: {
   data: Dashboard | null;
   runs: RefreshRun[];
+  autoUpdateSettings: AutoUpdateSettings | null;
   loading: boolean;
   onNavigate: (view: View) => void;
 }) {
@@ -932,128 +1072,176 @@ function DashboardView({
     "protocol" | "alerts" | "sources" | null
   >(null);
   if (loading && !data) return <Loading text="加载运营总览…" />;
+
   const metrics = data?.metrics ?? {};
-  const cards: Array<[string, number, string, View]> = [
-    [
-      "订阅源",
-      metrics.sources ?? 0,
-      `${metrics.healthySources ?? 0} 个正常`,
-      "nodes",
-    ],
-    [
-      "去重后节点",
-      metrics.nodes ?? 0,
-      `去重前 ${metrics.nodesBeforeDedupe ?? 0}`,
-      "nodes",
-    ],
-    ["TCP 可达", metrics.tcpReachable ?? 0, "仅表示端口连通", "nodes"],
-    [
-      "已发布配置",
-      metrics.publishedProfiles ?? 0,
-      "最后有效版本持续可用",
-      "profiles",
-    ],
-    ["待处理告警", metrics.alerts ?? 0, "来源与配置异常", "profiles"],
+  const health = data?.health ?? {};
+  const value = (key: string, fallback = 0) =>
+    Number.isFinite(metrics[key]) ? metrics[key] : fallback;
+  const sourceTotal = value("sources");
+  const healthySources = value("healthySources");
+  const nodeTotal = value("nodes");
+  const reachableNodes = value("tcpReachable");
+  const profileTotal = value("profiles");
+  const publishedProfiles = value("publishedProfiles");
+  const requests24h = value("requests24h");
+  const sourceRate = health.sourceHealthRate ?? 0;
+  const nodeRate = health.nodeReachabilityRate ?? 0;
+  const profileRate = health.profileHealthRate ?? 0;
+  const dedupeRate = health.dedupeSavedRate ?? 0;
+  const latency = (key: string) => {
+    const raw = metrics[key];
+    return raw == null ? "—" : `${raw} ms`;
+  };
+  const rings: Array<{ label: string; rate: number; caption: string; target: View }> = [
+    { label: "订阅源健康", rate: sourceRate, caption: `${healthySources}/${sourceTotal} 正常`, target: "nodes" },
+    { label: "节点可用", rate: nodeRate, caption: `${reachableNodes}/${value("probedNodes")} 可达`, target: "nodes" },
+    { label: "配置健康", rate: profileRate, caption: `${publishedProfiles - value("degradedProfiles")}/${profileTotal} 可用`, target: "profiles" },
+    { label: "去重效率", rate: dedupeRate, caption: `减少 ${value("nodesDeduplicated")} 条`, target: "nodes" },
   ];
+  const kpis: Array<{ label: string; value: number; note: string; target: View }> = [
+    { label: "订阅源", value: sourceTotal, note: `${healthySources} 正常 · ${value("errorSources")} 异常`, target: "nodes" },
+    { label: "去重后节点", value: nodeTotal, note: `自定义 ${value("customNodes")} · 原始 ${value("nodesBeforeDedupe")}`, target: "nodes" },
+    { label: "TCP 可达", value: reachableNodes, note: `P50 ${latency("latencyP50Ms")}`, target: "nodes" },
+    { label: "聚合配置", value: profileTotal, note: `发布 ${publishedProfiles} · 草稿 ${value("draftProfiles")}`, target: "profiles" },
+    { label: "规则资产", value: value("ruleSets"), note: `Provider ${value("ruleProviders")} · 分组 ${value("nodeGroups")}`, target: "rules" },
+    { label: "24h 请求", value: requests24h, note: "公开订阅链接访问量", target: "profiles" },
+  ];
+  const autoRows = autoUpdateSettings
+    ? ([
+        ["sourceRefreshSeconds", "订阅源", "nodes"],
+        ["ruleProviderRefreshSeconds", "Rule Provider", "rules"],
+        ["nodeProbeSeconds", "节点探测", "nodes"],
+        ["profileRefreshSeconds", "聚合配置", "profiles"],
+      ] as const).map(([key, label, target]) => ({
+        key,
+        label,
+        target: target as View,
+        period: duration(autoUpdateSettings[key]),
+        last: autoUpdateSettings.lastRunAt?.[key] ?? null,
+      }))
+    : [];
+
   return (
     <div className="csm-stack">
-      <section className="csm-metrics">
-        {cards.map(([label, value, note, target]) => (
-          <button
-            type="button"
-            className="csm-metric"
-            key={label}
-            onClick={() => onNavigate(target)}
-          >
-            <span>{label}</span>
-            <strong>{value}</strong>
-            <small>{note}</small>
+      <section className="csm-dashboard-hero">
+        <div className="csm-dashboard-hero-copy">
+          <span className="csm-dashboard-eyebrow">
+            <Activity size={14} />
+            Operations
+          </span>
+          <h2>订阅运营健康度</h2>
+          <p>
+            覆盖节点入库、去重、探测、规则与发布链路。当前待处理告警
+            <strong>{value("alerts")}</strong> 个，平均可达延迟
+            <strong>{latency("avgLatencyMs")}</strong>。
+          </p>
+          <div className="csm-dashboard-actions">
+            <button type="button" className="csm-btn csm-btn-primary" onClick={() => onNavigate("nodes")}>
+              管理节点
+            </button>
+            <button type="button" className="csm-btn csm-btn-secondary" onClick={() => onNavigate("auto-update")}>
+              调整自动更新
+            </button>
+          </div>
+        </div>
+        <div className="csm-health-rings">
+          {rings.map((item) => (
+            <button type="button" className="csm-health-ring" key={item.label} onClick={() => onNavigate(item.target)}>
+              <span
+                style={{
+                  background: `conic-gradient(var(--csm-ring-color) ${item.rate * 3.6}deg, #e2e8f0 0deg)`,
+                }}
+              >
+                <i>{item.rate}%</i>
+              </span>
+              <strong>{item.label}</strong>
+              <small>{item.caption}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="csm-metrics csm-dashboard-kpis">
+        {kpis.map((item) => (
+          <button type="button" className="csm-metric" key={item.label} onClick={() => onNavigate(item.target)}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+            <small>{item.note}</small>
           </button>
         ))}
       </section>
-      <section className="csm-grid-two">
+
+      <section className="csm-dashboard-triptych">
         <div className="csm-panel">
           <PanelTitle
             icon={<BarChart3 size={18} />}
-            title="节点协议分布"
+            title="节点画像"
             action={
-              <button
-                className="csm-link-button"
-                type="button"
-                onClick={() => setDetail("protocol")}
-              >
+              <button className="csm-link-button" type="button" onClick={() => setDetail("protocol")}>
                 <Eye size={13} />
-                查看详情
+                协议详情
               </button>
             }
           />
           {data?.protocolDistribution.length ? (
             <div className="csm-bars">
-              {data.protocolDistribution.map((item) => (
+              {data.protocolDistribution.slice(0, 6).map((item) => (
                 <div key={item.name}>
                   <code>{item.name}</code>
                   <span>
-                    <i
-                      style={{
-                        width: `${Math.max(5, (item.value / Math.max(...data.protocolDistribution.map((entry) => entry.value))) * 100)}%`,
-                      }}
-                    />
+                    <i style={{ width: `${Math.max(5, (item.value / Math.max(...data.protocolDistribution.map((entry) => entry.value))) * 100)}%` }} />
                   </span>
                   <b>{item.value}</b>
                 </div>
               ))}
             </div>
           ) : (
-            <EmptyState
-              title="暂无节点数据"
-              hint="成功刷新订阅源后显示协议分布"
-            />
+            <EmptyState title="暂无节点数据" hint="成功刷新订阅源后显示协议分布" />
           )}
         </div>
         <div className="csm-panel">
-          <PanelTitle
-            icon={<ShieldAlert size={18} />}
-            title="告警中心"
-            action={
-              <button
-                className="csm-link-button"
-                type="button"
-                onClick={() => setDetail("alerts")}
-              >
-                <Eye size={13} />
-                查看详情
-              </button>
-            }
-          />
-          {data?.alerts.length ? (
-            <div className="csm-alert-list">
-              {data.alerts.map((alert, index) => (
-                <div key={`${alert.message}-${index}`}>
-                  <AlertTriangle size={15} />
-                  <span>{alert.message}</span>
+          <PanelTitle icon={<Globe2 size={18} />} title="地区分布" />
+          {data?.regionDistribution.length ? (
+            <div className="csm-bars csm-region-bars">
+              {data.regionDistribution.map((item) => (
+                <div key={item.name}>
+                  <code>{item.name}</code>
+                  <span>
+                    <i style={{ width: `${Math.max(5, (item.value / Math.max(...data.regionDistribution.map((entry) => entry.value))) * 100)}%` }} />
+                  </span>
+                  <b>{item.value}</b>
                 </div>
               ))}
             </div>
           ) : (
-            <EmptyState
-              icon={<Check size={28} />}
-              title="没有待处理告警"
-              hint="订阅源和已发布配置状态正常"
-            />
+            <EmptyState title="暂无地区数据" hint="GeoIP 解析完成后显示地区分布" />
+          )}
+        </div>
+        <div className="csm-panel">
+          <PanelTitle icon={<Clock size={18} />} title="自动更新态势" />
+          {autoRows.length ? (
+            <div className="csm-auto-summary">
+              {autoRows.map((item) => (
+                <div key={item.key}>
+                  <strong>{item.label}</strong>
+                  <small>{item.period} 周期</small>
+                  <span>{item.last ? relativeStamp(item.last) : "从未触发"}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="自动更新设置加载中" />
           )}
         </div>
       </section>
+
       <section className="csm-grid-two">
         <div className="csm-panel">
           <PanelTitle
             icon={<Server size={18} />}
             title="订阅源健康"
             action={
-              <button
-                className="csm-link-button"
-                type="button"
-                onClick={() => setDetail("sources")}
-              >
+              <button className="csm-link-button" type="button" onClick={() => setDetail("sources")}>
                 <Eye size={13} />
                 查看详情
               </button>
@@ -1061,11 +1249,15 @@ function DashboardView({
           />
           {data?.sources.length ? (
             <div className="csm-summary-list">
-              {data.sources.map((source) => (
+              {data.sources.slice(0, 7).map((source) => (
                 <div key={source.id}>
                   <StatusDot status={source.status} />
                   <strong>{source.name}</strong>
-                  <span>{source.lastError || stamp(source.lastSuccessAt)}</span>
+                  <span>
+                    {source.status === "error" && source.lastError
+                      ? source.lastError
+                      : `成功 ${relativeStamp(source.lastSuccessAt)} · 下次 ${source.nextRefreshAt ? relativeStamp(source.nextRefreshAt) : "未排期"}`}
+                  </span>
                 </div>
               ))}
             </div>
@@ -1074,14 +1266,17 @@ function DashboardView({
           )}
         </div>
         <div className="csm-panel">
-          <PanelTitle icon={<Send size={18} />} title="聚合配置" />
+          <PanelTitle icon={<Send size={18} />} title="聚合配置状态" />
           {data?.profiles.length ? (
             <div className="csm-summary-list">
-              {data.profiles.map((profile) => (
+              {data.profiles.slice(0, 7).map((profile) => (
                 <div key={profile.id}>
-                  <Send size={14} />
+                  <PublishBadge profile={profile} />
                   <strong>{profile.name}</strong>
-                  <span>Clash Meta · {publishLabel(profile)}</span>
+                  <span>
+                    {profile.ruleSetName || "未绑定规则"} ·{" "}
+                    {profile.nextRefreshAt ? `下次 ${relativeStamp(profile.nextRefreshAt)}` : "未排期"}
+                  </span>
                 </div>
               ))}
             </div>
@@ -1090,13 +1285,55 @@ function DashboardView({
           )}
         </div>
       </section>
+
+      <section className="csm-grid-two">
+        <div className="csm-panel">
+          <PanelTitle
+            icon={<ShieldAlert size={18} />}
+            title="告警中心"
+            action={
+              <button className="csm-link-button" type="button" onClick={() => setDetail("alerts")}>
+                <Eye size={13} />
+                查看详情
+              </button>
+            }
+          />
+          {data?.alerts.length ? (
+            <div className="csm-alert-list">
+              {data.alerts.slice(0, 6).map((alert, index) => (
+                <div key={`${alert.message}-${index}`}>
+                  <AlertTriangle size={15} />
+                  <span>{alert.message}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState icon={<Check size={28} />} title="没有待处理告警" hint="订阅源和已发布配置状态正常" />
+          )}
+        </div>
+        <div className="csm-panel">
+          <PanelTitle icon={<Zap size={18} />} title="最近刷新活动" />
+          {runs.length ? (
+            <div className="csm-summary-list">
+              {runs.slice(0, 7).map((run) => (
+                <div key={run.id}>
+                  <StatusDot status={run.status === "success" ? "healthy" : "error"} />
+                  <strong>{run.sourceName}</strong>
+                  <span>
+                    {run.status === "success" ? "成功" : "失败"} · {run.nodesBefore} → {run.nodesAfter} ·{" "}
+                    {run.durationMs == null ? "进行中" : `${run.durationMs} ms`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="暂无刷新记录" />
+          )}
+        </div>
+      </section>
+
       {detail && (
-        <DashboardDetailModal
-          detail={detail}
-          data={data}
-          runs={runs}
-          onClose={() => setDetail(null)}
-        />
+        <DashboardDetailModal detail={detail} data={data} runs={runs} onClose={() => setDetail(null)} />
       )}
     </div>
   );
@@ -1835,7 +2072,7 @@ function NodeAliasModal({
             placeholder="留空恢复使用订阅原名"
           />
           <small className="csm-muted">
-            别名不会被订阅刷新覆盖，规则组可同时使用订阅原名和别名。
+            别名不会被订阅刷新覆盖，仅用于识别；规则组引用始终以节点原名为准。
           </small>
         </Field>
       </div>
@@ -1852,7 +2089,8 @@ function ProfilesView({
   onAdd,
   onEdit,
   onRemove,
-  onValidate,
+  onRefresh,
+  onLogs,
   onCopy,
 }: {
   profiles: Profile[];
@@ -1863,7 +2101,8 @@ function ProfilesView({
   onAdd: () => void;
   onEdit: (profile: Profile) => void;
   onRemove: (profile: Profile) => void;
-  onValidate: (profile: Profile) => void;
+  onRefresh: (profile: Profile) => void;
+  onLogs: (profile: Profile) => void;
   onCopy: (profile: Profile) => void;
 }) {
   return (
@@ -1897,6 +2136,7 @@ function ProfilesView({
               <th>名称</th>
               <th>规则组</th>
               <th>状态</th>
+              <th>更新时间</th>
               <th>订阅链接</th>
               <th>操作</th>
             </tr>
@@ -1923,6 +2163,7 @@ function ProfilesView({
                   <td>
                     <PublishBadge profile={profile} />
                   </td>
+                  <td>{profile.updatedAt ? stamp(profile.updatedAt) : "—"}</td>
                   <td>
                     {published ? (
                       <div className="csm-cell-links">
@@ -1960,18 +2201,11 @@ function ProfilesView({
                       >
                         <Pencil size={13} />
                       </button>
-                      <button
-                        className="csm-btn csm-btn-sm csm-btn-ghost"
-                        type="button"
-                        title="校验"
-                        disabled={pending === `validate-${profile.id}`}
-                        onClick={() => onValidate(profile)}
-                      >
-                        {pending === `validate-${profile.id}` ? (
-                          <Spin size={13} />
-                        ) : (
-                          <Check size={13} />
-                        )}
+                      <button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="手动更新" disabled={pending === `profile-refresh-${profile.id}`} onClick={() => onRefresh(profile)}>
+                        {pending === `profile-refresh-${profile.id}` ? <Spin size={13} /> : <RefreshCw size={13} />}
+                      </button>
+                      <button className="csm-btn csm-btn-sm csm-btn-ghost" type="button" title="更新日志" onClick={() => onLogs(profile)}>
+                        <Eye size={13} />
                       </button>
                       <button
                         className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"
@@ -1990,6 +2224,34 @@ function ProfilesView({
         </Table>
       )}
     </div>
+  );
+}
+
+function ProfileRefreshLogModal({
+  profile,
+  runs,
+  onClose,
+}: {
+  profile: Profile;
+  runs: ProfileRefreshRun[];
+  onClose: () => void;
+}) {
+  return (
+    <Modal title={`更新日志：${profile.name}`} width={820} onClose={onClose}>
+      {!runs.length ? <p className="csm-muted">暂无更新记录。</p> : (
+        <Table>
+          <thead><tr><th>开始时间</th><th>状态</th><th>耗时</th><th>失败原因</th></tr></thead>
+          <tbody>{runs.map((run) => (
+            <tr key={run.id}>
+              <td>{stamp(run.startedAt)}</td>
+              <td><Badge color={run.status === "success" ? "green" : run.status === "failed" ? "red" : "amber"}>{run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "进行中"}</Badge></td>
+              <td>{run.durationMs == null ? "—" : `${run.durationMs} ms`}</td>
+              <td className="csm-cell-error">{run.error || "—"}</td>
+            </tr>
+          ))}</tbody>
+        </Table>
+      )}
+    </Modal>
   );
 }
 

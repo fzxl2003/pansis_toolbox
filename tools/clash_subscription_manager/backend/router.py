@@ -43,6 +43,13 @@ class ProfilePatch(BaseModel):
     ruleSetId: str | None = None
 
 
+class AutoUpdateSettingsPayload(BaseModel):
+    sourceRefreshSeconds: int = Field(ge=60, le=604800)
+    ruleProviderRefreshSeconds: int = Field(ge=60, le=604800)
+    nodeProbeSeconds: int = Field(ge=60, le=604800)
+    profileRefreshSeconds: int = Field(ge=60, le=604800)
+
+
 class RuleSetPayload(BaseModel):
     name: str = "规则库"
     rules: list[Any] = Field(default_factory=list)
@@ -103,6 +110,20 @@ class DomainTestPayload(BaseModel):
 @router.get("/dashboard")
 def get_dashboard(request: Request) -> dict[str, Any]:
     return service.dashboard(require_user(request))
+
+
+@router.get("/auto-update-settings")
+def get_auto_update_settings(request: Request) -> dict[str, Any]:
+    return service.auto_update_settings(require_user(request))
+
+
+@router.put("/auto-update-settings")
+def put_auto_update_settings(request: Request, payload: AutoUpdateSettingsPayload) -> dict[str, Any]:
+    return service.save_auto_update_settings(payload.model_dump(), require_user(request))
+
+@router.post("/auto-update/run/{task}")
+def post_auto_update_run(request: Request, task: str) -> dict[str, Any]:
+    return service.run_auto_update_task(task, require_user(request))
 
 
 @router.get("/sources")
@@ -223,6 +244,16 @@ def preview_profile(request: Request, profile_id: str) -> dict[str, Any]:
 @router.post("/profiles/{profile_id}/publish")
 def publish_profile(request: Request, profile_id: str) -> dict[str, Any]:
     return service.publish_profile(profile_id, require_user(request))
+
+
+@router.post("/profiles/{profile_id}/refresh")
+def refresh_profile(request: Request, profile_id: str) -> dict[str, Any]:
+    return service.publish_profile(profile_id, require_user(request))
+
+
+@router.get("/profile-refresh-runs")
+def get_profile_refresh_runs(request: Request, profileId: str | None = None, limit: int = 100) -> dict[str, Any]:
+    return {"runs": service.profile_refresh_runs(require_user(request), profileId, limit)}
 
 
 @router.get("/rule-providers")

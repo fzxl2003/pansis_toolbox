@@ -10,6 +10,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import math
 import re
 import secrets
 import socket
@@ -34,6 +35,9 @@ from backend.app.services.data_management import DataCategory, register_tool_cat
 
 TOOL_ID = "clash_subscription_manager"
 DEFAULT_REFRESH_SECONDS = 6 * 3600
+DEFAULT_RULE_PROVIDER_REFRESH_SECONDS = 24 * 3600
+DEFAULT_NODE_PROBE_SECONDS = 120
+DEFAULT_PROFILE_REFRESH_SECONDS = 6 * 3600
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 15
 MAX_REDIRECTS = 5
@@ -84,8 +88,8 @@ _geoip_job_users: set[str] = set()
 _geoip_job_lock = threading.Lock()
 
 register_tool_categories(TOOL_ID, [
-    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_rule_sets", "csm_rule_providers", "csm_node_groups", "csm_published_snapshots"], None, "订阅源、节点、配置和最后有效发布版本"),
-    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_probe_results", "csm_ip_geo_cache", "csm_subscription_requests"], "created_at", "订阅刷新、快照、TCP 探测、GeoIP 缓存和聚合订阅请求记录"),
+    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_rule_sets", "csm_rule_providers", "csm_node_groups", "csm_published_snapshots", "csm_settings"], None, "订阅源、节点、配置、自动更新设置和最后有效发布版本"),
+    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_profile_refresh_runs", "csm_probe_results", "csm_ip_geo_cache", "csm_subscription_requests"], "created_at", "订阅刷新、聚合配置更新、TCP 探测、GeoIP 缓存和聚合订阅请求记录"),
     DataCategory("public_tokens", ["csm_public_tokens"], None, "公开订阅令牌索引", storage="platform_db", user_id_column="user_id"),
 ])
 
@@ -268,7 +272,10 @@ def init_database(user_id: str) -> None:
               id TEXT PRIMARY KEY, name TEXT NOT NULL, target_kernel TEXT NOT NULL DEFAULT 'clash-meta',
               settings_json TEXT NOT NULL DEFAULT '{}', rule_set_id TEXT, token_encrypted TEXT NOT NULL,
               published_at TEXT, published_status TEXT NOT NULL DEFAULT 'draft', last_validation_json TEXT NOT NULL DEFAULT '[]',
+              refresh_seconds INTEGER NOT NULL DEFAULT 21600, next_refresh_at TEXT,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS csm_settings (
+              key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS csm_rule_sets (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, rules_json TEXT NOT NULL DEFAULT '[]',
               providers_json TEXT NOT NULL DEFAULT '{}', groups_json TEXT NOT NULL DEFAULT '[]',
@@ -287,6 +294,11 @@ def init_database(user_id: str) -> None:
               id TEXT PRIMARY KEY, source_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
               finished_at TEXT, duration_ms INTEGER, nodes_before INTEGER NOT NULL DEFAULT 0, nodes_after INTEGER NOT NULL DEFAULT 0,
               error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS csm_profile_refresh_runs (
+              id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, status TEXT NOT NULL,
+              started_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER,
+              error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+              FOREIGN KEY(profile_id) REFERENCES csm_profiles(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS csm_probe_results (
               id TEXT PRIMARY KEY, node_id TEXT NOT NULL, reachable INTEGER NOT NULL, dns_address TEXT NOT NULL DEFAULT '',
               latency_ms INTEGER, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
@@ -302,6 +314,7 @@ def init_database(user_id: str) -> None:
               FOREIGN KEY(profile_id) REFERENCES csm_profiles(id) ON DELETE CASCADE);
             CREATE INDEX IF NOT EXISTS csm_nodes_seen ON csm_nodes(last_seen_at);
             CREATE INDEX IF NOT EXISTS csm_runs_source ON csm_refresh_runs(source_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS csm_profile_runs_profile ON csm_profile_refresh_runs(profile_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS csm_subscription_requests_profile ON csm_subscription_requests(profile_id, requested_at DESC);
             """)
             # Lightweight, idempotent migrations for databases created by an
@@ -320,6 +333,22 @@ def init_database(user_id: str) -> None:
             ):
                 if column not in node_columns:
                     conn.execute(f"ALTER TABLE csm_nodes ADD COLUMN {column} {definition}")
+            profile_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_profiles)")}
+            if "refresh_seconds" not in profile_columns:
+                conn.execute("ALTER TABLE csm_profiles ADD COLUMN refresh_seconds INTEGER NOT NULL DEFAULT 21600")
+            if "next_refresh_at" not in profile_columns:
+                conn.execute("ALTER TABLE csm_profiles ADD COLUMN next_refresh_at TEXT")
+            # Migrate legacy pools that could contain multiple subscription
+            # nodes with the same name. Keep the newest material; aliases are
+            # annotations and do not affect this identity rule.
+            duplicate_names = conn.execute("""SELECT name FROM csm_nodes
+              WHERE is_custom=0 GROUP BY name HAVING COUNT(*)>1""").fetchall()
+            for duplicate in duplicate_names:
+                rows = conn.execute("SELECT id FROM csm_nodes WHERE is_custom=0 AND name=? ORDER BY last_seen_at DESC,rowid DESC", (duplicate["name"],)).fetchall()
+                for old in rows[1:]:
+                    conn.execute("DELETE FROM csm_probe_results WHERE node_id=?", (old["id"],))
+                    conn.execute("DELETE FROM csm_node_sources WHERE node_id=?", (old["id"],))
+                    conn.execute("DELETE FROM csm_nodes WHERE id=?", (old["id"],))
             cache_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_ip_geo_cache)")}
             if "created_at" not in cache_columns:
                 if "checked_at" in cache_columns:
@@ -360,6 +389,77 @@ def _row_source(row: sqlite3.Row) -> dict[str, Any]:
             "nextRefreshAt": row["next_refresh_at"], "lastError": row["last_error"], "createdAt": row["created_at"]}
 
 
+def _default_auto_update_settings() -> dict[str, int]:
+    return {
+        "sourceRefreshSeconds": DEFAULT_REFRESH_SECONDS,
+        "ruleProviderRefreshSeconds": DEFAULT_RULE_PROVIDER_REFRESH_SECONDS,
+        "nodeProbeSeconds": DEFAULT_NODE_PROBE_SECONDS,
+        "profileRefreshSeconds": DEFAULT_PROFILE_REFRESH_SECONDS,
+    }
+
+
+_AUTO_UPDATE_LAST_RUN_KEYS = {
+    "sourceRefreshSeconds": "source_run_at",
+    "ruleProviderRefreshSeconds": "rule_provider_run_at",
+    "nodeProbeSeconds": "node_probe_run_at",
+    "profileRefreshSeconds": "profile_run_at",
+}
+
+
+def _set_auto_update_last_run(user_id: str, setting_key: str, when: str | None = None) -> None:
+    raw_key = _AUTO_UPDATE_LAST_RUN_KEYS.get(setting_key)
+    if not raw_key:
+        return
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        conn.execute("""INSERT INTO csm_settings(key,value,updated_at) VALUES(?,?,?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                     (f"auto_update_last_{raw_key}", when or _now(), _now()))
+
+
+def auto_update_settings(user: User) -> dict[str, Any]:
+    init_database(user.id)
+    settings: dict[str, Any] = _default_auto_update_settings()
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        for row in conn.execute("SELECT key,value FROM csm_settings WHERE key LIKE 'auto_update_%'"):
+            try:
+                key = row["key"][len("auto_update_"):]
+                if key in settings:
+                    settings[key] = max(60, min(7 * 86400, int(row["value"])))
+            except (TypeError, ValueError):
+                continue
+    settings["lastRunAt"] = {key: None for key in _AUTO_UPDATE_LAST_RUN_KEYS}
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        for setting_key, raw_key in _AUTO_UPDATE_LAST_RUN_KEYS.items():
+            row = conn.execute("SELECT value FROM csm_settings WHERE key=?", (f"auto_update_last_{raw_key}",)).fetchone()
+            if row:
+                settings["lastRunAt"][setting_key] = row["value"]
+        # Preserve the timestamp written by the earlier unified probe scheduler.
+        legacy_probe = conn.execute("SELECT value FROM csm_settings WHERE key='auto_update_last_probe_at'").fetchone()
+        if legacy_probe and not settings["lastRunAt"]["nodeProbeSeconds"]:
+            settings["lastRunAt"]["nodeProbeSeconds"] = legacy_probe["value"]
+    return settings
+
+
+def save_auto_update_settings(data: dict[str, Any], user: User) -> dict[str, Any]:
+    clean = {key: max(60, min(7 * 86400, int(data.get(key, value)))) for key, value in _default_auto_update_settings().items()}
+    now = _now()
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        for key, value in clean.items():
+            conn.execute("""INSERT INTO csm_settings(key,value,updated_at) VALUES(?,?,?)
+              ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                         (f"auto_update_{key}", str(value), now))
+        conn.execute("UPDATE csm_sources SET refresh_seconds=? WHERE enabled=1", (clean["sourceRefreshSeconds"],))
+        rows = conn.execute("SELECT id,config_json FROM csm_rule_providers").fetchall()
+        for row in rows:
+            config = _loads(row["config_json"], {})
+            if _rule_provider_source_url(config):
+                config["interval"] = clean["ruleProviderRefreshSeconds"]
+                conn.execute("UPDATE csm_rule_providers SET config_json=?,updated_at=? WHERE id=?", (_json(config), now, row["id"]))
+        conn.execute("UPDATE csm_profiles SET refresh_seconds=?", (clean["profileRefreshSeconds"],))
+    return auto_update_settings(user)
+
+
 def list_sources(user: User) -> list[dict[str, Any]]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
@@ -370,7 +470,7 @@ def create_source(data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id)
     url = _require_http_url(str(data.get("url", "")))
     name = str(data.get("name") or _redact_url(url))[:120]
-    refresh_seconds = max(60, min(7 * 86400, int(data.get("refreshSeconds") or DEFAULT_REFRESH_SECONDS)))
+    refresh_seconds = max(60, min(7 * 86400, int(data.get("refreshSeconds") or auto_update_settings(user)["sourceRefreshSeconds"])))
     now, source_id = _now(), _id()
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         conn.execute("INSERT INTO csm_sources VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (source_id, name, _encrypt(url), str(data.get("userAgent") or "")[:300], refresh_seconds, int(bool(data.get("enabled", True))), "never", None, None, now, "", now, now))
@@ -635,33 +735,28 @@ def _preserved_geo_fields(conn: sqlite3.Connection, node_id: str, server: str) -
 def _store_nodes(conn: sqlite3.Connection, source_id: str, nodes: Iterable[dict[str, Any]]) -> int:
     now = _now(); count = 0
     for item in nodes:
-        row = conn.execute("SELECT id FROM csm_nodes WHERE fingerprint=?", (item["fingerprint"],)).fetchone()
+        # Subscription nodes are identified by their source name.  When an
+        # upstream refresh contains the same name again, its material is the
+        # newest version and replaces the previous node.  Aliases are only
+        # display annotations and never participate in identity.
+        row = conn.execute("SELECT * FROM csm_nodes WHERE name=? AND is_custom=0 ORDER BY last_seen_at DESC LIMIT 1", (item["name"],)).fetchone()
         if row:
             node_id = row["id"]
-            # Keep the original stable identity when identical material is
-            # encountered under another source alias; selections remain valid.
             geo = _preserved_geo_fields(conn, node_id, item["server"])
-            conn.execute("""UPDATE csm_nodes SET name=?,protocol=?,server=?,port=?,config_json=?,supported_output=?,
+            conn.execute("""UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,config_json=?,supported_output=?,
               last_seen_at=?,resolved_ip=?,country_code=?,country_label=?,geo_checked_at=?,geo_error=? WHERE id=?""",
-              (item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]),
+              (item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]),
                int(item["supported_output"]), now, *geo, node_id))
         else:
             node_id = _id()
-            # Stable identities are intentionally unique across a user's pool.
-            conflict = conn.execute("SELECT id FROM csm_nodes WHERE stable_identity=?", (item["stable_identity"],)).fetchone()
-            if conflict:
-                node_id = conflict["id"]
-                geo = _preserved_geo_fields(conn, node_id, item["server"])
-                conn.execute("""UPDATE csm_nodes SET fingerprint=?,name=?,protocol=?,server=?,port=?,config_json=?,
-                  supported_output=?,last_seen_at=?,resolved_ip=?,country_code=?,country_label=?,geo_checked_at=?,geo_error=? WHERE id=?""",
-                  (item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]),
-                   int(item["supported_output"]), now, *geo, node_id))
-            else:
-                conn.execute("""INSERT INTO csm_nodes(
-                  id,stable_identity,fingerprint,name,protocol,server,port,config_json,
-                  supported_output,first_seen_at,last_seen_at,
-                  resolved_ip,country_code,country_label,geo_checked_at,geo_error)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (node_id, item["stable_identity"], item["fingerprint"], item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, now, "", "", "", None, ""))
+            stored_fingerprint = item["fingerprint"]
+            if conn.execute("SELECT 1 FROM csm_nodes WHERE fingerprint=?", (stored_fingerprint,)).fetchone():
+                stored_fingerprint = _hash({"subscriptionName": item["name"], "material": stored_fingerprint})
+            conn.execute("""INSERT INTO csm_nodes(
+              id,stable_identity,fingerprint,name,protocol,server,port,config_json,
+              supported_output,first_seen_at,last_seen_at,
+              resolved_ip,country_code,country_label,geo_checked_at,geo_error)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (node_id, _hash({"subscriptionName": item["name"]}), stored_fingerprint, item["name"], item["protocol"], item["server"], item["port"], _json(item["config"]), int(item["supported_output"]), now, now, "", "", "", None, ""))
         conn.execute("INSERT INTO csm_node_sources(node_id,source_id,source_alias,last_seen_at) VALUES(?,?,?,?) ON CONFLICT(node_id,source_id) DO UPDATE SET source_alias=excluded.source_alias,last_seen_at=excluded.last_seen_at", (node_id, source_id, item["name"], now))
         count += 1
     return count
@@ -1073,7 +1168,7 @@ def list_nodes(user: User, filters: dict[str, Any] | None = None) -> list[dict[s
 
 
 def _node_ref(row: sqlite3.Row) -> str:
-    return str(row["alias"] or row["name"] or "")
+    return str(row["name"] or "")
 
 
 def _group_scope_rows(conn: sqlite3.Connection, config: dict[str, Any]) -> list[sqlite3.Row]:
@@ -1239,7 +1334,7 @@ def _profile_row(row: sqlite3.Row, public_token: str | None = None) -> dict[str,
         "ruleSetUpdatedAt": row["rule_set_updated_at"] if "rule_set_updated_at" in keys else None,
         "publishedAt": row["published_at"], "publishedStatus": row["published_status"],
         "validation": _loads(row["last_validation_json"], []), "subscriptionToken": public_token,
-        "createdAt": row["created_at"],
+        "createdAt": row["created_at"], "updatedAt": row["updated_at"], "refreshSeconds": row["refresh_seconds"], "nextRefreshAt": row["next_refresh_at"],
     }
 
 
@@ -1265,8 +1360,12 @@ def _profile_settings(value: Any) -> dict[str, Any]:
 
 def create_profile(data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id); profile_id, token, now = _id(), secrets.token_urlsafe(32), _now()
+    refresh_seconds = max(60, min(7 * 86400, int(data.get("refreshSeconds") or auto_update_settings(user)["profileRefreshSeconds"])))
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        conn.execute("INSERT INTO csm_profiles VALUES(?,?,?,?,?,?,?,?,?,?,?)", (profile_id, str(data.get("name") or "未命名聚合")[:120], "clash-meta", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", now, now))
+        conn.execute("""INSERT INTO csm_profiles(
+          id,name,target_kernel,settings_json,rule_set_id,token_encrypted,published_at,
+          published_status,last_validation_json,refresh_seconds,next_refresh_at,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (profile_id, str(data.get("name") or "未命名聚合")[:120], "clash-meta", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", refresh_seconds, None, now, now))
         row = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (profile_id,)).fetchone()
     _create_token_index(user.id, profile_id, token)
     return _profile_row(row, token)
@@ -1423,6 +1522,8 @@ def _normalise_rule_provider(data: dict[str, Any]) -> tuple[str, str, str, dict[
 def save_rule_provider(data: dict[str, Any], user: User, provider_id: str | None = None) -> dict[str, Any]:
     init_database(user.id)
     name, provider_key, description, config = _normalise_rule_provider(data)
+    if _rule_provider_source_url(config):
+        config["interval"] = auto_update_settings(user)["ruleProviderRefreshSeconds"]
     now = _now()
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         conflict = conn.execute("SELECT id FROM csm_rule_providers WHERE provider_key=? AND id<>?", (provider_key, provider_id or "")).fetchone()
@@ -1781,7 +1882,7 @@ def _rule_referenced_nodes(conn: sqlite3.Connection, rule_set: dict[str, Any] | 
     nodes_by_id: dict[str, sqlite3.Row] = {}
     for reference in dict.fromkeys(references):
         for row in all_nodes:
-            if reference in {str(row["name"] or ""), str(row["alias"] or "")}:
+            if reference == str(row["name"] or ""):
                 nodes_by_id[str(row["id"])] = row
     return list(nodes_by_id.values())
 
@@ -1853,7 +1954,7 @@ def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set:
         graph[name] = {str(ref) for ref in refs if str(ref) in names}
         for ref in refs:
             if str(ref) in ambiguous_references and str(ref) not in names:
-                messages.append({"level": "error", "code": "AMBIGUOUS_NODE_REFERENCE", "message": f"策略组 {name} 引用了重名节点：{ref}，请改用唯一别名。"})
+                messages.append({"level": "error", "code": "AMBIGUOUS_NODE_REFERENCE", "message": f"策略组 {name} 引用了重名节点：{ref}，请先确保节点名称唯一。"})
             elif str(ref) not in names and str(ref) not in node_names and str(ref) not in {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}:
                 messages.append({"level": "error", "code": "MISSING_GROUP_REFERENCE", "message": f"策略组 {name} 引用了不存在的节点或子组：{ref}。"})
     visiting, visited = set(), set()
@@ -1919,7 +2020,7 @@ def _dns_output(value: Any) -> dict[str, Any] | None:
 
 
 def _node_output_material(nodes: list[sqlite3.Row]) -> tuple[list[dict[str, Any]], dict[str, str], set[str]]:
-    """Build unique proxy names and resolve source names/aliases to them."""
+    """Build proxy names and resolve references by node name only."""
     used: dict[str, int] = {}; output = []; candidates: dict[str, set[str]] = {}
     for row in nodes:
         protocol = str(row["protocol"] or "").lower()
@@ -1927,13 +2028,12 @@ def _node_output_material(nodes: list[sqlite3.Row]) -> tuple[list[dict[str, Any]
             continue
         value = _proxy_output(_loads(row["config_json"], {}), protocol)
         original = str(row["name"] or value.get("name") or "")
-        alias = str(row["alias"] or "")
-        base = alias or original
+        base = original
         count = used.get(base, 0); used[base] = count + 1
         output_name = f"{base} ({count + 1})" if count else base
         value["name"] = output_name
         output.append(value)
-        for reference in {original, alias} - {""}:
+        for reference in {original} - {""}:
             candidates.setdefault(reference, set()).add(output_name)
     ambiguous = {reference for reference, values in candidates.items() if len(values) > 1}
     references = {reference: next(iter(values)) for reference, values in candidates.items() if len(values) == 1}
@@ -2034,7 +2134,7 @@ def _build_process_log(
     for row in nodes:
         original = str(row["name"] or "")
         alias = str(row["alias"] or "")
-        output_name = next((output for reference, output in references.items() if reference in {original, alias}), "")
+        output_name = references.get(original, "")
         if not output_name:
             output_name = "（因不兼容或引用不明确被跳过）"
         detail = f"别名「{alias}」" if alias else "未设置别名"
@@ -2087,16 +2187,33 @@ def preview_profile(profile_id: str, user: User) -> dict[str, Any]:
 
 
 def publish_profile(profile_id: str, user: User) -> dict[str, Any]:
-    preview = preview_profile(profile_id, user)
-    if not preview["valid"]:
-        raise ToolboxError("PUBLISH_VALIDATION_FAILED", "配置校验未通过，已发布版本未被覆盖。", status_code=422, extra={"messages": preview["messages"]})
-    init_database(user.id); now = _now()
+    init_database(user.id)
+    run_id, started, clock = _id(), _now(), time.monotonic()
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        profile = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
-        _create_published_snapshot(conn, profile_id, preview["yaml"], now)
-        conn.execute("UPDATE csm_profiles SET published_at=?,published_status='published',last_validation_json=?,updated_at=? WHERE id=?", (now, _json(preview["messages"]), now, profile_id))
-        token = _decrypt(profile["token_encrypted"])
-    return {"profileId": profile_id, "publishedAt": now, "subscriptionToken": token, "yaml": preview["yaml"]}
+        conn.execute("INSERT INTO csm_profile_refresh_runs(id,profile_id,status,started_at,created_at) VALUES(?,?,?,?,?)", (run_id, profile_id, "running", started, started))
+    try:
+        preview = preview_profile(profile_id, user)
+        if not preview["valid"]:
+            reason = "；".join(str(item.get("message") or "校验失败") for item in preview["messages"] if item.get("level") == "error")
+            raise ToolboxError("PUBLISH_VALIDATION_FAILED", f"配置校验未通过：{reason or '请查看诊断日志'}", status_code=422, extra={"messages": preview["messages"]})
+        now = _now()
+        with user_tool_connection_context(user.id, TOOL_ID) as conn:
+            profile = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
+            _create_published_snapshot(conn, profile_id, preview["yaml"], now)
+            row = conn.execute("SELECT refresh_seconds FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
+            refresh_seconds = int(row["refresh_seconds"] or DEFAULT_PROFILE_REFRESH_SECONDS)
+            next_refresh = datetime.fromtimestamp(time.time() + refresh_seconds, timezone.utc).isoformat()
+            conn.execute("UPDATE csm_profiles SET published_at=?,published_status='published',last_validation_json=?,next_refresh_at=?,updated_at=? WHERE id=?", (now, _json(preview["messages"]), next_refresh, now, profile_id))
+            token = _decrypt(profile["token_encrypted"])
+            conn.execute("UPDATE csm_profile_refresh_runs SET status='success',finished_at=?,duration_ms=? WHERE id=?", (now, int((time.monotonic() - clock) * 1000), run_id))
+        return {"profileId": profile_id, "publishedAt": now, "subscriptionToken": token, "yaml": preview["yaml"]}
+    except Exception as exc:
+        message = exc.message if isinstance(exc, ToolboxError) else str(exc)
+        finished = _now()
+        with user_tool_connection_context(user.id, TOOL_ID) as conn:
+            conn.execute("UPDATE csm_profile_refresh_runs SET status='failed',finished_at=?,duration_ms=?,error=? WHERE id=?", (finished, int((time.monotonic() - clock) * 1000), str(message)[:2000], run_id))
+            conn.execute("UPDATE csm_profiles SET published_status='degraded',updated_at=? WHERE id=? AND published_at IS NOT NULL", (finished, profile_id))
+        raise
 
 
 def _create_published_snapshot(conn: sqlite3.Connection, profile_id: str, content: str, now: str) -> None:
@@ -2139,23 +2256,19 @@ def _latest_node_probes(conn: sqlite3.Connection) -> tuple[dict[str, list[sqlite
         ORDER BY p2.created_at DESC,p2.rowid DESC LIMIT 1)
       ORDER BY n.rowid
     """).fetchall()
-    aliases: dict[str, list[sqlite3.Row]] = {}
     originals: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        alias = str(row["alias"] or "")
         name = str(row["name"] or "")
-        if alias: aliases.setdefault(alias, []).append(row)
         if name: originals.setdefault(name, []).append(row)
-    return aliases, originals
+    return {}, originals
 
 
 def _probe_for_output_name(name: str, aliases: dict[str, list[sqlite3.Row]], originals: dict[str, list[sqlite3.Row]]) -> sqlite3.Row | None:
-    if name in aliases: return aliases[name][0]
     if name in originals: return originals[name][0]
     match = re.fullmatch(r"(.+) \((\d+)\)", name)
     if not match: return None
     base, position = match.group(1), int(match.group(2)) - 1
-    values = aliases.get(base) or originals.get(base) or []
+    values = originals.get(base) or []
     return values[position] if 0 <= position < len(values) else None
 
 
@@ -2441,29 +2554,98 @@ def probe_nodes(node_ids: list[str], user: User) -> list[dict[str, Any]]:
 
 def dashboard(user: User) -> dict[str, Any]:
     init_database(user.id)
+    now_iso = datetime.now(timezone.utc).isoformat()
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         source_counts = conn.execute("SELECT COUNT(*) AS total,SUM(status='healthy') AS healthy,SUM(status='error') AS error FROM csm_sources").fetchone()
         node_count = int(conn.execute("SELECT COUNT(*) FROM csm_nodes").fetchone()[0])
-        source_node_count = int(conn.execute("SELECT COUNT(*) FROM csm_node_sources").fetchone()[0])
-        tcp_count = int(conn.execute("SELECT COUNT(DISTINCT node_id) FROM csm_probe_results WHERE reachable=1").fetchone()[0])
+        custom_nodes = int(conn.execute("SELECT COUNT(*) FROM csm_nodes WHERE is_custom=1").fetchone()[0])
+        source_node_count = int(conn.execute("SELECT COUNT(*) FROM csm_node_sources").fetchall()[0][0])
+        probe_latest = conn.execute("""WITH latest AS (
+          SELECT node_id,reachable,latency_ms,ROW_NUMBER() OVER(PARTITION BY node_id ORDER BY created_at DESC) rn
+          FROM csm_probe_results)
+          SELECT COUNT(*) AS probed,SUM(reachable=1) AS reachable,AVG(CASE WHEN reachable=1 THEN latency_ms END) AS avg_latency
+          FROM latest WHERE rn=1""").fetchone()
         published = int(conn.execute("SELECT COUNT(*) FROM csm_profiles WHERE published_at IS NOT NULL").fetchone()[0])
+        draft_profiles = int(conn.execute("SELECT COUNT(*) FROM csm_profiles WHERE published_at IS NULL").fetchone()[0])
+        degraded_profiles = int(conn.execute("SELECT COUNT(*) FROM csm_profiles WHERE published_status='degraded'").fetchone()[0])
+        rule_sets = int(conn.execute("SELECT COUNT(*) FROM csm_rule_sets").fetchone()[0])
+        node_groups = int(conn.execute("SELECT COUNT(*) FROM csm_node_groups").fetchone()[0])
+        latency_groups = int(conn.execute("SELECT COUNT(*) FROM csm_node_groups WHERE kind='latency'").fetchone()[0])
+        provider_rows = conn.execute("SELECT config_json FROM csm_rule_providers").fetchall()
+        requests_24h = int(conn.execute("SELECT COUNT(*) FROM csm_subscription_requests WHERE requested_at>=?", (now_iso,)).fetchone()[0])
         protocol = [{"name": r["protocol"], "value": r["count"]} for r in conn.execute("SELECT protocol,COUNT(*) count FROM csm_nodes GROUP BY protocol ORDER BY count DESC")]
+        regions = [{"name": r["region"], "value": r["count"]} for r in conn.execute("""SELECT COALESCE(NULLIF(country_label,''),NULLIF(country_code,''),'未识别') region,COUNT(*) count
+          FROM csm_nodes GROUP BY region ORDER BY count DESC LIMIT 8""")]
+        latencies = [int(r["latency_ms"]) for r in conn.execute("""WITH latest AS (
+          SELECT latency_ms,ROW_NUMBER() OVER(PARTITION BY node_id ORDER BY created_at DESC) rn
+          FROM csm_probe_results WHERE reachable=1)
+          SELECT latency_ms FROM latest WHERE rn=1 ORDER BY latency_ms""")]
         sources = [_row_source(r) for r in conn.execute("SELECT * FROM csm_sources ORDER BY CASE status WHEN 'error' THEN 0 ELSE 1 END,last_attempt_at DESC LIMIT 12")]
         profiles = [_profile_row(r) for r in conn.execute(f"{_PROFILE_WITH_RULE_SET} ORDER BY p.updated_at DESC LIMIT 12")]
-        alerts = []
-        for source in sources:
-            if source["status"] == "error": alerts.append({"kind": "source", "level": "error", "message": f"订阅源 {source['name']} 刷新失败：{source['lastError']}"})
-        for profile in profiles:
-            for message in profile["validation"]:
-                if message.get("level") == "error": alerts.append({"kind": "profile", "level": "error", "profileId": profile["id"], "message": message.get("message", "配置校验异常")})
-    return {"metrics": {"sources": int(source_counts["total"] or 0), "healthySources": int(source_counts["healthy"] or 0), "errorSources": int(source_counts["error"] or 0), "nodesBeforeDedupe": source_node_count, "nodes": node_count, "tcpReachable": tcp_count, "publishedProfiles": published, "alerts": len(alerts)}, "protocolDistribution": protocol, "sources": sources, "profiles": profiles, "alerts": alerts[:30]}
 
+    provider_errors = 0
+    for row in provider_rows:
+        config = _loads(row["config_json"], {})
+        if isinstance(config, dict) and config.get("fetchError"):
+            provider_errors += 1
+    sources_total = int(source_counts["total"] or 0)
+    healthy_sources = int(source_counts["healthy"] or 0)
+    error_sources = int(source_counts["error"] or 0)
+    probed_nodes = int(probe_latest["probed"] or 0)
+    reachable_nodes = int(probe_latest["reachable"] or 0)
+    avg_latency = int(probe_latest["avg_latency"] or 0) if probe_latest["avg_latency"] is not None else None
+    profile_errors = sum(1 for profile in profiles for item in profile["validation"] if item.get("level") == "error")
+    alerts = []
+    for source in sources:
+        if source["status"] == "error": alerts.append({"kind": "source", "level": "error", "message": f"订阅源 {source['name']} 刷新失败：{source['lastError']}"})
+    if provider_errors:
+        alerts.append({"kind": "ruleProvider", "level": "error", "message": f"{provider_errors} 个 Rule Provider 最近拉取失败，已沿用上次成功内容"})
+    for profile in profiles:
+        for item in profile["validation"]:
+            if item.get("level") == "error": alerts.append({"kind": "profile", "level": "error", "profileId": profile["id"], "message": item.get("message", "配置校验异常")})
+
+    def rate(part: int, total: int) -> int:
+        return round(part * 100 / total) if total else 0
+
+    latency_p50 = latencies[len(latencies) // 2] if latencies else None
+    latency_p95 = latencies[min(len(latencies) - 1, math.ceil(len(latencies) * .95) - 1)] if latencies else None
+    metrics = {
+        "sources": sources_total, "healthySources": healthy_sources, "errorSources": error_sources,
+        "nodes": node_count, "customNodes": custom_nodes, "nodesBeforeDedupe": source_node_count,
+        "nodesDeduplicated": max(0, source_node_count - node_count), "probedNodes": probed_nodes,
+        "tcpReachable": reachable_nodes, "avgLatencyMs": avg_latency, "latencyP50Ms": latency_p50, "latencyP95Ms": latency_p95,
+        "profiles": published + draft_profiles, "publishedProfiles": published, "draftProfiles": draft_profiles,
+        "degradedProfiles": degraded_profiles, "profileErrors": profile_errors, "ruleSets": rule_sets,
+        "ruleProviders": len(provider_rows), "providerErrors": provider_errors, "nodeGroups": node_groups,
+        "latencyNodeGroups": latency_groups, "requests24h": requests_24h, "alerts": len(alerts),
+    }
+    health = {
+        "sourceHealthRate": rate(healthy_sources, sources_total),
+        "nodeReachabilityRate": rate(reachable_nodes, probed_nodes),
+        "profileHealthRate": rate(published - degraded_profiles, published + draft_profiles),
+        "dedupeSavedRate": rate(max(0, source_node_count - node_count), source_node_count),
+    }
+    return {"metrics": metrics, "health": health, "protocolDistribution": protocol, "regionDistribution": regions, "sources": sources, "profiles": profiles, "alerts": alerts[:30]}
 
 def refresh_runs(user: User, limit: int = 100) -> list[dict[str, Any]]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         rows = conn.execute("SELECT r.*,s.name AS source_name FROM csm_refresh_runs r JOIN csm_sources s ON s.id=r.source_id ORDER BY r.created_at DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
     return [{"id": row["id"], "sourceId": row["source_id"], "sourceName": row["source_name"], "status": row["status"], "startedAt": row["started_at"], "finishedAt": row["finished_at"], "durationMs": row["duration_ms"], "nodesBefore": row["nodes_before"], "nodesAfter": row["nodes_after"], "error": row["error"]} for row in rows]
+
+
+def profile_refresh_runs(user: User, profile_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    init_database(user.id)
+    params: list[Any] = []
+    where = ""
+    if profile_id:
+        where = "WHERE r.profile_id=?"
+        params.append(profile_id)
+    params.append(max(1, min(limit, 500)))
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        rows = conn.execute(f"""SELECT r.*,p.name AS profile_name FROM csm_profile_refresh_runs r
+          JOIN csm_profiles p ON p.id=r.profile_id {where} ORDER BY r.created_at DESC LIMIT ?""", params).fetchall()
+    return [{"id": row["id"], "profileId": row["profile_id"], "profileName": row["profile_name"], "status": row["status"], "startedAt": row["started_at"], "finishedAt": row["finished_at"], "durationMs": row["duration_ms"], "error": row["error"]} for row in rows]
 
 
 def _rebuild_published_profiles(user: User) -> None:
@@ -2487,9 +2669,30 @@ def refresh_due_sources() -> None:
             id = user_id
         with user_tool_connection_context(user_id, TOOL_ID) as conn:
             due = [r["id"] for r in conn.execute("SELECT id FROM csm_sources WHERE enabled=1 AND (next_refresh_at IS NULL OR next_refresh_at<=?)", (now,))]
+        _set_auto_update_last_run(user_id, "sourceRefreshSeconds", now)
         for source_id in due:
             try: refresh_source(source_id, ScheduledUser(), auto_rebuild=True)  # type: ignore[arg-type]
             except ToolboxError: pass
+
+
+def refresh_due_profiles() -> None:
+    """Refresh published aggregate-link snapshots on their own schedule."""
+    now = _now()
+    for user_id, _path in list_user_tool_dbs(TOOL_ID):
+        init_database(user_id)
+        class ScheduledUser:  # noqa: D101
+            id = user_id
+        _set_auto_update_last_run(user_id, "profileRefreshSeconds", now)
+        with user_tool_connection_context(user_id, TOOL_ID) as conn:
+            ids = [row["id"] for row in conn.execute(
+                "SELECT id FROM csm_profiles WHERE published_at IS NOT NULL AND (next_refresh_at IS NULL OR next_refresh_at<=?)", (now,)
+            )]
+        for profile_id in ids:
+            try:
+                publish_profile(profile_id, ScheduledUser())  # type: ignore[arg-type]
+            except ToolboxError:
+                with user_tool_connection_context(user_id, TOOL_ID) as conn:
+                    conn.execute("UPDATE csm_profiles SET published_status='degraded',next_refresh_at=? WHERE id=?", (datetime.fromtimestamp(time.time() + DEFAULT_PROFILE_REFRESH_SECONDS, timezone.utc).isoformat(), profile_id))
 
 
 def _rebuild_changed_published_profiles(user: User) -> None:
@@ -2521,36 +2724,43 @@ def _rebuild_changed_published_profiles(user: User) -> None:
                 conn.execute("UPDATE csm_profiles SET published_status='degraded',updated_at=? WHERE id=? AND published_status<>'degraded'", (_now(), profile["id"]))
 
 
+def _refresh_rule_providers_for_user(user_id: str, *, only_due: bool) -> bool:
+    """Refresh rule providers for one user; returns whether payloads changed."""
+    now = datetime.now(timezone.utc)
+    init_database(user_id)
+    _set_auto_update_last_run(user_id, "ruleProviderRefreshSeconds", now.isoformat())
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        rows = conn.execute("SELECT id,config_json FROM csm_rule_providers").fetchall()
+    changed = False
+    for row in rows:
+        config = _loads(row["config_json"], {})
+        if not isinstance(config, dict) or (only_due and not _rule_provider_refresh_due(config, now)):
+            continue
+        url = _rule_provider_source_url(config)
+        if not url:
+            continue
+        try:
+            payload = _download_rule_provider_payload(url)
+            next_config = {**config, "payload": payload, "fetchedAt": _now(), "fetchError": ""}
+            changed = changed or payload != _rule_provider_snapshot_payload(config)
+        except ToolboxError as exc:
+            # Keep the last successful payload and record the failure; the
+            # provider interval acts as the retry cooldown.
+            next_config = {**config, "fetchedAt": _now(), "fetchError": str(exc.message)}
+        with user_tool_connection_context(user_id, TOOL_ID) as conn:
+            conn.execute("UPDATE csm_rule_providers SET config_json=? WHERE id=?",
+                         (_json(next_config), row["id"]))
+    if changed:
+        class ScheduledUser:  # noqa: D101
+            id = user_id
+        _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]
+    return changed
+
+
 def refresh_due_rule_providers() -> None:
     """Scheduler entry: keep URL Provider snapshots fresh without request-time I/O."""
-    now = datetime.now(timezone.utc)
     for user_id, _path in list_user_tool_dbs(TOOL_ID):
-        init_database(user_id)
-        with user_tool_connection_context(user_id, TOOL_ID) as conn:
-            rows = conn.execute("SELECT id,config_json FROM csm_rule_providers").fetchall()
-        changed = False
-        for row in rows:
-            config = _loads(row["config_json"], {})
-            if not isinstance(config, dict) or not _rule_provider_refresh_due(config, now):
-                continue
-            url = _rule_provider_source_url(config)
-            if not url:
-                continue
-            try:
-                payload = _download_rule_provider_payload(url)
-                next_config = {**config, "payload": payload, "fetchedAt": _now(), "fetchError": ""}
-                changed = changed or payload != _rule_provider_snapshot_payload(config)
-            except ToolboxError as exc:
-                # Keep the last successful payload and record the failure; the
-                # provider interval acts as the retry cooldown.
-                next_config = {**config, "fetchedAt": _now(), "fetchError": str(exc.message)}
-            with user_tool_connection_context(user_id, TOOL_ID) as conn:
-                conn.execute("UPDATE csm_rule_providers SET config_json=? WHERE id=?",
-                             (_json(next_config), row["id"]))
-        if changed:
-            class ScheduledUser:  # noqa: D101
-                id = user_id
-            _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]
+        _refresh_rule_providers_for_user(user_id, only_due=True)
 
 
 def probe_all_nodes() -> None:
@@ -2567,3 +2777,74 @@ def probe_all_nodes() -> None:
         _start_geoip_refresh(ScheduledUser())  # type: ignore[arg-type]
         if has_latency_group:
             _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]
+
+
+def probe_due_nodes() -> None:
+    """Run the node probe according to the per-user unified interval."""
+    now = datetime.now(timezone.utc)
+    for user_id, _path in list_user_tool_dbs(TOOL_ID):
+        init_database(user_id)
+        settings = auto_update_settings(type("ScheduledUser", (), {"id": user_id})())
+        with user_tool_connection_context(user_id, TOOL_ID) as conn:
+            row = conn.execute("SELECT value FROM csm_settings WHERE key='auto_update_last_node_probe_run_at'").fetchone()
+            last = _parse_utc(row["value"]) if row else None
+            if last and now < last + timedelta(seconds=settings["nodeProbeSeconds"]):
+                continue
+        _set_auto_update_last_run(user_id, "nodeProbeSeconds", now.isoformat())
+        probe_all_nodes_for_user(user_id)
+
+
+def probe_all_nodes_for_user(user_id: str) -> None:
+    class ScheduledUser:  # noqa: D101
+        id = user_id
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        node_ids = [row["id"] for row in conn.execute("SELECT id FROM csm_nodes")]
+        has_latency_group = bool(conn.execute("SELECT 1 FROM csm_node_groups WHERE kind='latency' LIMIT 1").fetchone())
+    for offset in range(0, len(node_ids), 1000):
+        probe_nodes(node_ids[offset:offset + 1000], ScheduledUser())  # type: ignore[arg-type]
+    _start_geoip_refresh(ScheduledUser())  # type: ignore[arg-type]
+    if has_latency_group:
+        _rebuild_changed_published_profiles(ScheduledUser())  # type: ignore[arg-type]
+
+
+def run_auto_update_task(task: str, user: User) -> dict[str, Any]:
+    """Manually run one scheduled auto-update task immediately for the caller."""
+    init_database(user.id)
+    task_setting_keys = {"sources": "sourceRefreshSeconds", "ruleProviders": "ruleProviderRefreshSeconds", "probe": "nodeProbeSeconds", "profiles": "profileRefreshSeconds"}
+    if task not in task_setting_keys:
+        raise ToolboxError("CSM_BAD_REQUEST", "未知的自动更新任务。", status_code=400)
+    started = _now()
+    _set_auto_update_last_run(user.id, task_setting_keys[task], started)
+    last_run_at = auto_update_settings(user)["lastRunAt"]
+    if task == "sources":
+        with user_tool_connection_context(user.id, TOOL_ID) as conn:
+            source_ids = [row["id"] for row in conn.execute("SELECT id FROM csm_sources WHERE enabled=1")]
+        ok = failed = 0
+        for source_id in source_ids:
+            try:
+                refresh_source(source_id, user, auto_rebuild=False)
+                ok += 1
+            except ToolboxError:
+                failed += 1
+        if ok:
+            _rebuild_published_profiles(user)
+        message = f"已刷新 {ok} 个订阅源" + (f"，{failed} 个失败" if failed else "")
+        return {"task": task, "message": message, "lastRunAt": last_run_at}
+    if task == "ruleProviders":
+        changed = _refresh_rule_providers_for_user(user.id, only_due=False)
+        return {"task": task, "message": "Rule Provider 已刷新" if changed else "Rule Provider 已检查，内容无变化", "lastRunAt": last_run_at}
+    if task == "probe":
+        probe_all_nodes_for_user(user.id)
+        return {"task": task, "message": "已探测全部节点", "lastRunAt": last_run_at}
+    if task == "profiles":
+        published = [profile for profile in list_profiles(user) if profile["publishedAt"]]
+        ok = 0
+        for profile in published:
+            try:
+                publish_profile(profile["id"], user)
+                ok += 1
+            except ToolboxError:
+                with user_tool_connection_context(user.id, TOOL_ID) as conn:
+                    conn.execute("UPDATE csm_profiles SET published_status='degraded',updated_at=? WHERE id=?", (_now(), profile["id"]))
+        return {"task": task, "message": f"已重新生成 {ok}/{len(published)} 个聚合订阅链接", "lastRunAt": last_run_at}
+    raise ToolboxError("CSM_BAD_REQUEST", "未知的自动更新任务。", status_code=400)

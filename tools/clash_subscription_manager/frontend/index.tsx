@@ -17,7 +17,6 @@ import {
   FileCode2,
   FolderOpen,
   Gauge,
-  Link,
   Pencil,
   Plus,
   RefreshCw,
@@ -658,7 +657,6 @@ export default function ClashSubscriptionManager() {
               <RulesView
                 ruleSets={ruleSets}
                 loading={loading}
-                onImport={() => setRuleModal({ mode: "import" })}
                 onCreate={() => setRuleModal({ mode: "create" })}
                 onEdit={(ruleSet) => setRuleModal({ mode: "edit", ruleSet })}
                 onRemove={removeRuleSet}
@@ -3485,14 +3483,12 @@ function RuleDomainTestModal({
 function RulesView({
   ruleSets,
   loading,
-  onImport,
   onCreate,
   onEdit,
   onRemove,
 }: {
   ruleSets: RuleSet[];
   loading: boolean;
-  onImport: () => void;
   onCreate: () => void;
   onEdit: (rule: RuleSet) => void;
   onRemove: (rule: RuleSet) => void;
@@ -3504,24 +3500,14 @@ function RulesView({
         title="规则组"
         icon={<FileCode2 size={18} />}
         actions={
-          <>
-            <button
-              className="csm-btn csm-btn-secondary"
-              type="button"
-              onClick={onCreate}
-            >
-              <Plus size={14} />
-              手动新增
-            </button>
-            <button
-              className="csm-btn csm-btn-primary"
-              type="button"
-              onClick={onImport}
-            >
-              <Link size={14} />
-              从订阅链接 / YAML 导入
-            </button>
-          </>
+          <button
+            className="csm-btn csm-btn-primary"
+            type="button"
+            onClick={onCreate}
+          >
+            <Plus size={14} />
+            手动新增
+          </button>
         }
       />
       {loading ? (
@@ -3530,7 +3516,7 @@ function RulesView({
         <EmptyState
           icon={<FileCode2 size={32} />}
           title="暂无规则组"
-          hint="可以使用默认模板手动新增，或只从订阅导入规则"
+          hint="可以使用默认模板手动新增规则组"
         />
       ) : (
         <Table>

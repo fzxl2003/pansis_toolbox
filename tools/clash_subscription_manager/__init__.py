@@ -1,1 +1,0 @@
-"""Clash subscription manager tool."""

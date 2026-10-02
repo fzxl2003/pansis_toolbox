@@ -47,7 +47,7 @@ import {
   useConfirm,
 } from "./components";
 
-const API = "/api/tools/clash-subscription-manager";
+const API = "/api/tools/airplay-subscription-manager";
 type View = "dashboard" | "nodes" | "profiles" | "rules" | "auto-update";
 type ValidationMessage = { level: string; code?: string; message: string };
 type Source = {
@@ -204,7 +204,7 @@ type Dashboard = {
   profiles: Profile[];
   alerts: { kind?: string; message: string }[];
 };
-export default function ClashSubscriptionManager() {
+export default function AirPlaySubscriptionManager() {
   const [view, setView] = useState<View>("dashboard");
   const [rulesTab, setRulesTab] = useState<"rules" | "providers">("providers");
   const [nodesTab, setNodesTab] = useState<"pool" | "groups">("pool");
@@ -458,20 +458,20 @@ export default function ClashSubscriptionManager() {
   }
   const subscriptionUrl = (profile: Profile) =>
     profile.subscriptionToken
-      ? `${window.location.origin}/sub/clash/${profile.subscriptionToken}`
+      ? `${window.location.origin}/sub/airplay/${profile.subscriptionToken}`
       : "";
   const subscriptionDetailUrl = (profile: Profile) =>
     profile.subscriptionToken
-      ? `${window.location.origin}/sub/clash/details/${profile.subscriptionToken}`
+      ? `${window.location.origin}/sub/airplay/details/${profile.subscriptionToken}`
       : "";
 
   return (
     <div className="tool-page csm-tool">
       <header className="tool-header">
         <div>
-          <h1 className="tool-title">Clash 订阅聚合器</h1>
+          <h1 className="tool-title">AirPlay 订阅聚合器</h1>
           <p className="tool-subtitle">
-            订阅解析、自定义节点、规则校验与 Clash Meta 安全发布
+            订阅解析、自定义节点、规则校验与 AirPlay 安全发布
           </p>
         </div>
         <button
@@ -1041,7 +1041,7 @@ function AutoUpdateView({
           ["sourceRefreshSeconds", "节点订阅源", "拉取上游节点订阅"],
           ["ruleProviderRefreshSeconds", "Rule Provider", "拉取远程规则订阅"],
           ["nodeProbeSeconds", "节点可用性探测", "TCP 探测全部节点"],
-          ["profileRefreshSeconds", "聚合订阅链接", "自动重新生成公开 Clash Meta YAML"],
+          ["profileRefreshSeconds", "聚合订阅链接", "自动重新生成公开 AirPlay YAML"],
         ] as const).map(([key, label, hint]) => (
           <Field label={label} key={key}>
             <div className="csm-cycle-row">
@@ -1603,7 +1603,7 @@ function NodesView({
                 {node.supportedOutput ? (
                   <Badge color="green">可输出</Badge>
                 ) : (
-                  <Badge color="red">Clash Meta 不支持</Badge>
+                  <Badge color="red">AirPlay 不支持</Badge>
                 )}
               </td>
               <td className="csm-node-actions-col">
@@ -1872,7 +1872,7 @@ function AddNodeModal({
             <span className="csm-add-node-icon">
               <FileCode2 size={24} />
             </span>
-            <span><strong>添加自定义节点</strong><small>直接编写一个 Clash Meta 节点，可随时编辑或删除。</small></span>
+            <span><strong>添加自定义节点</strong><small>直接编写一个 AirPlay 节点，可随时编辑或删除。</small></span>
           </button>
         </div>
         <button className="csm-qr-import-option" type="button" onClick={onImportQr}>
@@ -2010,7 +2010,7 @@ function CustomNodeModal({
       <div className="csm-stack">
         {error && <Alert type="error">{error}</Alert>}
         <Alert type="info">
-          填写一个 Clash Meta <code>proxies</code> 列表中的节点对象，支持 YAML
+          填写一个 AirPlay <code>proxies</code> 列表中的节点对象，支持 YAML
           或 JSON。必须包含 <code>name</code>、<code>type</code>、
           <code>server</code> 和 <code>port</code>。
         </Alert>
@@ -2038,7 +2038,7 @@ function CustomNodeModal({
         {!node && (
           <div className="csm-custom-node-help">
             <span>
-              当前已填入 VLESS 示例，可直接修改；也可以粘贴 Clash Meta YAML
+              当前已填入 VLESS 示例，可直接修改；也可以粘贴 AirPlay YAML
               中的单个节点对象。
             </span>
             <button
@@ -2380,7 +2380,7 @@ function RuleProvidersView({
       <Alert type="info">
         Rule Provider
         支持规则订阅和自定义两种方式。规则订阅由服务器下载并保存具体内容；绑定到策略组后会展开为通用
-        Clash 规则，最终订阅中不会出现该规则订阅 URL。
+        AirPlay 规则，最终订阅中不会出现该规则订阅 URL。
       </Alert>
       <div className="csm-filterbar csm-provider-filter">
         <label className="csm-search">
@@ -3928,7 +3928,7 @@ function ProfileModal({
         </Field>
         <div className="csm-full-col">
           <small className="csm-muted">
-            输出固定为 Clash Meta YAML，运行模式固定为
+            输出固定为 AirPlay YAML，运行模式固定为
             Rule；节点与策略组完全由所选规则组决定。
           </small>
         </div>
@@ -3963,7 +3963,7 @@ function ProfileDiagnosticModal({
     )
     .join("\n");
   const diagnosticText = [
-    "Clash Meta 配置诊断",
+    "AirPlay 配置诊断",
     `配置名称：${profileName}`,
     `校验结果：${preview.valid ? "通过" : "未通过"}`,
     "",
@@ -4257,7 +4257,7 @@ function RuleSetModal({
     try {
       if (isImport) {
         if (!subscriptionUrl.trim() && !yamlContent.trim())
-          throw new Error("请输入订阅链接或粘贴 Clash YAML 内容。");
+          throw new Error("请输入订阅链接或粘贴 AirPlay YAML 内容。");
         await apiPost(`${API}/rule-sets/import`, {
           name: name.trim(),
           url: subscriptionUrl.trim(),
@@ -4331,7 +4331,7 @@ function RuleSetModal({
   const title = isEdit
     ? "编辑规则组"
     : isImport
-      ? "导入 Clash 规则"
+      ? "导入 AirPlay 规则"
       : "手动新增规则组";
   const saveLabel = isEdit
     ? "保存规则组"
@@ -4401,10 +4401,10 @@ function RuleSetModal({
                   type="url"
                   value={subscriptionUrl}
                   onChange={(event) => setSubscriptionUrl(event.target.value)}
-                  placeholder="https://example.com/subscription?format=clash"
+                  placeholder="https://example.com/subscription?format=airplay"
                 />
               </Field>
-              <Field label="Clash YAML（与订阅链接二选一）" full>
+              <Field label="AirPlay YAML（与订阅链接二选一）" full>
                 <textarea
                   className="csm-textarea csm-code-editor"
                   rows={20}
@@ -4835,7 +4835,7 @@ function StrategyGroupModal({
                       {node.alias && <small>原名：{node.name}</small>}
                       <small>
                         {node.protocol} · {node.server}:{node.port ?? "—"}
-                        {disabled ? " · Clash Meta 不支持" : ""}
+                        {disabled ? " · AirPlay 不支持" : ""}
                         {inGroup ? " · 由节点分组带入" : ""}
                       </small>
                     </span>

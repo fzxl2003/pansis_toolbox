@@ -12,7 +12,21 @@ from backend.app.core.config import Settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db import database
 from backend.app.services.auth_service import User
-from tools.clash_subscription_manager.backend import service
+from tools.airplay_subscription_manager.backend import service
+
+
+def test_legacy_tool_storage_is_moved_to_airplay_directory(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    previous = settings.storage_dir / "user_data" / "migration-user" / "tools" / service._legacy_tool_id()
+    previous.mkdir(parents=True)
+    (previous / "marker.txt").write_text("preserved", encoding="utf-8")
+
+    service._migrate_legacy_tool_storage("migration-user")
+
+    current = settings.storage_dir / "user_data" / "migration-user" / "tools" / service.TOOL_ID
+    assert not previous.exists()
+    assert (current / "marker.txt").read_text(encoding="utf-8") == "preserved"
 
 
 def test_parse_yaml_base64_and_uri_variants() -> None:
@@ -217,7 +231,7 @@ def test_rule_set_and_public_domain_matching_use_local_snapshots(tmp_path, monke
     assert invalid.value.code == "INVALID_TEST_DOMAIN"
 
 
-def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
+def test_airplay_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)
     monkeypatch.setattr(database, "get_settings", lambda: settings)
@@ -250,7 +264,7 @@ def test_clash_meta_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
     assert not preview["valid"]
     assert "proxies: []" in preview["yaml"]
     assert any("不可输出 1 个" in line for line in preview["buildLog"])
-    assert any(line.endswith("ERROR INCOMPATIBLE_OUTPUT：节点 unsupported（naive）不受 Clash Meta 支持。") for line in preview["buildLog"])
+    assert any(line.endswith("ERROR INCOMPATIBLE_OUTPUT：节点 unsupported（naive）不受 AirPlay 支持。") for line in preview["buildLog"])
     with pytest.raises(ToolboxError) as publish_error:
         service.publish_profile(profile["id"], user)
     assert publish_error.value.code == "PUBLISH_VALIDATION_FAILED"
@@ -770,7 +784,7 @@ def test_node_geoip_resolution_cache_failures_and_region_groups(tmp_path, monkey
     assert queried_ips[-1] == "9.9.9.9"
 
 
-def test_node_geoip_resolves_domain_without_probe_result(tmp_path, monkeypatch) -> None:
+def test_node_geoip_resolves_domain_when_probe_contains_reserved_fake_ip(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)
     monkeypatch.setattr(database, "get_settings", lambda: settings)
@@ -781,8 +795,13 @@ def test_node_geoip_resolves_domain_without_probe_result(tmp_path, monkeypatch) 
     assert node
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         service._store_nodes(conn, source["id"], [node])
+        node_id = conn.execute("SELECT id FROM csm_nodes WHERE name='dns-node'").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO csm_probe_results(id,node_id,reachable,dns_address,latency_ms,error,created_at) VALUES(?,?,1,?,10,'',?)",
+            (service._id(), node_id, "198.18.0.1", service._now()),
+        )
 
-    monkeypatch.setattr(service.socket, "getaddrinfo", lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    monkeypatch.setattr(service.socket, "getaddrinfo", lambda host, port, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 0))])
     monkeypatch.setattr(service, "_query_ip_sb", lambda ip: {"countryCode": "US", "countryLabel": "美国", "error": ""})
     result = service.refresh_node_geoip([], user)[0]
     assert result["resolvedIp"] == "93.184.216.34"
@@ -864,7 +883,7 @@ def test_node_groups_crud_resolution_and_strategy_expansion(tmp_path, monkeypatc
     assert proxies == {"DIRECT", "🇭🇰 Hong Kong 01", "🇯🇵 Japan 01", "🇺🇸 US 01"}
 
 def test_subscription_details_html_layout() -> None:
-    from tools.clash_subscription_manager.backend.router import _subscription_details_html
+    from tools.airplay_subscription_manager.backend.router import _subscription_details_html
 
     page = _subscription_details_html("token", {
         "name": "visual sub", "ruleSetName": "basic rules", "publishedAt": "2026-01-01T00:00:00+00:00",
@@ -884,7 +903,7 @@ def test_subscription_details_html_layout() -> None:
     assert '发布时间' not in page
     assert '内容校验' not in page
     assert '复制订阅链接' in page
-    assert '下载 Clash YAML' in page
+    assert '下载 AirPlay YAML' in page
     assert '扫码导入 YAML 订阅' not in page
     assert 'data:image/svg+xml;base64,' in page
     assert 'data-copy-node-link' in page

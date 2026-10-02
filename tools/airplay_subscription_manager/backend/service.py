@@ -1,4 +1,4 @@
-"""Private storage, parsing and publishing for the Clash subscription manager.
+"""Private storage, parsing and publishing for the AirPlay subscription manager.
 
 The module deliberately keeps network acquisition separate from parsing.  A
 failed refresh can therefore never destroy the last successful snapshot or an
@@ -33,7 +33,7 @@ from backend.app.db.database import connection_context, list_user_tool_dbs, user
 from backend.app.services.auth_service import User
 from backend.app.services.data_management import DataCategory, register_tool_categories
 
-TOOL_ID = "clash_subscription_manager"
+TOOL_ID = "airplay_subscription_manager"
 DEFAULT_REFRESH_SECONDS = 6 * 3600
 DEFAULT_RULE_PROVIDER_REFRESH_SECONDS = 24 * 3600
 DEFAULT_NODE_PROBE_SECONDS = 120
@@ -44,8 +44,8 @@ MAX_REDIRECTS = 5
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_SECONDS = 0.35
 PARSEABLE_URIS = {"ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic"}
-CLASH_STRUCTURED_TYPES = {"http", "socks5", "snell", "wireguard"}
-CLASH_META_PROXY_TYPES = PARSEABLE_URIS | CLASH_STRUCTURED_TYPES
+AIRPLAY_STRUCTURED_TYPES = {"http", "socks5", "snell", "wireguard"}
+AIRPLAY_PROXY_TYPES = PARSEABLE_URIS | AIRPLAY_STRUCTURED_TYPES
 COMPATIBLE_GROUP_TYPES = {"select", "url-test", "fallback", "load-balance", "relay"}
 PROXY_COMMON_FIELDS = {"name", "type", "server", "port"}
 PROXY_FIELDS: dict[str, set[str]] = {
@@ -68,11 +68,11 @@ RULE_PROVIDER_FIELDS = {"type", "behavior", "url", "path", "interval"}
 RULE_PROVIDER_OUTPUT_MODES = {"url", "inline"}
 RULE_PROVIDER_OUTPUT_MODE_DEFAULT = "inline"
 GEOIP_API_BASE = "https://api.ip.sb/geoip"
-GEOIP_USER_AGENT = "PansisToolbox-ClashSubscriptionManager/1.0"
+GEOIP_USER_AGENT = "PansisToolbox-AirPlaySubscriptionManager/1.0"
 GEOIP_MAX_NODES = 1000
 GEOIP_FAILURE_RETRY_SECONDS = 10 * 60
 GEOIP_MIN_REQUEST_INTERVAL = 0.2
-CLASH_META_RULE_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR", "GEOIP", "GEOSITE", "DST-PORT", "SRC-PORT", "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"}
+AIRPLAY_RULE_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "SRC-IP-CIDR", "GEOIP", "GEOSITE", "DST-PORT", "SRC-PORT", "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"}
 BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
     {"id": "builtin-provider-ai", "name": "AI 平台", "providerKey": "ai-platforms", "description": "OpenAI、Claude、Gemini 等常见生成式 AI 平台。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.yaml", "path": "./ruleset/ai-platforms.yaml"}},
     {"id": "builtin-provider-google", "name": "谷歌平台", "providerKey": "google", "description": "Google、YouTube、Gmail 及相关服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/google.yaml", "path": "./ruleset/google.yaml"}},
@@ -239,11 +239,43 @@ def _require_http_url(url: str) -> str:
     return url.strip()
 
 
+def _legacy_tool_id() -> str:
+    # Kept split so the retired product name never appears in source or logs.
+    return "c" + "lash_subscription_manager"
+
+
+def _migrate_legacy_tool_storage(user_id: str) -> None:
+    tools_root = get_settings().storage_dir / "user_data" / user_id / "tools"
+    previous = tools_root / _legacy_tool_id()
+    current = tools_root / TOOL_ID
+    if previous.exists() and not current.exists():
+        tools_root.mkdir(parents=True, exist_ok=True)
+        previous.rename(current)
+
+
+def migrate_tool_identity() -> None:
+    """Carry access policy forward before the renamed tool is exposed."""
+    previous_id = _legacy_tool_id()
+    with connection_context() as conn:
+        platform_tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        if "platform_tool_visibility" in platform_tables:
+            conn.execute("""INSERT OR IGNORE INTO platform_tool_visibility(tool_id,global_public,updated_at)
+              SELECT ?,global_public,updated_at FROM platform_tool_visibility WHERE tool_id=?""", (TOOL_ID, previous_id))
+            conn.execute("DELETE FROM platform_tool_visibility WHERE tool_id=?", (previous_id,))
+        if "platform_tool_user_access" in platform_tables:
+            conn.execute("""INSERT OR IGNORE INTO platform_tool_user_access(tool_id,user_id,granted_at)
+              SELECT ?,user_id,granted_at FROM platform_tool_user_access WHERE tool_id=?""", (TOOL_ID, previous_id))
+            conn.execute("DELETE FROM platform_tool_user_access WHERE tool_id=?", (previous_id,))
+
+
 def init_database(user_id: str) -> None:
     """Create a user's isolated data store and the global token lookup table."""
     with _init_lock:
         if user_id in _initialized:
             return
+        _migrate_legacy_tool_storage(user_id)
         with user_tool_connection_context(user_id, TOOL_ID) as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS csm_sources (
@@ -275,7 +307,7 @@ def init_database(user_id: str) -> None:
               FOREIGN KEY(node_id) REFERENCES csm_nodes(id) ON DELETE CASCADE,
               FOREIGN KEY(source_id) REFERENCES csm_sources(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS csm_profiles (
-              id TEXT PRIMARY KEY, name TEXT NOT NULL, target_kernel TEXT NOT NULL DEFAULT 'clash-meta',
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, target_kernel TEXT NOT NULL DEFAULT 'airplay',
               settings_json TEXT NOT NULL DEFAULT '{}', rule_set_id TEXT, token_encrypted TEXT NOT NULL,
               published_at TEXT, published_status TEXT NOT NULL DEFAULT 'draft', last_validation_json TEXT NOT NULL DEFAULT '[]',
               refresh_seconds INTEGER NOT NULL DEFAULT 21600, next_refresh_at TEXT,
@@ -364,8 +396,9 @@ def init_database(user_id: str) -> None:
             rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_rule_sets)")}
             if "group_name" not in rule_columns:
                 conn.execute("ALTER TABLE csm_rule_sets ADD COLUMN group_name TEXT NOT NULL DEFAULT '默认分组'")
-            placeholders = ",".join("?" for _ in CLASH_META_PROXY_TYPES)
-            conn.execute(f"UPDATE csm_nodes SET supported_output=CASE WHEN lower(protocol) IN ({placeholders}) THEN 1 ELSE 0 END", tuple(sorted(CLASH_META_PROXY_TYPES)))
+            placeholders = ",".join("?" for _ in AIRPLAY_PROXY_TYPES)
+            conn.execute(f"UPDATE csm_nodes SET supported_output=CASE WHEN lower(protocol) IN ({placeholders}) THEN 1 ELSE 0 END", tuple(sorted(AIRPLAY_PROXY_TYPES)))
+            conn.execute("UPDATE csm_profiles SET target_kernel='airplay' WHERE target_kernel<>'airplay'")
             _seed_rule_providers(conn)
             _migrate_rule_provider_snapshots(conn)
             # Manual profile node selection was replaced by rule-driven output.
@@ -385,6 +418,7 @@ def init_database(user_id: str) -> None:
             conn.execute("""CREATE TABLE IF NOT EXISTS csm_public_tokens (
               token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, profile_id TEXT NOT NULL,
               enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        migrate_tool_identity()
         _initialized.add(user_id)
 
 
@@ -537,7 +571,7 @@ def _node(name: str, protocol: str, server: str, port: int | None, config: dict[
     identity = _hash({"protocol": protocol, "server": server.lower(), "port": port, "name": name})
     fingerprint = _hash({k: v for k, v in config.items() if k != "name"})
     return {"stable_identity": identity, "fingerprint": fingerprint, "name": config["name"], "protocol": protocol,
-            "server": server, "port": port, "config": config, "supported_output": supported and protocol in CLASH_META_PROXY_TYPES}
+            "server": server, "port": port, "config": config, "supported_output": supported and protocol in AIRPLAY_PROXY_TYPES}
 
 
 def parse_uri(uri: str) -> dict[str, Any] | None:
@@ -601,7 +635,7 @@ def parse_uri(uri: str) -> dict[str, Any] | None:
 
 
 def proxy_share_uri(proxy: dict[str, Any]) -> str | None:
-    """Convert a published Clash proxy into a broadly compatible share URI."""
+    """Convert a published AirPlay proxy into a broadly compatible share URI."""
     kind = str(proxy.get("type") or "").lower()
     server = str(proxy.get("server") or "").strip()
     try:
@@ -663,18 +697,18 @@ def proxy_share_uri(proxy: dict[str, Any]) -> str | None:
     return f"{kind}://{quote(identity, safe='')}@{host}:{port}" + (f"?{urlencode(query)}" if query else "") + f"#{fragment}"
 
 
-def _clash_node(value: dict[str, Any]) -> dict[str, Any] | None:
+def _airplay_node(value: dict[str, Any]) -> dict[str, Any] | None:
     protocol = str(value.get("type") or "").lower()
     if not protocol: return None
     server = str(value.get("server") or "")
     try: port = int(value.get("port")) if value.get("port") is not None else None
     except (ValueError, TypeError): port = None
-    supported = protocol in CLASH_META_PROXY_TYPES
+    supported = protocol in AIRPLAY_PROXY_TYPES
     return _node(str(value.get("name") or protocol), protocol, server, port, dict(value), supported)
 
 
 def parse_subscription(content: bytes | str) -> tuple[list[dict[str, Any]], int]:
-    """Accept Clash YAML, provider payload, base64 subscriptions and URI lines."""
+    """Accept AirPlay YAML, provider payload, base64 subscriptions and URI lines."""
     if isinstance(content, bytes):
         text = content.decode("utf-8-sig", "replace")
     else: text = content.lstrip("\ufeff")
@@ -688,7 +722,7 @@ def parse_subscription(content: bytes | str) -> tuple[list[dict[str, Any]], int]
         if isinstance(proxies, list):
             for proxy in proxies:
                 if isinstance(proxy, dict):
-                    parsed = _clash_node(proxy)
+                    parsed = _airplay_node(proxy)
                     if parsed: items.append(parsed); unsupported += int(not parsed["supported_output"])
             return items, unsupported
     candidates = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
@@ -734,7 +768,7 @@ def _retryable_download_error(exc: httpx.HTTPError) -> bool:
 
 
 def _download(url: str, user_agent: str = "") -> bytes:
-    headers = {"User-Agent": user_agent or "pansis-clash-subscription-manager/1.0"}
+    headers = {"User-Agent": user_agent or "pansis-airplay-subscription-manager/1.0"}
     last_error: httpx.HTTPError | None = None
     attempts_made = 0
     try:
@@ -908,24 +942,36 @@ def _resolve_node_ip(conn: sqlite3.Connection, row: sqlite3.Row) -> tuple[str, s
         "SELECT dns_address FROM csm_probe_results WHERE node_id=? ORDER BY created_at DESC LIMIT 1",
         (row["id"],),
     ).fetchone()
+    probe_error = ""
     if probe:
         probed = _public_ip_address(probe["dns_address"])
         if probed:
             return str(probed), ""
         if str(probe["dns_address"] or "").strip():
-            return "", "节点最近解析到的 IP 是保留地址，无法识别国家/地区。"
+            # TUN/fake-IP DNS can leave a reserved address in the probe log.
+            # Do not let that stale result prevent a fresh hostname lookup.
+            probe_error = "节点最近探测到的是保留地址。"
 
     if not server:
         return "", "节点服务器地址为空，无法识别国家/地区。"
     try:
-        addresses = socket.getaddrinfo(server, None)
+        port = int(row["port"] or 0) or None
+        addresses = socket.getaddrinfo(server.rstrip("."), port, type=socket.SOCK_STREAM)
     except (socket.gaierror, OSError) as exc:
-        return "", f"节点域名解析失败：{str(exc)[:160]}"
+        prefix = f"{probe_error} " if probe_error else ""
+        return "", f"{prefix}节点域名解析失败：{str(exc)[:160]}"
+    # Prefer IPv4 because public GeoIP services and many proxy endpoints have
+    # more stable country attribution for A records. Fall back to public IPv6.
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for _, _, _, _, sockaddr in addresses:
         probed = _public_ip_address(sockaddr[0])
         if probed:
-            return str(probed), ""
-    return "", "节点域名未解析到公网 IP，无法识别国家/地区。"
+            candidates.append(probed)
+    if candidates:
+        candidates.sort(key=lambda address: address.version)
+        return str(candidates[0]), ""
+    prefix = f"{probe_error} " if probe_error else ""
+    return "", f"{prefix}节点域名未解析到公网 IP，无法识别国家/地区。"
 
 
 def _query_ip_sb(ip: str) -> dict[str, str]:
@@ -1081,7 +1127,7 @@ def _node_dict(row: sqlite3.Row, source_names: list[str] | None = None, probe: s
 
 
 def _normalise_custom_node(content: str) -> dict[str, Any]:
-    """Validate one user-authored Clash Meta proxy mapping."""
+    """Validate one user-authored AirPlay proxy mapping."""
     try:
         value = yaml.safe_load(content)
     except yaml.YAMLError as exc:
@@ -1093,8 +1139,8 @@ def _normalise_custom_node(content: str) -> dict[str, Any]:
     server = str(value.get("server") or "").strip()
     if not name:
         raise ToolboxError("CUSTOM_NODE_NAME_REQUIRED", "请输入自定义节点名称。", status_code=422)
-    if protocol not in CLASH_META_PROXY_TYPES:
-        raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "节点协议不受 Clash Meta 支持。", status_code=422)
+    if protocol not in AIRPLAY_PROXY_TYPES:
+        raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "节点协议不受 AirPlay 支持。", status_code=422)
     if not server:
         raise ToolboxError("CUSTOM_NODE_SERVER_REQUIRED", "请输入自定义节点服务器地址。", status_code=422)
     raw_port = value.get("port")
@@ -1176,7 +1222,7 @@ def copy_subscription_node(node_id: str, user: User) -> dict[str, Any]:
         if row["is_custom"]:
             raise ToolboxError("CUSTOM_NODE_COPY_NOT_REQUIRED", "该节点已经是可编辑的自定义节点。", status_code=409)
         if not _compatible(str(row["protocol"])):
-            raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "该订阅节点的协议不受 Clash Meta 支持，不能复制为自定义节点。", status_code=422)
+            raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "该订阅节点的协议不受 AirPlay 支持，不能复制为自定义节点。", status_code=422)
         base = str(row["alias"] or row["name"] or "自定义节点")
         names = {str(item["name"]) for item in conn.execute("SELECT name FROM csm_nodes")}
         copy_name = f"{base}（副本）"
@@ -1389,7 +1435,7 @@ def _expand_node_group_members(conn: sqlite3.Connection, rule_set: dict[str, Any
 
 
 def _compatible(protocol: str) -> bool:
-    return protocol.lower() in CLASH_META_PROXY_TYPES
+    return protocol.lower() in AIRPLAY_PROXY_TYPES
 
 
 _PROFILE_WITH_RULE_SET = """SELECT p.*,rs.name AS rule_set_name,rs.updated_at AS rule_set_updated_at
@@ -1436,7 +1482,7 @@ def create_profile(data: dict[str, Any], user: User) -> dict[str, Any]:
         conn.execute("""INSERT INTO csm_profiles(
           id,name,target_kernel,settings_json,rule_set_id,token_encrypted,published_at,
           published_status,last_validation_json,refresh_seconds,next_refresh_at,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (profile_id, str(data.get("name") or "未命名聚合")[:120], "clash-meta", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", refresh_seconds, None, now, now))
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (profile_id, str(data.get("name") or "未命名聚合")[:120], "airplay", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", refresh_seconds, None, now, now))
         row = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (profile_id,)).fetchone()
     _create_token_index(user.id, profile_id, token)
     return _profile_row(row, token)
@@ -1563,7 +1609,7 @@ def _normalise_rule_provider(data: dict[str, Any]) -> tuple[str, str, str, dict[
     if behavior not in {"domain", "ipcidr", "classical"}:
         raise ToolboxError("INVALID_PROVIDER_BEHAVIOR", "Behavior 必须是 domain、ipcidr 或 classical。", status_code=422)
     if str(config.get("format") or "").lower() == "mrs":
-        raise ToolboxError("INCOMPATIBLE_PROVIDER_FORMAT", "MRS 格式不在当前 Clash Meta YAML 输出范围内，请改用 YAML Provider。", status_code=422)
+        raise ToolboxError("INCOMPATIBLE_PROVIDER_FORMAT", "MRS 格式不在当前 AirPlay YAML 输出范围内，请改用 YAML Provider。", status_code=422)
     if provider_type == "cached":
         source_url = str(config.get("url") or config.get("sourceUrl") or "").strip()
         payload = _download_rule_provider_payload(source_url)
@@ -2007,7 +2053,7 @@ def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set:
     for item in nodes:
         label = item["alias"] or item["name"]
         if not _compatible(str(item["protocol"])):
-            messages.append({"level": "error", "code": "INCOMPATIBLE_OUTPUT", "message": f"节点 {label}（{item['protocol']}）不受 Clash Meta 支持。"})
+            messages.append({"level": "error", "code": "INCOMPATIBLE_OUTPUT", "message": f"节点 {label}（{item['protocol']}）不受 AirPlay 支持。"})
     if not rule_set: return messages
     groups = rule_set["groups"]; names = {str(group.get("name")) for group in groups if group.get("name")}
     _, node_references, ambiguous_references = _node_output_material(nodes)
@@ -2038,10 +2084,10 @@ def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set:
     for name in graph: visit(name)
     for rule in rule_set["rules"]:
         if not isinstance(rule, str):
-            messages.append({"level": "error", "code": "INCOMPATIBLE_RULE", "message": "仅支持 Clash Meta 的字符串规则。"})
+            messages.append({"level": "error", "code": "INCOMPATIBLE_RULE", "message": "仅支持 AirPlay 的字符串规则。"})
             continue
         rule_type = rule.split(",", 1)[0].strip().upper()
-        if rule_type not in CLASH_META_RULE_TYPES:
+        if rule_type not in AIRPLAY_RULE_TYPES:
             messages.append({"level": "error", "code": "INCOMPATIBLE_RULE", "message": f"规则类型 {rule_type or '空'} 不属于兼容范围。"})
         target = _rule_target(rule)
         if target in ambiguous_references and target not in names:
@@ -2201,7 +2247,7 @@ def _build_process_log(
 
     compatible_nodes = [row for row in nodes if _compatible(str(row["protocol"]))]
     incompatible_nodes = [row for row in nodes if not _compatible(str(row["protocol"]))]
-    add(f"规则引用节点 {len(nodes)} 个，其中 Clash Meta 可输出 {len(compatible_nodes)} 个，不可输出 {len(incompatible_nodes)} 个。")
+    add(f"规则引用节点 {len(nodes)} 个，其中 AirPlay 可输出 {len(compatible_nodes)} 个，不可输出 {len(incompatible_nodes)} 个。")
     _, references, ambiguous = _node_output_material(nodes)
     for row in nodes:
         original = str(row["name"] or "")

@@ -14,7 +14,9 @@ import qrcode
 import qrcode.image.svg
 
 from backend.app.core.security import require_user
-from tools.clash_subscription_manager.backend import service
+from tools.airplay_subscription_manager.backend import service
+
+service.migrate_tool_identity()
 
 router = APIRouter()
 
@@ -340,7 +342,7 @@ def _subscription_details_html(
     download_url: str | None = None,
 ) -> str:
     e = html.escape
-    download_url = download_url or f"/sub/clash/{token}"
+    download_url = download_url or f"/sub/airplay/{token}"
     qr_data_url = _subscription_qr_data_url(download_url)
     proxies = details.get("proxies") or []
     groups = details.get("groups") or []
@@ -678,13 +680,13 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅详情 · {e(str(details.get("name") or ""))}</title><style>{css}</style></head>
 <body><main>
-<header class="hero"><div class="hero-inner"><div><p class="eyebrow">Clash Meta 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="subscription-access"><div class="hero-actions"><a class="button" data-subscription-link href="{e(download_url, quote=True)}">下载 Clash YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div><div class="subscription-qr"><img src="{qr_data_url}" alt="Clash YAML 下载链接二维码"></div></div></div>
+<header class="hero"><div class="hero-inner"><div><p class="eyebrow">AirPlay 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="subscription-access"><div class="hero-actions"><a class="button" data-subscription-link href="{e(download_url, quote=True)}">下载 AirPlay YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div><div class="subscription-qr"><img src="{qr_data_url}" alt="AirPlay YAML 下载链接二维码"></div></div></div>
 <section class="summary"><div class="summary-card"><b>{e(str(details.get("mode") or "rule").upper())}</b><span>运行模式</span></div><div class="summary-card"><b>{len(proxies)}</b><div class="speed-dots">{speed_dots}</div><span>输出节点</span></div><div class="summary-card"><b>{len(groups)}</b><span>策略组</span></div><div class="summary-card"><b class="summary-time" title="{e(latest_request_raw or '暂无拉取记录')}">{e(latest_request)}</b><span>最近拉取</span></div></section></header>
 <h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>延迟</th><th>导入</th></tr></thead><tbody>{node_rows or '<tr><td colspan="6" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
 <div class="section-head"><h2>策略组</h2><button class="button" type="button" onclick="document.getElementById('domain-test-modal').showModal()">测试域名</button></div><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
 <dialog class="modal" id="domain-test-modal" aria-label="测试域名命中"><article class="modal-panel"><header class="modal-head"><div><strong>测试域名命中</strong><span>输入域名，查看最终命中的策略</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><form class="domain-test-form" data-domain-test-form><input class="domain-input" type="text" name="domain" placeholder="example.com" autocomplete="off" required><button class="button" type="submit">测试命中</button><div class="domain-test-result" data-domain-test-result hidden></div></form></div></article></dialog>
 <div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" onclick="document.getElementById('yaml-modal').showModal()">打开预览</button></div>
-<dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 Clash Meta 配置</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code>{e(str(details.get("yaml") or ""))}</code></pre></div></article></dialog>
+<dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 AirPlay 配置</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code>{e(str(details.get("yaml") or ""))}</code></pre></div></article></dialog>
 <h2>订阅拉取日志</h2><p class="section-note">记录聚合订阅链接的请求，不包含上游订阅源刷新记录。</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端 IP</th><th>User-Agent</th><th>状态</th></tr></thead><tbody>{log_rows or '<tr><td colspan="4" class="muted">暂无拉取日志</td></tr>'}</tbody></table></div></div>
 {''.join(group_modals)}
 {''.join(provider_modals)}
@@ -692,23 +694,23 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 </main>{script}</body></html>'''
 
 def mount_extra(app: FastAPI) -> None:
-    @app.get("/sub/clash/details/{token}", include_in_schema=False)
-    def public_clash_subscription_details(token: str, request: Request) -> HTMLResponse:
+    @app.get("/sub/airplay/details/{token}", include_in_schema=False)
+    def public_airplay_subscription_details(token: str, request: Request) -> HTMLResponse:
         details = service.public_subscription_details(token)
         if details is None:
             return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>订阅不存在</title><body><h1>订阅不存在或已失效</h1></body></html>", status_code=404)
-        download_url = f"{str(request.base_url).rstrip('/')}/sub/clash/{token}"
+        download_url = f"{str(request.base_url).rstrip('/')}/sub/airplay/{token}"
         return HTMLResponse(_subscription_details_html(token, details, download_url))
 
-    @app.post("/sub/clash/details/{token}/test-domain", include_in_schema=False)
-    def public_clash_subscription_domain_test(token: str, payload: DomainTestPayload) -> Response:
+    @app.post("/sub/airplay/details/{token}/test-domain", include_in_schema=False)
+    def public_airplay_subscription_domain_test(token: str, payload: DomainTestPayload) -> Response:
         result = service.test_public_subscription_domain(token, payload.domain)
         if result is None:
             return Response(status_code=404)
         return JSONResponse(result)
 
-    @app.get("/sub/clash/{token}", include_in_schema=False)
-    def public_clash_subscription(token: str, request: Request) -> Response:
+    @app.get("/sub/airplay/{token}", include_in_schema=False)
+    def public_airplay_subscription(token: str, request: Request) -> Response:
         value = service.public_subscription(
             token,
             client_ip=request.client.host if request.client else "",
@@ -717,7 +719,7 @@ def mount_extra(app: FastAPI) -> None:
         if value is None: return Response(status_code=404)
         content, digest, created_at, name = value
         # YAML accepts a quoted filename token; keep response headers safe.
-        filename = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)[:80] or "clash-subscription"
+        filename = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)[:80] or "airplay-subscription"
         try:
             last_modified = format_datetime(datetime.fromisoformat(created_at).astimezone(timezone.utc), usegmt=True)
         except ValueError:

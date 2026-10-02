@@ -113,6 +113,8 @@ type Profile = {
   publishedStatus: string;
   validation: ValidationMessage[];
   subscriptionToken?: string;
+  passwordRequired: boolean;
+  publicAccessUntil?: string | null;
   refreshSeconds: number;
   nextRefreshAt?: string | null;
   updatedAt?: string;
@@ -2402,6 +2404,9 @@ function ProfilesView({
                 <tr key={profile.id}>
                   <td>
                     <strong>{profile.name}</strong>
+                    <small className="csm-muted">
+                      {profile.passwordRequired ? "密码保护" : "无需密码"}
+                    </small>
                     {errors > 0 && (
                       <small className="csm-cell-error">
                         {errors} 个校验问题
@@ -3921,6 +3926,10 @@ function ProfileModal({
     ...(profile?.settings ?? {}),
   });
   const [saving, setSaving] = useState(false);
+  const [passwordRequired, setPasswordRequired] = useState(
+    profile?.passwordRequired ?? true,
+  );
+  const [accessPassword, setAccessPassword] = useState("");
   const [error, setError] = useState("");
   const [diagnostic, setDiagnostic] = useState<ProfilePreview | null>(null);
 
@@ -3931,6 +3940,14 @@ function ProfileModal({
     }
     if (!ruleSetId) {
       setError("请选择规则组；输出节点将由规则组决定。");
+      return;
+    }
+    if (
+      passwordRequired &&
+      !profile?.passwordRequired &&
+      accessPassword.length < 4
+    ) {
+      setError("请设置至少 4 个字符的访问密码。");
       return;
     }
     setSaving(true);
@@ -3945,6 +3962,8 @@ function ProfileModal({
           mode: "rule",
         },
         ruleSetId,
+        passwordRequired,
+        accessPassword,
       };
       saved = profile
         ? (
@@ -4096,6 +4115,36 @@ function ProfileModal({
               />
               启用 IPv6
             </label>
+          </div>
+        </Field>
+        <Field label="访问保护" full>
+          <div className="csm-profile-access-editor">
+            <label className="csm-check">
+              <input
+                type="checkbox"
+                checked={passwordRequired}
+                onChange={(event) => {
+                  setPasswordRequired(event.target.checked);
+                  if (!event.target.checked) setAccessPassword("");
+                }}
+              />
+              启用访问密码
+            </label>
+            {passwordRequired && (
+              <input
+                className="csm-input"
+                type="password"
+                minLength={4}
+                maxLength={128}
+                autoComplete="new-password"
+                value={accessPassword}
+                onChange={(event) => setAccessPassword(event.target.value)}
+                placeholder={profile?.passwordRequired ? "留空则保持现有密码" : "设置访问密码（至少 4 个字符）"}
+              />
+            )}
+            <small className="csm-muted">
+              启用后，可视化页面需要密码；YAML 下载仅能从页面临时开放 5 分钟。不启用时保持直接访问。
+            </small>
           </div>
         </Field>
         <div className="csm-full-col">

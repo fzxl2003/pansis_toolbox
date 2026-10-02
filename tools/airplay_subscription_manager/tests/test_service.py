@@ -113,10 +113,25 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
         "providers": {},
         "importMeta": {"providerBindings": {"PROXY": [provider["id"]]}},
     }, user)
-    profile = service.create_profile({"name": "my sub", "ruleSetId": rule_set["id"]}, user)
+    with pytest.raises(ToolboxError, match="访问密码"):
+        service.create_profile({"name": "missing password", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({
+        "name": "my sub", "ruleSetId": rule_set["id"],
+        "passwordRequired": True, "accessPassword": "secret-pass",
+    }, user)
+    assert profile["passwordRequired"] is True
     assert profile["ruleSetName"] == "basic rules"
     assert "targetKernel" not in profile
     published = service.publish_profile(profile["id"], user)
+    assert service.public_subscription(published["subscriptionToken"]) is None
+    assert service.authenticate_public_profile(published["subscriptionToken"], "wrong-password") is None
+    view_session = service.authenticate_public_profile(published["subscriptionToken"], "secret-pass")
+    assert view_session
+    assert service.public_profile_session_valid(published["subscriptionToken"], view_session)
+    access = service.public_profile_access(published["subscriptionToken"])
+    assert access and access["passwordRequired"] is True and access["publicAccessOpen"] is False
+    assert service.open_public_subscription(published["subscriptionToken"])
+    assert service.public_profile_access(published["subscriptionToken"])["publicAccessOpen"] is True
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         node_row = conn.execute("SELECT id FROM csm_nodes WHERE name=?", (node["name"],)).fetchone()
         now = service._now()
@@ -175,7 +190,7 @@ def test_public_details_returns_scheduled_http_rule_provider_snapshot(tmp_path, 
         "providers": {},
         "importMeta": {"providerBindings": {"PROXY": [provider["id"]]}},
     }, user)
-    profile = service.create_profile({"name": "public provider sub", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "public provider sub", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
     published = service.publish_profile(profile["id"], user)
 
     # Public visualization is served entirely from the persisted snapshot.
@@ -252,7 +267,7 @@ def test_rule_set_and_public_domain_matching_use_local_snapshots(tmp_path, monke
     assert fallback["target"] == "DIRECT"
     assert fallback["rule"] == "MATCH,DIRECT"
 
-    profile = service.create_profile({"name": "domain sub", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "domain sub", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
     published = service.publish_profile(profile["id"], user)
 
     def fail_download(url: str) -> list[str]:
@@ -294,7 +309,7 @@ def test_airplay_output_rejects_unknown_node(tmp_path, monkeypatch) -> None:
         "rules": ["MATCH,PROXY"],
         "providers": {},
     }, user)
-    profile = service.create_profile({"name": "compatible", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "compatible", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
     result = service.validate_profile(profile["id"], user)
     assert not result["valid"]
     assert any(message["code"] == "INCOMPATIBLE_OUTPUT" for message in result["messages"])
@@ -359,6 +374,7 @@ def test_profile_output_is_rule_driven_and_keeps_only_current_snapshot(tmp_path,
     profile = service.create_profile({
         "name": "rule driven",
         "ruleSetId": rule_set["id"],
+        "passwordRequired": False,
         "settings": {"mode": "global"},
     }, user)
     published = service.publish_profile(profile["id"], user)
@@ -426,7 +442,7 @@ def test_node_alias_and_original_name_resolve_in_rule_material(tmp_path, monkeyp
         "providers": {},
     }, user)
     assert "groupName" not in rule_set
-    profile = service.create_profile({"name": "alias profile", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "alias profile", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
 
     validation = service.validate_profile(profile["id"], user)
     assert validation["valid"]
@@ -583,7 +599,7 @@ def test_rule_set_provider_bindings_are_resolved_live_without_snapshot(tmp_path,
     }, user)
     assert rule_set["providers"] == {}
 
-    profile = service.create_profile({"name": "动态配置", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "动态配置", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
     first_preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
     assert "rule-providers" not in first_preview
     assert first_preview["rules"] == ["DOMAIN,example.com,AI", "MATCH,AI"]
@@ -633,7 +649,7 @@ def test_profile_rule_provider_output_mode_controls_inline_expansion(tmp_path, m
         "providers": {},
         "importMeta": {"providerBindings": {"AI": [provider["id"]]}, "strategyGroupEditor": True},
     }, user)
-    profile = service.create_profile({"name": "内联配置", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "内联配置", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
     assert profile["settings"]["ruleProviderOutputMode"] == "inline"
 
     inline_preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
@@ -933,7 +949,7 @@ def test_node_groups_crud_resolution_and_strategy_expansion(tmp_path, monkeypatc
         "rules": ["MATCH,PROXY"],
         "providers": {},
     }, user)
-    profile = service.create_profile({"name": "grouped profile", "ruleSetId": rule_set["id"]}, user)
+    profile = service.create_profile({"name": "grouped profile", "ruleSetId": rule_set["id"], "passwordRequired": False}, user)
     preview = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
     proxies = set(preview["proxy-groups"][0]["proxies"])
     assert proxies == {"DIRECT", "🇭🇰 Hong Kong 01", "🇯🇵 Japan 01", "🇺🇸 US 01"}
@@ -974,6 +990,38 @@ def test_subscription_details_html_layout() -> None:
     assert "example.com" in page
     assert "Rule Provider" not in page
     assert "<h2>规则</h2>" not in page
+    protected_page = _subscription_details_html(
+        "token",
+        {"name": "protected", "proxies": [], "groups": [], "requestRuns": []},
+        access={"passwordRequired": True, "publicAccessOpen": False},
+    )
+    assert "data-open-public-access" in protected_page
+    assert 'data-subscription-link href="/sub/airplay/token" aria-disabled="true"' in protected_page
+    open_page = _subscription_details_html(
+        "token",
+        {"name": "protected", "proxies": [], "groups": [], "requestRuns": []},
+        access={
+            "passwordRequired": True,
+            "publicAccessOpen": True,
+            "publicAccessUntil": "2026-10-02T10:05:00+00:00",
+        },
+    )
+    assert 'data-access-until="2026-10-02T10:05:00+00:00"' in open_page
+    assert 'textContent = "剩余 "' in open_page
+
+
+def test_closed_public_download_has_empty_response(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from tools.airplay_subscription_manager.backend.router import mount_extra
+
+    monkeypatch.setattr(service, "public_subscription", lambda *_args, **_kwargs: None)
+    app = FastAPI()
+    mount_extra(app)
+    response = TestClient(app).get("/sub/airplay/private-token")
+
+    assert response.status_code == 404
+    assert response.content == b""
 
 
 def test_external_base_url_honours_https_reverse_proxy() -> None:

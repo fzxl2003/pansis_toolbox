@@ -30,7 +30,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import connection_context, list_user_tool_dbs, user_tool_connection_context
-from backend.app.services.auth_service import User
+from backend.app.services.auth_service import User, hash_password, verify_password
 from backend.app.services.data_management import DataCategory, register_tool_categories
 
 TOOL_ID = "airplay_subscription_manager"
@@ -310,6 +310,8 @@ def init_database(user_id: str) -> None:
             CREATE TABLE IF NOT EXISTS csm_profiles (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, target_kernel TEXT NOT NULL DEFAULT 'airplay',
               settings_json TEXT NOT NULL DEFAULT '{}', rule_set_id TEXT, token_encrypted TEXT NOT NULL,
+              access_password_salt TEXT NOT NULL DEFAULT '', access_password_hash TEXT NOT NULL DEFAULT '',
+              public_access_until TEXT,
               published_at TEXT, published_status TEXT NOT NULL DEFAULT 'draft', last_validation_json TEXT NOT NULL DEFAULT '[]',
               refresh_seconds INTEGER NOT NULL DEFAULT 21600, next_refresh_at TEXT,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -379,6 +381,13 @@ def init_database(user_id: str) -> None:
                 conn.execute("ALTER TABLE csm_profiles ADD COLUMN refresh_seconds INTEGER NOT NULL DEFAULT 21600")
             if "next_refresh_at" not in profile_columns:
                 conn.execute("ALTER TABLE csm_profiles ADD COLUMN next_refresh_at TEXT")
+            for column, definition in (
+                ("access_password_salt", "TEXT NOT NULL DEFAULT ''"),
+                ("access_password_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("public_access_until", "TEXT"),
+            ):
+                if column not in profile_columns:
+                    conn.execute(f"ALTER TABLE csm_profiles ADD COLUMN {column} {definition}")
             # Migrate legacy pools that could contain multiple subscription
             # nodes with the same name. Keep the newest material; aliases are
             # annotations and do not affect this identity rule.
@@ -1485,6 +1494,8 @@ def _profile_row(row: sqlite3.Row, public_token: str | None = None) -> dict[str,
         "ruleSetName": row["rule_set_name"] if "rule_set_name" in keys else None,
         "ruleSetUpdatedAt": row["rule_set_updated_at"] if "rule_set_updated_at" in keys else None,
         "publishedAt": row["published_at"], "publishedStatus": row["published_status"],
+        "passwordRequired": bool(row["access_password_hash"]),
+        "publicAccessUntil": row["public_access_until"],
         "validation": _loads(row["last_validation_json"], []), "subscriptionToken": public_token,
         "createdAt": row["created_at"], "updatedAt": row["updated_at"], "refreshSeconds": row["refresh_seconds"], "nextRefreshAt": row["next_refresh_at"],
     }
@@ -1513,11 +1524,18 @@ def _profile_settings(value: Any) -> dict[str, Any]:
 def create_profile(data: dict[str, Any], user: User) -> dict[str, Any]:
     init_database(user.id); profile_id, token, now = _id(), secrets.token_urlsafe(32), _now()
     refresh_seconds = max(60, min(7 * 86400, int(data.get("refreshSeconds") or auto_update_settings(user)["profileRefreshSeconds"])))
+    password_required = bool(data.get("passwordRequired", True))
+    password = str(data.get("accessPassword") or "")
+    if password_required and not 4 <= len(password) <= 128:
+        raise ToolboxError("PROFILE_PASSWORD_REQUIRED", "访问密码长度必须为 4 到 128 个字符。", status_code=422)
+    password_salt = secrets.token_hex(16) if password_required else ""
+    password_digest = hash_password(password, password_salt) if password_required else ""
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
         conn.execute("""INSERT INTO csm_profiles(
           id,name,target_kernel,settings_json,rule_set_id,token_encrypted,published_at,
-          published_status,last_validation_json,refresh_seconds,next_refresh_at,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (profile_id, str(data.get("name") or "未命名聚合")[:120], "airplay", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", refresh_seconds, None, now, now))
+          published_status,last_validation_json,refresh_seconds,next_refresh_at,created_at,updated_at,
+          access_password_salt,access_password_hash,public_access_until)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (profile_id, str(data.get("name") or "未命名聚合")[:120], "airplay", _json(_profile_settings(data.get("settings"))), data.get("ruleSetId"), _encrypt(token), None, "draft", "[]", refresh_seconds, None, now, now, password_salt, password_digest, None))
         row = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (profile_id,)).fetchone()
     _create_token_index(user.id, profile_id, token)
     return _profile_row(row, token)
@@ -1533,6 +1551,18 @@ def update_profile(profile_id: str, data: dict[str, Any], user: User) -> dict[st
         for inbound, column in allowed.items():
             if inbound in data: changed[column] = data[inbound]
         if "settings" in data: changed["settings_json"] = _json(_profile_settings(data["settings"]))
+        if "passwordRequired" in data:
+            password_required = bool(data["passwordRequired"])
+            password = str(data.get("accessPassword") or "")
+            if password_required and not row["access_password_hash"] and not 4 <= len(password) <= 128:
+                raise ToolboxError("PROFILE_PASSWORD_REQUIRED", "启用密码访问时，请设置 4 到 128 个字符的密码。", status_code=422)
+            if password_required and password:
+                if not 4 <= len(password) <= 128:
+                    raise ToolboxError("INVALID_PROFILE_PASSWORD", "访问密码长度必须为 4 到 128 个字符。", status_code=422)
+                salt = secrets.token_hex(16)
+                changed.update({"access_password_salt": salt, "access_password_hash": hash_password(password, salt), "public_access_until": None})
+            elif not password_required:
+                changed.update({"access_password_salt": "", "access_password_hash": "", "public_access_until": None})
         if changed:
             sql = ",".join(f"{key}=?" for key in changed)
             conn.execute(f"UPDATE csm_profiles SET {sql},updated_at=? WHERE id=?", (*changed.values(), _now(), profile_id))
@@ -2414,6 +2444,104 @@ def _create_published_snapshot(conn: sqlite3.Connection, profile_id: str, conten
     conn.execute("INSERT INTO csm_published_snapshots VALUES(?,?,?,?,?)", (_id(), profile_id, _encrypt(content), hashlib.sha256(content.encode()).hexdigest(), now))
 
 
+def _public_profile_location(token: str) -> tuple[str, str] | None:
+    if not token or len(token) > 300:
+        return None
+    with connection_context() as conn:
+        row = conn.execute(
+            "SELECT user_id,profile_id FROM csm_public_tokens WHERE token_hash=? AND enabled=1",
+            (_token_hash(token),),
+        ).fetchone()
+    return (str(row["user_id"]), str(row["profile_id"])) if row else None
+
+
+def _public_access_is_open(value: str | None) -> bool:
+    deadline = _parse_utc(value)
+    return bool(deadline and deadline > datetime.now(timezone.utc))
+
+
+def public_profile_access(token: str) -> dict[str, Any] | None:
+    location = _public_profile_location(token)
+    if not location:
+        return None
+    user_id, profile_id = location
+    init_database(user_id)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        row = conn.execute(
+            "SELECT access_password_hash,public_access_until FROM csm_profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
+    if not row:
+        return None
+    required = bool(row["access_password_hash"])
+    return {
+        "profileId": profile_id,
+        "passwordRequired": required,
+        "publicAccessUntil": row["public_access_until"],
+        "publicAccessOpen": not required or _public_access_is_open(row["public_access_until"]),
+    }
+
+
+def authenticate_public_profile(token: str, password: str) -> str | None:
+    location = _public_profile_location(token)
+    if not location:
+        return None
+    user_id, profile_id = location
+    init_database(user_id)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        row = conn.execute(
+            "SELECT access_password_salt,access_password_hash FROM csm_profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
+    if not row or not row["access_password_hash"]:
+        return None
+    if not verify_password(str(password), str(row["access_password_salt"]), str(row["access_password_hash"])):
+        return None
+    payload = {
+        "tokenHash": _token_hash(token),
+        "passwordHash": str(row["access_password_hash"]),
+        "expiresAt": int(time.time()) + 12 * 3600,
+    }
+    return _encrypt(_json(payload))
+
+
+def public_profile_session_valid(token: str, session_token: str | None) -> bool:
+    if not session_token:
+        return False
+    location = _public_profile_location(token)
+    if not location:
+        return False
+    try:
+        payload = _loads(_decrypt(session_token), {})
+    except ToolboxError:
+        return False
+    if (str(payload.get("tokenHash") or "") != _token_hash(token)
+            or int(payload.get("expiresAt") or 0) <= int(time.time())):
+        return False
+    user_id, profile_id = location
+    init_database(user_id)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        row = conn.execute("SELECT access_password_hash FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
+    return bool(row and row["access_password_hash"] and secrets.compare_digest(
+        str(payload.get("passwordHash") or ""), str(row["access_password_hash"])
+    ))
+
+
+def open_public_subscription(token: str, seconds: int = 300) -> str | None:
+    location = _public_profile_location(token)
+    if not location:
+        return None
+    user_id, profile_id = location
+    init_database(user_id)
+    deadline = datetime.fromtimestamp(time.time() + max(1, min(seconds, 300)), timezone.utc).isoformat()
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        row = conn.execute("SELECT access_password_hash FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
+        if not row or not row["access_password_hash"]:
+            return None
+        conn.execute("UPDATE csm_profiles SET public_access_until=? WHERE id=?", (deadline, profile_id))
+    return deadline
+
+
 def public_subscription(
     token: str, *, client_ip: str = "", user_agent: str = ""
 ) -> tuple[str, str, str, str] | None:
@@ -2425,9 +2553,14 @@ def public_subscription(
     try:
         init_database(index["user_id"])
         with user_tool_connection_context(index["user_id"], TOOL_ID) as conn:
-            profile = conn.execute("SELECT name FROM csm_profiles WHERE id=?", (index["profile_id"],)).fetchone()
+            profile = conn.execute(
+                "SELECT name,access_password_hash,public_access_until FROM csm_profiles WHERE id=?",
+                (index["profile_id"],),
+            ).fetchone()
             snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
             if not profile or not snapshot: return None
+            if profile["access_password_hash"] and not _public_access_is_open(profile["public_access_until"]):
+                return None
             content = _normalise_published_content(_decrypt(snapshot["content_encrypted"]))
             content_hash = hashlib.sha256(content.encode()).hexdigest()
             try:

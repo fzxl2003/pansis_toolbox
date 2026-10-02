@@ -253,6 +253,8 @@
 .csm-country-options > button small { flex: 0 0 auto; color: #64748b; font: 11px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .csm-country-options > button.active small { color: #4f46e5; }
 .csm-country-options > .csm-muted { margin: 0; padding: 22px 12px; text-align: center; }
+.csm-profile-access-editor { display: grid; gap: 9px; }
+.csm-profile-access-editor > .csm-check { min-height: 24px; }
 .csm-node-group .csm-node-probe-col { width: 142px; max-width: 142px; }
 .csm-node-group .csm-node-actions-col { width: 1%; white-space: nowrap; }
 .csm-node-group .csm-node-actions-col .csm-actions { flex-wrap: nowrap; }

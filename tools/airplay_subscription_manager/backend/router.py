@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import base64
+import hashlib
 import html
 from io import BytesIO
 from email.utils import format_datetime
@@ -42,12 +43,16 @@ class ProfilePayload(BaseModel):
     name: str = "未命名聚合"
     settings: dict[str, Any] = {}
     ruleSetId: str | None = None
+    passwordRequired: bool = True
+    accessPassword: str = Field(default="", max_length=128)
 
 
 class ProfilePatch(BaseModel):
     name: str | None = None
     settings: dict[str, Any] | None = None
     ruleSetId: str | None = None
+    passwordRequired: bool | None = None
+    accessPassword: str | None = Field(default=None, max_length=128)
 
 
 class AutoUpdateSettingsPayload(BaseModel):
@@ -117,6 +122,10 @@ class NodeGroupPayload(BaseModel):
 
 class DomainTestPayload(BaseModel):
     domain: str = Field(min_length=1, max_length=300)
+
+
+class PublicPasswordPayload(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
 
 
 @router.get("/dashboard")
@@ -373,10 +382,45 @@ def _external_base_url(request: Request) -> str:
     return urlunsplit((scheme, host, parts.path.rstrip("/"), "", ""))
 
 
+def _public_view_cookie_name(token: str) -> str:
+    return f"airplay_view_{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+
+
+def _password_gate_html() -> str:
+    return '''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>访问验证</title><style>
+:root{font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:#111827;background:#f5f7fb}
+*{box-sizing:border-box}body{min-height:100vh;margin:0;display:grid;place-items:center;padding:20px}
+.gate{width:min(400px,100%);padding:28px;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 18px 50px rgba(15,23,42,.1)}
+h1{margin:0 0 8px;font-size:22px}p{margin:0 0 20px;color:#64748b;font-size:13px;line-height:1.6}
+form{display:grid;gap:12px}input,button{width:100%;min-height:42px;padding:9px 12px;border-radius:8px;font:inherit}
+input{border:1px solid #cbd5e1;outline:0}input:focus{border-color:#818cf8;box-shadow:0 0 0 3px rgba(99,102,241,.12)}
+button{border:0;color:#fff;background:#4f46e5;font-weight:700;cursor:pointer}button:disabled{opacity:.65;cursor:wait}
+.error{min-height:20px;margin:0;color:#b91c1c;font-size:12px}
+@media(prefers-color-scheme:dark){:root{color:#e5e7eb;background:#080d19}.gate{border-color:#28324a;background:#111827}input{color:#e5e7eb;border-color:#475569;background:#0f172a}}
+</style></head><body><main class="gate"><h1>需要访问密码</h1><p>请输入密码后继续。</p>
+<form><input name="password" type="password" autocomplete="current-password" placeholder="访问密码" required autofocus>
+<button type="submit">验证并进入</button><p class="error" role="alert"></p></form></main>
+<script>(function(){var form=document.querySelector("form"),button=form.querySelector("button"),error=document.querySelector(".error");
+form.addEventListener("submit",function(event){event.preventDefault();button.disabled=true;error.textContent="";
+fetch(window.location.pathname+"/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:form.password.value})})
+.then(function(response){if(!response.ok)throw new Error("密码错误，请重试。");return response.json()})
+.then(function(){window.location.reload()}).catch(function(caught){error.textContent=caught.message}).finally(function(){button.disabled=false})});})();</script>
+</body></html>'''
+
+
+def _public_view_allowed(token: str, request: Request, access: dict[str, Any]) -> bool:
+    if not access.get("passwordRequired"):
+        return True
+    return service.public_profile_session_valid(token, request.cookies.get(_public_view_cookie_name(token)))
+
+
 def _subscription_details_html(
     token: str,
     details: dict[str, Any],
     download_url: str | None = None,
+    access: dict[str, Any] | None = None,
 ) -> str:
     e = html.escape
     download_url = download_url or f"/sub/airplay/{token}"
@@ -384,6 +428,21 @@ def _subscription_details_html(
     proxies = details.get("proxies") or []
     groups = details.get("groups") or []
     runs = details.get("requestRuns") or []
+    access = access or {}
+    password_required = bool(access.get("passwordRequired"))
+    public_access_open = bool(access.get("publicAccessOpen")) or not password_required
+    link_disabled = "" if public_access_open else ' aria-disabled="true" tabindex="-1" onclick="return false"'
+    copy_disabled = "" if public_access_open else " disabled"
+    access_controls = ""
+    if password_required:
+        access_until = str(access.get("publicAccessUntil") or "") if public_access_open else ""
+        access_status = "正在计算剩余时间…" if public_access_open else "当前关闭，开放后有效 5 分钟"
+        access_action = "续期 5 分钟" if public_access_open else "开放 5 分钟"
+        access_controls = (
+            f'<div class="access-control"><div class="access-copy"><strong>临时访问</strong>'
+            f'<span data-access-status data-access-until="{e(access_until, quote=True)}">{access_status}</span></div>'
+            f'<button class="access-button" type="button" data-open-public-access>{access_action}</button></div>'
+        )
     max_speed_dots = 24
 
     def latency_level(item: dict[str, Any]) -> str:
@@ -558,6 +617,11 @@ main{max-width:1180px;margin:0 auto;padding:34px 20px 70px}
 .subscription-access{display:flex;align-items:center;gap:10px}
 .button{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#fff;color:#1d4ed8;border-radius:12px;padding:12px 17px;text-decoration:none;font:700 14px/1.2 Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;box-shadow:0 10px 22px rgba(15,23,42,.14)}
 button.button{border:0;cursor:pointer;font:inherit}.copy-feedback{display:block;min-height:18px;margin-top:6px;font-size:12px;font-weight:600;color:#fff;opacity:.9}.copy-feedback.copy-success{color:#bbf7d0}.copy-feedback.copy-error{color:#fecaca}button.copy-success{background:#dcfce7;color:#166534}button.copy-error{background:#fee2e2;color:#991b1b}
+.button:disabled,.button[aria-disabled="true"]{pointer-events:none;cursor:not-allowed;opacity:.48}
+.access-control{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;padding:10px 10px 10px 13px;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:rgba(15,23,42,.18);backdrop-filter:blur(8px)}
+.access-copy{display:grid;gap:3px;min-width:0;color:#fff}.access-copy strong{font-size:12px}.access-copy span{font-size:10px;line-height:1.4;opacity:.78}
+.access-button{min-height:34px;padding:7px 11px;border:1px solid rgba(255,255,255,.3);border-radius:10px;color:#1d4ed8;background:#fff;font:700 11px/1.2 Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;white-space:nowrap;cursor:pointer;box-shadow:0 6px 14px rgba(15,23,42,.12)}
+.access-button:hover{background:#eff6ff}.access-button:disabled{cursor:wait;opacity:.65}
 .subscription-qr{display:grid;place-items:center;min-width:132px;padding:10px;border-radius:16px;background:#fff;color:#1e3a8a;box-shadow:0 10px 22px rgba(15,23,42,.14)}.subscription-qr img{display:block;width:104px;height:104px;image-rendering:pixelated}
 h2{display:flex;align-items:center;gap:9px;margin:34px 0 13px;font-size:19px}.section-note{margin:0 0 12px;color:var(--muted);font-size:13px}
 .section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:34px 0 13px}.section-head h2{margin:0}
@@ -599,7 +663,7 @@ button.group-card:hover{border-color:#93c5fd;transform:translateY(-1px)}
 .modal-close{border:0;border-radius:9px;padding:8px 12px;background:#e2e8f0;color:#334155;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
 .modal-body{padding:18px 20px;overflow:auto}.modal-body h3{margin:0 0 10px;font-size:13px;color:var(--muted)}.modal-body section+section{margin-top:18px}
 pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;background:#0b1120;color:#e2e8f0;border-radius:0;font-size:12px;line-height:1.65}.muted,.error-text{color:var(--muted)}
-@media(max-width:720px){.hero{padding:25px}.subscription-access{width:100%}.summary-card b{font-size:19px}.summary-time{font-size:13px}.table-wrap{margin:0 -20px}.modal{width:calc(100vw - 20px)}.user-agent{max-width:220px}}
+@media(max-width:720px){.hero{padding:25px}.subscription-access{width:100%}.hero-actions{flex:1}.summary-card b{font-size:19px}.summary-time{font-size:13px}.table-wrap{margin:0 -20px}.modal{width:calc(100vw - 20px)}.user-agent{max-width:220px}}
 @media(prefers-color-scheme:dark){:root{--line:#28324a;--muted:#94a3b8;--panel:#111827;--bg:#080d19;--text:#e6eaf3}th{background:#0f172a}.chip{background:#1e293b;color:#bfdbfe}.button{background:#e2e8f0}.latency.good,.status.ok{background:#14532d;color:#bbf7d0}.latency.warn{background:#78350f;color:#fde68a}.latency.bad,.status.bad{background:#7f1d1d;color:#fecaca}.latency.muted,.status.running{background:#1e293b;color:#cbd5e1}button.group-card,.provider-card{box-shadow:none}.modal-close{background:#1e293b;color:#e2e8f0}.provider-card{background:#0f172a}}
 '''
     script = '''
@@ -615,6 +679,46 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
   document.querySelectorAll("dialog.modal").forEach(function(dialog){
     dialog.addEventListener("click", function(event){ if(event.target === dialog) dialog.close(); });
   });
+  var openButton = document.querySelector("[data-open-public-access]");
+  if(openButton){
+    var accessStatus = document.querySelector("[data-access-status]");
+    var accessUntil = accessStatus ? Date.parse(accessStatus.getAttribute("data-access-until") || "") : NaN;
+    var expiryTimer = null;
+    function closeExpiredAccess(){
+      if(accessStatus){
+        accessStatus.textContent = "当前关闭，开放后有效 5 分钟";
+        accessStatus.setAttribute("data-access-until", "");
+      }
+      openButton.textContent = "开放 5 分钟";
+      var link = document.querySelector("[data-subscription-link]");
+      var copyButton = document.querySelector("[data-copy-subscription]");
+      if(link){
+        link.setAttribute("aria-disabled", "true");
+        link.setAttribute("tabindex", "-1");
+        link.addEventListener("click", function(event){ event.preventDefault(); });
+      }
+      if(copyButton) copyButton.disabled = true;
+    }
+    function updateAccessCountdown(){
+      if(!Number.isFinite(accessUntil)) return;
+      var remaining = Math.max(0, Math.ceil((accessUntil - Date.now()) / 1000));
+      if(remaining <= 0){ closeExpiredAccess(); return; }
+      var minutes = Math.floor(remaining / 60);
+      var seconds = String(remaining % 60).padStart(2, "0");
+      if(accessStatus) accessStatus.textContent = "剩余 " + String(minutes).padStart(2, "0") + ":" + seconds;
+      expiryTimer = window.setTimeout(updateAccessCountdown, 1000);
+    }
+    updateAccessCountdown();
+    openButton.addEventListener("click", function(){
+      openButton.disabled = true;
+      if(expiryTimer) window.clearTimeout(expiryTimer);
+      if(accessStatus) accessStatus.textContent = "正在开放…";
+      fetch(window.location.pathname + "/open", {method: "POST"})
+        .then(function(response){ if(!response.ok) throw new Error("操作失败"); return response.json(); })
+        .then(function(){ window.location.reload(); })
+        .catch(function(error){ if(accessStatus) accessStatus.textContent = error.message; openButton.disabled = false; });
+    });
+  }
   var domainForm = document.querySelector("[data-domain-test-form]");
   var domainResult = document.querySelector("[data-domain-test-result]");
   if(domainForm && domainResult){
@@ -727,7 +831,7 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅详情 · {e(str(details.get("name") or ""))}</title><style>{css}</style></head>
 <body><main>
-<header class="hero"><div class="hero-inner"><div><p class="eyebrow">AirPlay 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="subscription-access"><div class="hero-actions"><a class="button" data-subscription-link href="{e(download_url, quote=True)}">下载 AirPlay YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div><div class="subscription-qr"><img src="{qr_data_url}" alt="AirPlay YAML 下载链接二维码"></div></div></div>
+<header class="hero"><div class="hero-inner"><div><p class="eyebrow">AirPlay 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="subscription-access"><div class="hero-actions">{access_controls}<a class="button" data-subscription-link href="{e(download_url, quote=True)}"{link_disabled}>下载 AirPlay YAML</a><button class="button" type="button" data-copy-subscription{copy_disabled}>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div><div class="subscription-qr"><img src="{qr_data_url}" alt="AirPlay YAML 下载链接二维码"></div></div></div>
 <section class="summary"><div class="summary-card"><b>{e(str(details.get("mode") or "rule").upper())}</b><span>运行模式</span></div><div class="summary-card"><b>{len(proxies)}</b><div class="speed-dots">{speed_dots}</div><span>输出节点</span></div><div class="summary-card"><b>{len(groups)}</b><span>策略组</span></div><div class="summary-card"><b class="summary-time" title="{e(latest_request_raw or '暂无拉取记录')}">{e(latest_request)}</b><span>最近拉取</span></div></section></header>
 <h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>国家或地区</th><th>延迟</th><th>导入</th></tr></thead><tbody>{node_rows or '<tr><td colspan="7" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
 <div class="section-head"><h2>策略组</h2><button class="button" type="button" onclick="document.getElementById('domain-test-modal').showModal()">测试域名</button></div><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
@@ -743,14 +847,49 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 def mount_extra(app: FastAPI) -> None:
     @app.get("/sub/airplay/details/{token}", include_in_schema=False)
     def public_airplay_subscription_details(token: str, request: Request) -> HTMLResponse:
+        access = service.public_profile_access(token)
+        if access is None:
+            return HTMLResponse("", status_code=404)
+        if not _public_view_allowed(token, request, access):
+            return HTMLResponse(_password_gate_html(), status_code=401)
         details = service.public_subscription_details(token)
         if details is None:
-            return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>订阅不存在</title><body><h1>订阅不存在或已失效</h1></body></html>", status_code=404)
+            return HTMLResponse("", status_code=404)
         download_url = f"{_external_base_url(request)}/sub/airplay/{token}"
-        return HTMLResponse(_subscription_details_html(token, details, download_url))
+        return HTMLResponse(_subscription_details_html(token, details, download_url, access))
+
+    @app.post("/sub/airplay/details/{token}/login", include_in_schema=False)
+    def public_airplay_subscription_login(token: str, request: Request, payload: PublicPasswordPayload) -> Response:
+        session_token = service.authenticate_public_profile(token, payload.password)
+        if not session_token:
+            return JSONResponse({"error": "密码错误"}, status_code=401)
+        response = JSONResponse({"authenticated": True})
+        response.set_cookie(
+            key=_public_view_cookie_name(token),
+            value=session_token,
+            httponly=True,
+            secure=_external_base_url(request).startswith("https://"),
+            samesite="lax",
+            max_age=12 * 3600,
+            path=f"/sub/airplay/details/{token}",
+        )
+        return response
+
+    @app.post("/sub/airplay/details/{token}/open", include_in_schema=False)
+    def open_public_airplay_subscription(token: str, request: Request) -> Response:
+        access = service.public_profile_access(token)
+        if access is None or not access.get("passwordRequired") or not _public_view_allowed(token, request, access):
+            return Response(status_code=404)
+        deadline = service.open_public_subscription(token)
+        if not deadline:
+            return Response(status_code=404)
+        return JSONResponse({"openUntil": deadline})
 
     @app.post("/sub/airplay/details/{token}/test-domain", include_in_schema=False)
-    def public_airplay_subscription_domain_test(token: str, payload: DomainTestPayload) -> Response:
+    def public_airplay_subscription_domain_test(token: str, request: Request, payload: DomainTestPayload) -> Response:
+        access = service.public_profile_access(token)
+        if access is None or not _public_view_allowed(token, request, access):
+            return Response(status_code=404)
         result = service.test_public_subscription_domain(token, payload.domain)
         if result is None:
             return Response(status_code=404)

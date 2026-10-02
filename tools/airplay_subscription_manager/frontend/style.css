@@ -235,8 +235,24 @@
 .csm-node-name-col .csm-probe-feedback { margin-top: 4px; }
 .csm-probe-feedback.reachable { color: #15803d; }
 .csm-probe-feedback.failed { color: #b91c1c; }
-.csm-node-group .csm-node-country-col { width: 118px; max-width: 118px; }
+.csm-node-group .csm-node-country-col { width: 138px; max-width: 138px; }
 .csm-node-group td.csm-node-country-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.csm-country-edit { display: inline-flex; align-items: center; max-width: 100%; gap: 5px; padding: 3px 5px; border: 0; border-radius: 6px; color: #334155; background: transparent; cursor: pointer; font: inherit; }
+.csm-country-edit:hover { color: #4f46e5; background: #eef2ff; }
+.csm-country-edit > span { overflow: hidden; text-overflow: ellipsis; }
+.csm-country-edit > small { flex: 0 0 auto; padding: 1px 4px; border-radius: 999px; color: #4338ca; background: #e0e7ff; font-size: 9px; }
+.csm-country-edit > svg { flex: 0 0 auto; }
+.csm-country-picker { overflow: hidden; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; }
+.csm-country-picker > .csm-input { border: 0; border-bottom: 1px solid #e2e8f0; border-radius: 0; }
+.csm-country-picker > .csm-input:focus { position: relative; z-index: 1; box-shadow: 0 2px 0 #818cf8; }
+.csm-country-options { display: grid; max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
+.csm-country-options > button { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 11px; color: #334155; text-align: left; border: 0; border-bottom: 1px solid #f1f5f9; background: #fff; cursor: pointer; font: inherit; }
+.csm-country-options > button:last-of-type { border-bottom: 0; }
+.csm-country-options > button:hover { color: #4338ca; background: #f8faff; }
+.csm-country-options > button.active { color: #3730a3; background: #eef2ff; font-weight: 600; }
+.csm-country-options > button small { flex: 0 0 auto; color: #64748b; font: 11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.csm-country-options > button.active small { color: #4f46e5; }
+.csm-country-options > .csm-muted { margin: 0; padding: 22px 12px; text-align: center; }
 .csm-node-group .csm-node-probe-col { width: 142px; max-width: 142px; }
 .csm-node-group .csm-node-actions-col { width: 1%; white-space: nowrap; }
 .csm-node-group .csm-node-actions-col .csm-actions { flex-wrap: nowrap; }

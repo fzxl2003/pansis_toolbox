@@ -772,16 +772,33 @@ def test_node_geoip_resolution_cache_failures_and_region_groups(tmp_path, monkey
     region = service.save_node_group({"name": "US/SG", "kind": "region", "config": {"countries": ["US", "SG"]}}, user)
     assert set(region["members"]) == {"direct", "domain-a", "domain-b"}
 
+    # A manual country is effective immediately and takes precedence over
+    # both failed and successful automatic GeoIP results.
+    failed_id = next(node["id"] for node in updated if node["name"] == "failed")
+    manual_failed = service.update_node_country_override(failed_id, "FR", "法国", user)
+    assert manual_failed["country"] == "FR"
+    assert manual_failed["automaticCountry"] is None
+    assert manual_failed["countryOverride"] == "FR"
+
     # A changed probe IP invalidates the old node-level GeoIP result.
     with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
         node_id = conn.execute("SELECT id FROM csm_nodes WHERE name='domain-a'").fetchone()["id"]
         conn.execute("INSERT INTO csm_probe_results(id,node_id,reachable,dns_address,latency_ms,error,created_at) VALUES(?,?,1,?,9,'',?)",
                      (service._id(), node_id, "9.9.9.9", service._now()))
+    manual = service.update_node_country_override(node_id, "DE", "德国", user)
+    assert manual["country"] == "DE"
+    assert manual["automaticCountry"] == "SG"
+    updated_region = next(group for group in service.list_node_groups(user) if group["id"] == region["id"])
+    assert set(updated_region["members"]) == {"direct", "domain-b"}
     results["9.9.9.9"] = {"countryCode": "JP", "countryLabel": "日本", "error": ""}
     changed = {node["name"]: node for node in service.refresh_node_geoip([node_id], user)}
-    assert changed["domain-a"]["country"] == "JP"
+    assert changed["domain-a"]["country"] == "DE"
+    assert changed["domain-a"]["automaticCountry"] == "JP"
     assert changed["domain-a"]["resolvedIp"] == "9.9.9.9"
     assert queried_ips[-1] == "9.9.9.9"
+    restored = service.update_node_country_override(node_id, "", "", user)
+    assert restored["country"] == "JP"
+    assert restored["countryOverride"] is None
 
 
 def test_node_geoip_resolves_domain_when_probe_contains_reserved_fake_ip(tmp_path, monkeypatch) -> None:

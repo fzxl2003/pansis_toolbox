@@ -296,7 +296,8 @@ def init_database(user_id: str) -> None:
               first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
               alias TEXT NOT NULL DEFAULT '', is_custom INTEGER NOT NULL DEFAULT 0,
               resolved_ip TEXT NOT NULL DEFAULT '', country_code TEXT NOT NULL DEFAULT '',
-              country_label TEXT NOT NULL DEFAULT '', geo_checked_at TEXT, geo_error TEXT NOT NULL DEFAULT '');
+              country_label TEXT NOT NULL DEFAULT '', geo_checked_at TEXT, geo_error TEXT NOT NULL DEFAULT '',
+              country_override_code TEXT NOT NULL DEFAULT '', country_override_label TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS csm_ip_geo_cache (
               ip TEXT PRIMARY KEY, country_code TEXT NOT NULL DEFAULT '',
               country_label TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'success',
@@ -368,6 +369,8 @@ def init_database(user_id: str) -> None:
                 ("country_label", "TEXT NOT NULL DEFAULT ''"),
                 ("geo_checked_at", "TEXT"),
                 ("geo_error", "TEXT NOT NULL DEFAULT ''"),
+                ("country_override_code", "TEXT NOT NULL DEFAULT ''"),
+                ("country_override_label", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if column not in node_columns:
                     conn.execute(f"ALTER TABLE csm_nodes ADD COLUMN {column} {definition}")
@@ -1113,13 +1116,21 @@ def _start_geoip_refresh(user: User) -> None:
 def _node_dict(row: sqlite3.Row, source_names: list[str] | None = None, probe: sqlite3.Row | None = None,
                source_ids: list[str] | None = None) -> dict[str, Any]:
     alias = str(row["alias"] or "")
-    country = str(row["country_code"] or "")
-    country_label = str(row["country_label"] or "")
+    automatic_country = str(row["country_code"] or "")
+    automatic_country_label = str(row["country_label"] or "")
+    override_country = str(row["country_override_code"] or "")
+    override_country_label = str(row["country_override_label"] or "")
+    country = override_country or automatic_country
+    country_label = override_country_label or (automatic_country_label if not override_country else COUNTRY_LABELS.get(override_country, override_country))
     return {"id": row["id"], "stableIdentity": row["stable_identity"], "name": row["name"], "alias": alias,
             "displayName": alias or row["name"], "protocol": row["protocol"], "server": row["server"], "port": row["port"],
             "config": _loads(row["config_json"], {}), "supportedOutput": _compatible(str(row["protocol"])),
             "isCustom": bool(row["is_custom"]), "lastSeenAt": row["last_seen_at"], "sources": source_names or [],
             "sourceIds": source_ids or [], "country": country or None, "countryLabel": country_label or country or None,
+            "automaticCountry": automatic_country or None,
+            "automaticCountryLabel": automatic_country_label or automatic_country or None,
+            "countryOverride": override_country or None,
+            "countryOverrideLabel": override_country_label or override_country or None,
             "resolvedIp": str(row["resolved_ip"] or ""), "geoError": str(row["geo_error"] or ""),
             "geoCheckedAt": row["geo_checked_at"],
             "tcp": None if not probe else {
@@ -1261,6 +1272,30 @@ def update_node_alias(node_id: str, alias: str, user: User) -> dict[str, Any]:
     return updated
 
 
+def update_node_country_override(node_id: str, country_code: str, country_label: str, user: User) -> dict[str, Any]:
+    """Set or clear a manual country override without changing GeoIP data."""
+    init_database(user.id)
+    code = str(country_code or "").strip().upper()
+    if code and not re.fullmatch(r"[A-Z]{2}", code):
+        raise ToolboxError("INVALID_COUNTRY_CODE", "国家/地区代码必须是两个英文字母。", status_code=422)
+    label = str(country_label or "").strip()[:80]
+    if code:
+        label = COUNTRY_LABELS.get(code, label or code)
+    else:
+        label = ""
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT id FROM csm_nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            _not_found("节点")
+        conn.execute(
+            "UPDATE csm_nodes SET country_override_code=?,country_override_label=? WHERE id=?",
+            (code, label, node_id),
+        )
+        updated = _node_dict(conn.execute("SELECT * FROM csm_nodes WHERE id=?", (node_id,)).fetchone())
+    _rebuild_changed_published_profiles(user)
+    return updated
+
+
 def list_nodes(user: User, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     init_database(user.id); filters = filters or {}; terms, values = [], []
     for key, column in (("protocol", "n.protocol"), ("sourceId", "ns.source_id")):
@@ -1315,7 +1350,7 @@ def _resolve_group_members(conn: sqlite3.Connection, group: sqlite3.Row) -> list
         countries = {str(item) for item in (config.get("countries") or []) if item}
         if not countries:
             return []
-        return [_node_ref(row) for row in rows if str(row["country_code"] or "") in countries]
+        return [_node_ref(row) for row in rows if str(row["country_override_code"] or row["country_code"] or "") in countries]
     if kind == "latency":
         mode = str(config.get("mode") or "top")
         count = max(1, int(config.get("count") or 5))
@@ -2704,7 +2739,7 @@ def dashboard(user: User) -> dict[str, Any]:
         provider_rows = conn.execute("SELECT config_json FROM csm_rule_providers").fetchall()
         requests_24h = int(conn.execute("SELECT COUNT(*) FROM csm_subscription_requests WHERE requested_at>=?", (now_iso,)).fetchone()[0])
         protocol = [{"name": r["protocol"], "value": r["count"]} for r in conn.execute("SELECT protocol,COUNT(*) count FROM csm_nodes GROUP BY protocol ORDER BY count DESC")]
-        regions = [{"name": r["region"], "value": r["count"]} for r in conn.execute("""SELECT COALESCE(NULLIF(country_label,''),NULLIF(country_code,''),'未识别') region,COUNT(*) count
+        regions = [{"name": r["region"], "value": r["count"]} for r in conn.execute("""SELECT COALESCE(NULLIF(country_override_label,''),NULLIF(country_override_code,''),NULLIF(country_label,''),NULLIF(country_code,''),'未识别') region,COUNT(*) count
           FROM csm_nodes GROUP BY region ORDER BY count DESC LIMIT 8""")]
         latencies = [int(r["latency_ms"]) for r in conn.execute("""WITH latest AS (
           SELECT latency_ms,ROW_NUMBER() OVER(PARTITION BY node_id ORDER BY created_at DESC) rn

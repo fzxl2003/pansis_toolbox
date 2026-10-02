@@ -79,6 +79,10 @@ type Node = {
   lastSeenAt: string;
   country?: string | null;
   countryLabel?: string | null;
+  automaticCountry?: string | null;
+  automaticCountryLabel?: string | null;
+  countryOverride?: string | null;
+  countryOverrideLabel?: string | null;
   resolvedIp?: string;
   geoError?: string;
   geoCheckedAt?: string | null;
@@ -244,6 +248,7 @@ export default function AirPlaySubscriptionManager() {
     false,
   );
   const [aliasNode, setAliasNode] = useState<Node | null>(null);
+  const [countryNode, setCountryNode] = useState<Node | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
@@ -583,6 +588,7 @@ export default function AirPlaySubscriptionManager() {
                 onRemoveCustom={removeCustomNode}
                 onCopy={(node) => void copySubscriptionNode(node)}
                 onAlias={setAliasNode}
+                onCountry={setCountryNode}
                 onProbe={(ids) =>
                   void action(
                     "nodes-probe",
@@ -746,6 +752,17 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async () => {
             setAliasNode(null);
             setNotice("节点别名已保存");
+            await loadAll();
+          }}
+        />
+      )}
+      {countryNode && (
+        <NodeCountryModal
+          node={countryNode}
+          onClose={() => setCountryNode(null)}
+          onSaved={async () => {
+            setCountryNode(null);
+            setNotice("节点国家/地区已保存");
             await loadAll();
           }}
         />
@@ -1370,6 +1387,7 @@ function NodesView({
   onRemoveCustom,
   onCopy,
   onAlias,
+  onCountry,
   onProbe,
   onNodesChange,
 }: {
@@ -1385,6 +1403,7 @@ function NodesView({
   onRemoveCustom: (node: Node) => void;
   onCopy: (node: Node) => void;
   onAlias: (node: Node) => void;
+  onCountry: (node: Node) => void;
   onProbe: (ids: string[]) => void;
   onNodesChange: (nodes: Node[]) => void;
 }) {
@@ -1560,16 +1579,30 @@ function NodesView({
               <td
                 className="csm-node-country-col"
                 title={[
-                  node.country ? `国家/地区代码：${node.country}` : undefined,
+                  node.countryOverride
+                    ? `手动覆盖：${node.countryOverrideLabel || node.countryOverride}`
+                    : node.country
+                      ? `自动识别：${node.countryLabel || node.country}`
+                      : undefined,
+                  node.countryOverride && node.automaticCountry
+                    ? `自动识别结果：${node.automaticCountryLabel || node.automaticCountry}`
+                    : undefined,
                   node.resolvedIp ? `识别 IP：${node.resolvedIp}` : undefined,
                   node.geoError || undefined,
                 ]
                   .filter(Boolean)
                   .join("\n")}
               >
-                {node.countryLabel ||
-                  node.country ||
-                  (geoStatus === "loading" ? "识别中…" : "未知")}
+                <button
+                  className="csm-country-edit"
+                  type="button"
+                  onClick={() => onCountry(node)}
+                  aria-label={`修改 ${node.displayName || node.name} 的国家或地区`}
+                >
+                  <span>{node.countryLabel || node.country || (geoStatus === "loading" ? "识别中…" : "未知")}</span>
+                  {node.countryOverride && <small>手动</small>}
+                  <Pencil size={12} />
+                </button>
               </td>
               <td className="csm-node-probe-col">
                 {recentProbe(node) && node.tcp ? (
@@ -2151,6 +2184,145 @@ function NodeAliasModal({
           <small className="csm-muted">
             别名不会被订阅刷新覆盖，仅用于识别；规则组引用始终以节点原名为准。
           </small>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+type CountryOption = { code: string; label: string };
+
+function countryOptions(): CountryOption[] {
+  try {
+    const names = new Intl.DisplayNames(["zh-CN"], { type: "region" });
+    const options: CountryOption[] = [];
+    for (let first = 65; first <= 90; first += 1) {
+      for (let second = 65; second <= 90; second += 1) {
+        const code = String.fromCharCode(first, second);
+        const label = names.of(code);
+        if (label && label !== code && label !== "未知地区") options.push({ code, label });
+      }
+    }
+    return options.sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
+  } catch {
+    return [
+      { code: "CN", label: "中国" }, { code: "HK", label: "香港" },
+      { code: "TW", label: "台湾" }, { code: "JP", label: "日本" },
+      { code: "SG", label: "新加坡" }, { code: "US", label: "美国" },
+      { code: "GB", label: "英国" }, { code: "DE", label: "德国" },
+    ];
+  }
+}
+
+const COUNTRY_OPTIONS = countryOptions();
+
+function NodeCountryModal({
+  node,
+  onClose,
+  onSaved,
+}: {
+  node: Node;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [countryCode, setCountryCode] = useState(node.countryOverride || "");
+  const [countrySearch, setCountrySearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const options = node.countryOverride && !COUNTRY_OPTIONS.some((item) => item.code === node.countryOverride)
+    ? [{ code: node.countryOverride, label: node.countryOverrideLabel || node.countryOverride }, ...COUNTRY_OPTIONS]
+    : COUNTRY_OPTIONS;
+  const normalizedSearch = countrySearch.trim().toLocaleLowerCase("zh-CN");
+  const filteredOptions = normalizedSearch
+    ? options.filter((item) =>
+        `${item.label} ${item.code}`.toLocaleLowerCase("zh-CN").includes(normalizedSearch),
+      )
+    : options;
+
+  async function save() {
+    setSaving(true);
+    setError("");
+    try {
+      const selected = options.find((item) => item.code === countryCode);
+      await apiPut(`${API}/nodes/${node.id}/country`, {
+        countryCode,
+        countryLabel: selected?.label || "",
+      });
+      await onSaved();
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`设置国家/地区：${node.displayName || node.name}`}
+      width={520}
+      onClose={() => !saving && onClose()}
+      foot={
+        <>
+          <button className="csm-btn csm-btn-secondary" type="button" disabled={saving} onClick={onClose}>取消</button>
+          <button className="csm-btn csm-btn-primary" type="button" disabled={saving} onClick={() => void save()}>
+            {saving ? <><Spin size={14} />保存中</> : "保存"}
+          </button>
+        </>
+      }
+    >
+      <div className="csm-form-grid">
+        {error && <div className="csm-full-col"><Alert type="error">{error}</Alert></div>}
+        <div className="csm-full-col">
+          <Alert type="info">手动设置会覆盖自动识别结果；选择“使用自动识别”即可清除覆盖。</Alert>
+        </div>
+        <Field label="自动识别结果" full>
+          <input
+            className="csm-input"
+            value={node.automaticCountryLabel
+              ? `${node.automaticCountryLabel}（${node.automaticCountry}）`
+              : "暂未识别"}
+            disabled
+          />
+        </Field>
+        <Field label="最终使用的国家/地区" full>
+          <div className="csm-country-picker">
+            <input
+              className="csm-input"
+              type="search"
+              value={countrySearch}
+              onChange={(event) => setCountrySearch(event.target.value)}
+              placeholder="搜索国家/地区名称或代码，例如：日本、JP"
+              autoFocus
+            />
+            <div className="csm-country-options" role="listbox" aria-label="国家或地区">
+              {!normalizedSearch && (
+                <button
+                  className={!countryCode ? "active" : ""}
+                  type="button"
+                  role="option"
+                  aria-selected={!countryCode}
+                  onClick={() => setCountryCode("")}
+                >
+                  <span>使用自动识别</span>
+                  <small>{node.automaticCountryLabel || "当前未识别"}</small>
+                </button>
+              )}
+              {filteredOptions.map((item) => (
+                <button
+                  className={countryCode === item.code ? "active" : ""}
+                  key={item.code}
+                  type="button"
+                  role="option"
+                  aria-selected={countryCode === item.code}
+                  onClick={() => setCountryCode(item.code)}
+                >
+                  <span>{item.label}</span>
+                  <small>{item.code}</small>
+                </button>
+              ))}
+              {!filteredOptions.length && <p className="csm-muted">没有匹配的国家或地区。</p>}
+            </div>
+          </div>
         </Field>
       </div>
     </Modal>

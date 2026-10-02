@@ -82,6 +82,11 @@ class NodeAliasPayload(BaseModel):
     alias: str = Field(default="", max_length=120)
 
 
+class NodeCountryPayload(BaseModel):
+    countryCode: str = Field(default="", max_length=2)
+    countryLabel: str = Field(default="", max_length=80)
+
+
 class CustomNodePayload(BaseModel):
     content: str = Field(min_length=1, max_length=100000)
     alias: str | None = Field(default=None, max_length=120)
@@ -196,6 +201,14 @@ def remove_custom_node(request: Request, node_id: str) -> dict[str, bool]:
 @router.put("/nodes/{node_id}/alias")
 def put_node_alias(request: Request, node_id: str, payload: NodeAliasPayload) -> dict[str, Any]:
     return {"node": service.update_node_alias(node_id, payload.alias, require_user(request))}
+
+
+@router.put("/nodes/{node_id}/country")
+def put_node_country(request: Request, node_id: str, payload: NodeCountryPayload) -> dict[str, Any]:
+    return {"node": service.update_node_country_override(
+        node_id, payload.countryCode, payload.countryLabel, require_user(request)
+    )}
+
 
 @router.get("/node-groups")
 def get_node_groups(request: Request) -> dict[str, Any]:

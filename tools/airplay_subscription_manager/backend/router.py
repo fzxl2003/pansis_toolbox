@@ -6,6 +6,7 @@ import html
 from io import BytesIO
 from email.utils import format_datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -349,6 +350,29 @@ def _subscription_qr_data_url(download_url: str) -> str:
     return f"data:image/svg+xml;base64,{encoded}"
 
 
+def _forwarded_parameter(request: Request, name: str) -> str:
+    forwarded = request.headers.get("forwarded", "").split(",", 1)[0]
+    for part in forwarded.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key.lower() == name:
+            return value.strip().strip('"')
+    return ""
+
+
+def _external_base_url(request: Request) -> str:
+    """Build the browser-facing origin while honoring common reverse-proxy headers."""
+    parts = urlsplit(str(request.base_url))
+    scheme = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    scheme = scheme or _forwarded_parameter(request, "proto").lower()
+    if scheme not in {"http", "https"}:
+        scheme = parts.scheme
+    host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    host = host or _forwarded_parameter(request, "host") or parts.netloc
+    if not host or any(character in host for character in "/\\\r\n\t "):
+        host = parts.netloc
+    return urlunsplit((scheme, host, parts.path.rstrip("/"), "", ""))
+
+
 def _subscription_details_html(
     token: str,
     details: dict[str, Any],
@@ -416,6 +440,8 @@ def _subscription_details_html(
     node_rows_list: list[str] = []
     for index, item in enumerate(proxies):
         share_uri = str(item.get("shareUri") or "")
+        country_code = str(item.get("country") or "").upper()
+        country_label = str(item.get("countryLabel") or country_code or "未识别")
         actions = '<span class="muted">不支持</span>'
         if share_uri:
             modal_id = f"node-qr-modal-{index}"
@@ -437,6 +463,7 @@ def _subscription_details_html(
             f'<td>{e(str(item.get("type") or ""))}</td>'
             f'<td class="mono">{e(str(item.get("server") or ""))}</td>'
             f'<td>{e(str(item.get("port") or ""))}</td>'
+            f'<td data-country-code="{e(country_code, quote=True)}">{e(country_label)}</td>'
             f'<td>{latency(item)}</td><td>{actions}</td></tr>'
         )
     node_rows = "".join(node_rows_list)
@@ -578,6 +605,13 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
     script = '''
 <script>
 (function(){
+  if(typeof Intl !== "undefined" && Intl.DisplayNames){
+    var regionNames = new Intl.DisplayNames(["zh-CN"], {type: "region"});
+    document.querySelectorAll("[data-country-code]").forEach(function(cell){
+      var code = cell.getAttribute("data-country-code");
+      if(code){ try { cell.textContent = regionNames.of(code) || cell.textContent; } catch(error) {} }
+    });
+  }
   document.querySelectorAll("dialog.modal").forEach(function(dialog){
     dialog.addEventListener("click", function(event){ if(event.target === dialog) dialog.close(); });
   });
@@ -695,7 +729,7 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <body><main>
 <header class="hero"><div class="hero-inner"><div><p class="eyebrow">AirPlay 聚合订阅</p><h1>{e(str(details.get("name") or "订阅详情"))}</h1><p class="meta">规则组：<b>{e(str(details.get("ruleSetName") or "未关联"))}</b></p></div><div class="subscription-access"><div class="hero-actions"><a class="button" data-subscription-link href="{e(download_url, quote=True)}">下载 AirPlay YAML</a><button class="button" type="button" data-copy-subscription>复制订阅链接</button><span class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></span></div><div class="subscription-qr"><img src="{qr_data_url}" alt="AirPlay YAML 下载链接二维码"></div></div></div>
 <section class="summary"><div class="summary-card"><b>{e(str(details.get("mode") or "rule").upper())}</b><span>运行模式</span></div><div class="summary-card"><b>{len(proxies)}</b><div class="speed-dots">{speed_dots}</div><span>输出节点</span></div><div class="summary-card"><b>{len(groups)}</b><span>策略组</span></div><div class="summary-card"><b class="summary-time" title="{e(latest_request_raw or '暂无拉取记录')}">{e(latest_request)}</b><span>最近拉取</span></div></section></header>
-<h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>延迟</th><th>导入</th></tr></thead><tbody>{node_rows or '<tr><td colspan="6" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
+<h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>国家或地区</th><th>延迟</th><th>导入</th></tr></thead><tbody>{node_rows or '<tr><td colspan="7" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
 <div class="section-head"><h2>策略组</h2><button class="button" type="button" onclick="document.getElementById('domain-test-modal').showModal()">测试域名</button></div><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
 <dialog class="modal" id="domain-test-modal" aria-label="测试域名命中"><article class="modal-panel"><header class="modal-head"><div><strong>测试域名命中</strong><span>输入域名，查看最终命中的策略</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><form class="domain-test-form" data-domain-test-form><input class="domain-input" type="text" name="domain" placeholder="example.com" autocomplete="off" required><button class="button" type="submit">测试命中</button><div class="domain-test-result" data-domain-test-result hidden></div></form></div></article></dialog>
 <div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" onclick="document.getElementById('yaml-modal').showModal()">打开预览</button></div>
@@ -712,7 +746,7 @@ def mount_extra(app: FastAPI) -> None:
         details = service.public_subscription_details(token)
         if details is None:
             return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>订阅不存在</title><body><h1>订阅不存在或已失效</h1></body></html>", status_code=404)
-        download_url = f"{str(request.base_url).rstrip('/')}/sub/airplay/{token}"
+        download_url = f"{_external_base_url(request)}/sub/airplay/{token}"
         return HTMLResponse(_subscription_details_html(token, details, download_url))
 
     @app.post("/sub/airplay/details/{token}/test-domain", include_in_schema=False)

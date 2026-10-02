@@ -50,6 +50,42 @@ def test_parse_yaml_base64_and_uri_variants() -> None:
     assert parsed and parsed["protocol"] == "vmess" and parsed["server"] == "v.example"
 
 
+def test_proxy_output_normalises_uri_option_types() -> None:
+    for security in ("tls", "reality"):
+        node = service.parse_uri(
+            "vless://00000000-0000-0000-0000-000000000001@example.org:443"
+            f"?security={security}#vless-{security}"
+        )
+        assert node
+        output = service._proxy_output(node["config"], node["protocol"])
+        assert output["tls"] is True
+
+    output = service._proxy_output(
+        {"type": "socks5", "server": "127.0.0.1", "port": 1080, "tls": "false", "udp": "1"},
+        "socks5",
+    )
+    assert output["tls"] is False
+    assert output["udp"] is True
+
+    vmess = service._proxy_output(
+        {"type": "vmess", "server": "example.org", "port": 443, "alterId": "0", "tls": "tls"},
+        "vmess",
+    )
+    assert vmess["alterId"] == 0
+    assert vmess["tls"] is True
+
+    repaired = yaml.safe_load(service._normalise_published_content("""proxies:
+  - name: legacy
+    type: vmess
+    server: example.org
+    port: 443
+    alterId: '0'
+    tls: tls
+"""))
+    assert repaired["proxies"][0]["alterId"] == 0
+    assert repaired["proxies"][0]["tls"] is True
+
+
 def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)
@@ -64,6 +100,7 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
         service._store_nodes(conn, source["id"], [node])
         node_id = conn.execute("SELECT id FROM csm_nodes WHERE name=?", (node["name"],)).fetchone()["id"]
     service.update_node_alias(node_id, "香港", user)
+    service.update_node_country_override(node_id, "HK", "香港", user)
     provider = service.save_rule_provider({
         "name": "示例域名",
         "providerKey": "example-domains",
@@ -98,6 +135,8 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     assert details is not None
     assert details["ruleSetName"] == "basic rules"
     assert details["proxies"][0]["name"] == "香港-vless"
+    assert details["proxies"][0]["country"] == "HK"
+    assert details["proxies"][0]["countryLabel"] == "香港"
     assert details["proxies"][0]["latencyMs"] == 123
     assert details["groups"][0]["providers"][0]["payload"] == ["example.com"]
     assert details["requestRuns"][0]["clientIp"] == "127.0.0.1"
@@ -906,6 +945,7 @@ def test_subscription_details_html_layout() -> None:
         "name": "visual sub", "ruleSetName": "basic rules", "publishedAt": "2026-01-01T00:00:00+00:00",
         "contentHash": "hash", "mode": "rule", "yaml": "mode: rule",
         "proxies": [{"name": "node", "type": "vless", "server": "example.org", "port": 443,
+                     "country": "HK", "countryLabel": "香港",
                      "shareUri": "vless://uuid@example.org:443#node",
                      "latencyMs": 123, "reachable": True, "checkedAt": "2026-01-01T00:01:00+00:00"}],
         "groups": [{"name": "PROXY", "type": "select", "proxies": ["node"],
@@ -929,6 +969,33 @@ def test_subscription_details_html_layout() -> None:
     assert '最近拉取' in page
     assert '5 分钟前' in page
     assert "123 ms" in page
+    assert "国家或地区" in page
+    assert 'data-country-code="HK">香港</td>' in page
     assert "example.com" in page
     assert "Rule Provider" not in page
     assert "<h2>规则</h2>" not in page
+
+
+def test_external_base_url_honours_https_reverse_proxy() -> None:
+    from fastapi import Request
+    from tools.airplay_subscription_manager.backend.router import _external_base_url
+
+    request = Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/sub/airplay/details/token",
+        "raw_path": b"/sub/airplay/details/token",
+        "root_path": "",
+        "query_string": b"",
+        "server": ("127.0.0.1", 8000),
+        "client": ("127.0.0.1", 12345),
+        "headers": [
+            (b"host", b"127.0.0.1:8000"),
+            (b"x-forwarded-proto", b"https"),
+            (b"x-forwarded-host", b"toolbox.example.com"),
+        ],
+    })
+
+    assert _external_base_url(request) == "https://toolbox.example.com"

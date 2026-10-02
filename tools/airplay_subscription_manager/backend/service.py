@@ -2153,7 +2153,46 @@ def validate_profile(profile_id: str, user: User) -> dict[str, Any]:
 
 def _proxy_output(config: dict[str, Any], protocol: str) -> dict[str, Any]:
     allowed = PROXY_COMMON_FIELDS | PROXY_FIELDS.get(protocol, set())
-    return {key: value for key, value in config.items() if key in allowed and value not in (None, "", [], {})}
+    value = {key: item for key, item in config.items() if key in allowed and item not in (None, "", [], {})}
+    return _normalise_proxy_option_types(value, protocol)
+
+
+def _normalise_proxy_option_types(value: dict[str, Any], protocol: str) -> dict[str, Any]:
+    value = dict(value)
+    for key in {"tls", "udp", "skip-cert-verify", "disable-sni", "reduce-rtt"} & value.keys():
+        item = value[key]
+        if not isinstance(item, bool):
+            text = str(item).strip().lower()
+            value[key] = text not in {"", "0", "false", "no", "off", "none"}
+    if protocol == "vmess" and "alterId" in value and not isinstance(value["alterId"], bool):
+        try:
+            value["alterId"] = int(value["alterId"])
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
+def _normalise_published_content(content: str) -> str:
+    """Repair type-invalid options in snapshots created before output normalisation."""
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return content
+    if not isinstance(document, dict) or not isinstance(document.get("proxies"), list):
+        return content
+    changed = False
+    proxies: list[Any] = []
+    for item in document["proxies"]:
+        if not isinstance(item, dict):
+            proxies.append(item)
+            continue
+        normalised = _normalise_proxy_option_types(item, str(item.get("type") or "").lower())
+        proxies.append(normalised)
+        changed = changed or normalised != item
+    if not changed:
+        return content
+    document["proxies"] = proxies
+    return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
 
 
 def _group_output(group: dict[str, Any]) -> dict[str, Any] | None:
@@ -2389,7 +2428,8 @@ def public_subscription(
             profile = conn.execute("SELECT name FROM csm_profiles WHERE id=?", (index["profile_id"],)).fetchone()
             snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
             if not profile or not snapshot: return None
-            content = _decrypt(snapshot["content_encrypted"])
+            content = _normalise_published_content(_decrypt(snapshot["content_encrypted"]))
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
             try:
                 conn.execute(
                     "INSERT INTO csm_subscription_requests VALUES(?,?,?,?,?,?)",
@@ -2397,13 +2437,15 @@ def public_subscription(
                 )
             except sqlite3.Error:
                 pass
-            return content, snapshot["content_hash"], snapshot["created_at"], profile["name"]
+            return content, content_hash, snapshot["created_at"], profile["name"]
     except (sqlite3.Error, ToolboxError): return None
 
 
 def _latest_node_probes(conn: sqlite3.Connection) -> tuple[dict[str, list[sqlite3.Row]], dict[str, list[sqlite3.Row]]]:
     rows = conn.execute("""
-      SELECT n.id,n.name,n.alias,n.protocol,p.reachable,p.latency_ms,p.created_at AS probe_at
+      SELECT n.id,n.name,n.alias,n.protocol,n.country_code,n.country_label,
+             n.country_override_code,n.country_override_label,
+             p.reachable,p.latency_ms,p.created_at AS probe_at
       FROM csm_nodes n LEFT JOIN csm_probe_results p ON p.id=(
         SELECT p2.id FROM csm_probe_results p2 WHERE p2.node_id=n.id
         ORDER BY p2.created_at DESC,p2.rowid DESC LIMIT 1)
@@ -2601,7 +2643,7 @@ def public_subscription_details(token: str) -> dict[str, Any] | None:
             profile = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (index["profile_id"],)).fetchone()
             snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
             if not profile or not snapshot: return None
-            content = _decrypt(snapshot["content_encrypted"])
+            content = _normalise_published_content(_decrypt(snapshot["content_encrypted"]))
             rule_row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)).fetchone() if profile["rule_set_id"] else None
             aliases, originals = _latest_node_probes(conn)
             try: document = yaml.safe_load(content) or {}
@@ -2620,11 +2662,19 @@ def public_subscription_details(token: str) -> dict[str, Any] | None:
                  "server": str(item.get("server") or ""), "port": item.get("port"),
                  "shareUri": proxy_share_uri(item)}
         probe = _probe_for_output_name(value["name"], aliases, originals)
+        country_code = str(probe["country_override_code"] or probe["country_code"] or "") if probe else ""
+        country_label = str(probe["country_override_label"] or "") if probe else ""
+        if not country_label and probe and not probe["country_override_code"]:
+            country_label = str(probe["country_label"] or "")
+        if not country_label:
+            country_label = COUNTRY_LABELS.get(country_code, country_code)
         value.update({"latencyMs": probe["latency_ms"] if probe else None,
                       "reachable": bool(probe["reachable"]) if probe else None,
-                      "checkedAt": probe["probe_at"] if probe else None})
+                      "checkedAt": probe["probe_at"] if probe else None,
+                      "country": country_code or None,
+                      "countryLabel": country_label or None})
         proxies.append(value)
-    return {"name": profile["name"], "publishedAt": snapshot["created_at"], "contentHash": snapshot["content_hash"],
+    return {"name": profile["name"], "publishedAt": snapshot["created_at"], "contentHash": hashlib.sha256(content.encode()).hexdigest(),
             "mode": str(document.get("mode") or "rule"), "proxies": proxies, "groups": groups,
             "ruleSetName": profile["rule_set_name"], "ruleSetUpdatedAt": profile["rule_set_updated_at"],
             "requestRuns": request_runs, "yaml": content}

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.core.errors import ToolboxError, toolbox_error_handler
 from backend.app.services.auth_service import User
-from tools.service_navigator.backend import public, service
+from tools.service_navigator.backend import access, database, public, service
 
 
 def _app() -> FastAPI:
@@ -17,10 +17,10 @@ def _app() -> FastAPI:
 
 def test_private_public_page_hides_fingerprint_and_exposes_all_services(monkeypatch, tmp_path) -> None:
     owner = User(id="public-owner", username="owner", display_name="Owner")
-    monkeypatch.setattr(service, "root_dir", lambda: tmp_path)
-    service.RECOVERY_DONE = False
-    monkeypatch.setattr(service, "list_users", lambda: [owner])
-    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    monkeypatch.setattr(database, "root_dir", lambda: tmp_path)
+    database.RECOVERY_DONE = False
+    monkeypatch.setattr(access, "list_users", lambda: [owner])
+    monkeypatch.setattr(access, "can_access_tool", lambda _tool_id, _user: True)
     monkeypatch.setattr(public, "get_optional_user", lambda _request: None)
     service.create_site({"title": "Lab", "slug": "lab-public"}, owner)
     target = service.add_target({"label": "Gateway", "address": "10.0.0.8"}, owner)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, File, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.app.core.security import require_user
 from tools.service_navigator.backend import service
@@ -340,6 +340,3 @@ def update_password(request: Request, password_id: str, payload: PasswordPayload
 def delete_password(request: Request, password_id: str) -> dict[str, bool]:
     service.delete_password(password_id, require_user(request))
     return {"deleted": True}
-
-
-from tools.service_navigator.backend.public import mount_extra  # noqa: E402

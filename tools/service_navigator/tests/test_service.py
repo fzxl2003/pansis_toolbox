@@ -4,7 +4,7 @@ import pytest
 
 from backend.app.core.errors import ToolboxError
 from backend.app.services.auth_service import User
-from tools.service_navigator.backend import service
+from tools.service_navigator.backend import access, database, health, scanning, service
 
 
 @pytest.fixture
@@ -14,8 +14,8 @@ def owner() -> User:
 
 @pytest.fixture
 def isolated_storage(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    monkeypatch.setattr(service, "root_dir", lambda: tmp_path)
-    service.RECOVERY_DONE = False
+    monkeypatch.setattr(database, "root_dir", lambda: tmp_path)
+    database.RECOVERY_DONE = False
     return tmp_path
 
 
@@ -100,15 +100,15 @@ def test_python_fingerprints_and_rescan_preserves_overrides(isolated_storage, ow
 
 def test_python_scan_aggregates_addresses_and_custom_ports(monkeypatch, isolated_storage, owner: User) -> None:
     _site, target = _site_and_target(owner)
-    monkeypatch.setattr(service, "resolve_addresses", lambda _address: ["10.0.0.8", "10.0.0.9"])
+    monkeypatch.setattr(scanning, "resolve_addresses", lambda _address: ["10.0.0.8", "10.0.0.9"])
     received: list[tuple[str, tuple[int, ...]]] = []
 
     def fake_scan(address: str, ports: tuple[int, ...]) -> list[dict]:
         received.append((address, ports))
         return [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "product": "", "version": "", "extraInfo": "", "tunnel": ""}]
 
-    monkeypatch.setattr(service, "_scan_address", fake_scan)
-    monkeypatch.setattr(service, "_enrich_web_service", lambda _address, _item: {"httpTitle": "", "detectedUrl": "", "faviconFilename": ""})
+    monkeypatch.setattr(scanning, "_scan_address", fake_scan)
+    monkeypatch.setattr(scanning, "_enrich_web_service", lambda _address, _item: {"httpTitle": "", "detectedUrl": "", "faviconFilename": ""})
     result = service._scan_target({"id": target["id"], "address": target["address"], "custom_ports": target["customPorts"]})
 
     assert result["ok"] is True
@@ -131,9 +131,9 @@ def test_scan_run_persists_target_progress(isolated_storage, owner: User) -> Non
 
 def test_private_access_password_is_revocable(monkeypatch, isolated_storage, owner: User) -> None:
     reader = User(id="service-reader", username="reader", display_name="Reader")
-    monkeypatch.setattr(service, "list_users", lambda: [owner, reader])
+    monkeypatch.setattr(access, "list_users", lambda: [owner, reader])
     _site, _target = _site_and_target(owner)
-    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    monkeypatch.setattr(access, "can_access_tool", lambda _tool_id, _user: True)
     private = service.public_site("lab-services")
     assert private is not None
     assert service.site_access(private, None)["allowed"] is False
@@ -153,8 +153,8 @@ def test_http_health_alert_confirmation_repeat_and_recovery(monkeypatch, isolate
     settings = service.update_health_settings({"checkIntervalSeconds": 60, "emailRecipients": ["ops@example.com"], "confirmCount": 3, "repeatIntervalSeconds": 0, "maxRepeatCount": 0}, owner)
     assert settings["confirmCount"] == 3
     sent: list[tuple[list[str], str, str]] = []
-    monkeypatch.setattr(service, "platform_send_email", lambda recipients, subject, body: sent.append((recipients, subject, body)))
-    monkeypatch.setattr(service, "_check_http_health", lambda _url: {"status": "unhealthy", "statusCode": 503, "latencyMs": 9, "finalUrl": "http://health/", "error": "HTTP 503"})
+    monkeypatch.setattr(health, "platform_send_email", lambda recipients, subject, body: sent.append((recipients, subject, body)))
+    monkeypatch.setattr(health, "_check_http_health", lambda _url: {"status": "unhealthy", "statusCode": 503, "latencyMs": 9, "finalUrl": "http://health/", "error": "HTTP 503"})
     for _ in range(2):
         service._collect_site_health(site, manual=False)
     assert sent == []
@@ -163,7 +163,7 @@ def test_http_health_alert_confirmation_repeat_and_recovery(monkeypatch, isolate
     assert "HTTP 503" in sent[0][2]
     service._collect_site_health(site, manual=False)
     assert len(sent) == 2  # cooldown is zero
-    monkeypatch.setattr(service, "_check_http_health", lambda _url: {"status": "healthy", "statusCode": 302, "latencyMs": 5, "finalUrl": "http://health/login", "error": ""})
+    monkeypatch.setattr(health, "_check_http_health", lambda _url: {"status": "healthy", "statusCode": 302, "latencyMs": 5, "finalUrl": "http://health/login", "error": ""})
     service._collect_site_health(site, manual=False)
     assert len(sent) == 3
     assert "已恢复" in sent[-1][1]
@@ -177,8 +177,8 @@ def test_manual_health_check_never_sends_alert(monkeypatch, isolated_storage, ow
     service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 8080, "protocol": "tcp", "serviceName": "http", "product": "", "version": "", "extraInfo": "", "resolvedAddresses": ["10.0.0.8"], "httpTitle": "Console", "detectedUrl": "http://10.0.0.8:8080/", "faviconFilename": ""}])
     web = next(item for item in service.get_site(owner)["services"] if item["port"] == 8080)
     service.update_health_settings({"emailRecipients": ["ops@example.com"], "confirmCount": 1}, owner)
-    monkeypatch.setattr(service, "platform_send_email", lambda *_args: pytest.fail("manual check must not send email"))
-    monkeypatch.setattr(service, "_check_http_health", lambda _url: {"status": "unhealthy", "statusCode": 500, "latencyMs": 1, "finalUrl": "http://health/", "error": "HTTP 500"})
+    monkeypatch.setattr(health, "platform_send_email", lambda *_args: pytest.fail("manual check must not send email"))
+    monkeypatch.setattr(health, "_check_http_health", lambda _url: {"status": "unhealthy", "statusCode": 500, "latencyMs": 1, "finalUrl": "http://health/", "error": "HTTP 500"})
     result = service.check_health(web["id"], owner)
     assert result["status"] == "unhealthy"
     assert service.list_health_events(owner) == []

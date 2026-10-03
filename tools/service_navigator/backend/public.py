@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import json
 import secrets
-from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import Body, FastAPI, Request
@@ -51,7 +50,7 @@ def render_site(site: dict, principal: dict) -> HTMLResponse:
     navigation["appearance"] = {"theme": theme, "accentColor": accent_color}
     navigation_json = json.dumps(navigation, ensure_ascii=False).replace("</", "<\\/")
     page_add = '<button class="sn-page-add" data-add-page type="button" title="新增页面" aria-label="新增页面">+</button>' if principal.get("kind") == "owner" else ""
-    owner_controls = f'<button class="sn-owner-edit" data-toggle-page-edit>编辑导航</button><button class="sn-owner-edit" data-page-icons>管理图标</button><button class="sn-owner-edit" data-open-editor>外观与背景</button>' if principal.get("kind") == "owner" else ""
+    owner_controls = '<button class="sn-owner-edit" data-toggle-page-edit>编辑导航</button><button class="sn-owner-edit" data-page-icons>管理图标</button><button class="sn-owner-edit" data-open-editor>外观与背景</button>' if principal.get("kind") == "owner" else ""
     identity = ""
     if principal.get("kind") in {"owner", "user", "password"}:
         label = "Guest" if principal.get("kind") == "password" else str(principal.get("label") or "")

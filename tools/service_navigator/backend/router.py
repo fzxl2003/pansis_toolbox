@@ -65,15 +65,25 @@ class NavigationOrderPayload(BaseModel):
     pageIds: list[str] = []
 
 
+class TargetOrderPayload(BaseModel):
+    targetIds: list[str] = []
+
+
 class NavigationItemPayload(BaseModel):
     pageId: str = ""
-    name: str = ""
     size: str = "small"
-    iconSource: str = "none"
+    iconId: str = ""
+
+
+class NavigationIconPayload(BaseModel):
+    name: str = ""
+    size: str = ""
+    iconSource: str = "text"
     faviconServiceId: str = ""
     iconText: str = ""
     iconColor: str = "#4f7cff"
     serviceIds: list[str] = []
+    detectedServiceId: str = ""
 
 
 class NavigationLayoutPayload(BaseModel):
@@ -118,6 +128,11 @@ def add_target(request: Request, payload: TargetPayload) -> dict:
 @router.get("/targets")
 def targets(request: Request) -> dict:
     return {"targets": service.list_targets(require_user(request))}
+
+
+@router.put("/targets/order")
+def order_targets(request: Request, payload: TargetOrderPayload) -> dict:
+    return {"targets": service.reorder_targets(payload.targetIds, require_user(request))}
 
 
 @router.put("/targets/{target_id}")
@@ -165,6 +180,43 @@ def navigation(request: Request) -> dict:
     return {"navigation": service.get_navigation(require_user(request))}
 
 
+@router.get("/navigation/icons")
+def list_navigation_icons(request: Request) -> dict:
+    return {"icons": service.list_nav_icons(require_user(request))}
+
+
+@router.post("/navigation/icons", status_code=201)
+def create_navigation_icon(request: Request, payload: NavigationIconPayload) -> dict:
+    return {"icon": service.create_nav_icon(payload.model_dump(), require_user(request))}
+
+
+@router.put("/navigation/icons/{icon_id}")
+def update_navigation_icon(request: Request, icon_id: str, payload: NavigationIconPayload) -> dict:
+    return {"icon": service.update_nav_icon(icon_id, payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.delete("/navigation/icons/{icon_id}")
+def delete_navigation_icon(request: Request, icon_id: str) -> dict[str, bool]:
+    service.delete_nav_icon(icon_id, require_user(request))
+    return {"deleted": True}
+
+
+@router.post("/navigation/icons/{icon_id}/icon", status_code=201)
+async def upload_navigation_icon(request: Request, icon_id: str, file: UploadFile = File(...)) -> dict:
+    content = await file.read(service.NAV_ICON_LIMIT + 1)
+    return {"icon": service.update_nav_custom_icon(icon_id, file.filename or "icon", content, require_user(request))}
+
+
+@router.delete("/navigation/icons/{icon_id}/icon")
+def delete_navigation_icon_file(request: Request, icon_id: str) -> dict:
+    return {"icon": service.clear_nav_custom_icon(icon_id, require_user(request))}
+
+
+@router.post("/navigation/icons/{icon_id}/revoke-default")
+def revoke_navigation_default(request: Request, icon_id: str) -> dict:
+    return {"icon": service.revoke_nav_default(icon_id, require_user(request))}
+
+
 @router.post("/navigation/pages", status_code=201)
 def create_navigation_page(request: Request, payload: NavigationPagePayload) -> dict:
     return {"page": service.create_nav_page(payload.model_dump(), require_user(request))}
@@ -205,22 +257,6 @@ def update_navigation_item(request: Request, item_id: str, payload: NavigationIt
 def delete_navigation_item(request: Request, item_id: str) -> dict[str, bool]:
     service.delete_nav_item(item_id, require_user(request))
     return {"deleted": True}
-
-
-@router.post("/navigation/items/{item_id}/icon", status_code=201)
-async def upload_navigation_icon(request: Request, item_id: str, file: UploadFile = File(...)) -> dict:
-    content = await file.read(service.NAV_ICON_LIMIT + 1)
-    return {"item": service.update_nav_custom_icon(item_id, file.filename or "icon", content, require_user(request))}
-
-
-@router.delete("/navigation/items/{item_id}/icon")
-def delete_navigation_icon(request: Request, item_id: str) -> dict:
-    return {"item": service.clear_nav_custom_icon(item_id, require_user(request))}
-
-
-@router.post("/navigation/items/{item_id}/revoke-default")
-def revoke_navigation_default(request: Request, item_id: str) -> dict:
-    return {"item": service.revoke_nav_default(item_id, require_user(request))}
 
 
 @router.put("/background")

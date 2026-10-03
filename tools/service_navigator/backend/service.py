@@ -149,7 +149,8 @@ def init_database(database: sqlite3.Connection) -> None:
         );
         CREATE TABLE IF NOT EXISTS service_navigator_targets (
           id TEXT PRIMARY KEY, site_id TEXT NOT NULL, label TEXT NOT NULL, address TEXT NOT NULL,
-          custom_ports TEXT NOT NULL DEFAULT '', show_in_navigation INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          custom_ports TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0,
+          show_in_navigation INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           UNIQUE(site_id, address), FOREIGN KEY(site_id) REFERENCES service_navigator_sites(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS service_navigator_services (
@@ -220,12 +221,30 @@ def init_database(database: sqlite3.Connection) -> None:
           FOREIGN KEY(site_id) REFERENCES service_navigator_sites(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS service_navigator_nav_items (
-          id TEXT PRIMARY KEY, page_id TEXT NOT NULL, name TEXT NOT NULL,
+          id TEXT PRIMARY KEY, page_id TEXT NOT NULL, icon_id TEXT NOT NULL, name TEXT NOT NULL,
           size TEXT NOT NULL DEFAULT 'small', icon_source TEXT NOT NULL DEFAULT 'none',
           icon_filename TEXT NOT NULL DEFAULT '', icon_text TEXT NOT NULL DEFAULT '', icon_color TEXT NOT NULL DEFAULT '#4f7cff', favicon_service_id TEXT,
           preference_revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           FOREIGN KEY(page_id) REFERENCES service_navigator_nav_pages(id) ON DELETE CASCADE,
+          FOREIGN KEY(icon_id) REFERENCES service_navigator_nav_icons(id) ON DELETE CASCADE,
           FOREIGN KEY(favicon_service_id) REFERENCES service_navigator_services(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS service_navigator_nav_icons (
+          id TEXT PRIMARY KEY, site_id TEXT NOT NULL, name TEXT NOT NULL,
+          icon_source TEXT NOT NULL DEFAULT 'text', icon_filename TEXT NOT NULL DEFAULT '',
+          icon_text TEXT NOT NULL DEFAULT '', icon_color TEXT NOT NULL DEFAULT '#4f7cff',
+          favicon_service_id TEXT, detected_service_id TEXT,
+          preference_revision INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          FOREIGN KEY(site_id) REFERENCES service_navigator_sites(id) ON DELETE CASCADE,
+          FOREIGN KEY(favicon_service_id) REFERENCES service_navigator_services(id) ON DELETE SET NULL,
+          FOREIGN KEY(detected_service_id) REFERENCES service_navigator_services(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS service_navigator_nav_icon_services (
+          icon_id TEXT NOT NULL, service_id TEXT NOT NULL,
+          PRIMARY KEY(icon_id, service_id),
+          FOREIGN KEY(icon_id) REFERENCES service_navigator_nav_icons(id) ON DELETE CASCADE,
+          FOREIGN KEY(service_id) REFERENCES service_navigator_services(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS service_navigator_nav_item_services (
           item_id TEXT NOT NULL, service_id TEXT NOT NULL,
@@ -245,6 +264,7 @@ def init_database(database: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_service_navigator_health_events_site ON service_navigator_health_events(site_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_pages_site ON service_navigator_nav_pages(site_id, sort_order);
         CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_items_page ON service_navigator_nav_items(page_id);
+        CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_icons_site ON service_navigator_nav_icons(site_id, sort_order);
         """
     )
     _ensure_column(database, "service_navigator_services", "health_enabled", "INTEGER NOT NULL DEFAULT 1")
@@ -262,7 +282,9 @@ def init_database(database: sqlite3.Connection) -> None:
     _ensure_column(database, "service_navigator_sites", "accent_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
     _ensure_column(database, "service_navigator_nav_items", "icon_text", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(database, "service_navigator_nav_items", "icon_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
+    _ensure_column(database, "service_navigator_nav_items", "icon_id", "TEXT")
     _ensure_column(database, "service_navigator_targets", "show_in_navigation", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(database, "service_navigator_targets", "sort_order", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(database, "service_navigator_nav_pages", "visible", "INTEGER NOT NULL DEFAULT 1")
     # Services created before health checks existed have the column default of
     # one. Do this compatibility write only once per database so simultaneous
@@ -284,6 +306,7 @@ def init_database(database: sqlite3.Connection) -> None:
         database.execute("""UPDATE service_navigator_services SET service_type='http'
             WHERE service_type='port' AND (lower(service_name) LIKE '%http%' OR port IN
             (80,81,443,444,591,593,8000,8008,8080,8081,8088,8443,8888,9000,9090))""")
+    _migrate_navigation_icons(database)
     with RECOVERY_LOCK:
         if not RECOVERY_DONE:
             database.execute("UPDATE service_navigator_scan_runs SET status='interrupted', finished_at=?, error='服务重启导致扫描中断' WHERE status IN ('queued','running')", (now_iso(),))
@@ -295,6 +318,35 @@ def _ensure_column(database: sqlite3.Connection, table: str, column: str, defini
     columns = {row[1] for row in database.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         database.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_navigation_icons(database: sqlite3.Connection) -> None:
+    """Convert inline page items to a reusable, site-wide icon library."""
+    legacy = database.execute("""SELECT i.*,p.site_id FROM service_navigator_nav_items i
+        JOIN service_navigator_nav_pages p ON p.id=i.page_id WHERE i.icon_id IS NULL""").fetchall()
+    for row in legacy:
+        icon_id, now = uuid4().hex, now_iso()
+        source = row["icon_source"] if row["icon_source"] in {"text", "favicon", "custom"} else "text"
+        database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,
+            icon_text,icon_color,favicon_service_id,preference_revision,sort_order,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, row["site_id"], row["name"], source,
+            row["icon_filename"], row["icon_text"] or row["name"][:1], row["icon_color"], row["favicon_service_id"],
+            int(row["preference_revision"] or 1), 0, now, now))
+        links = database.execute("SELECT service_id FROM service_navigator_nav_item_services WHERE item_id=?", (row["id"],)).fetchall()
+        database.executemany("INSERT OR IGNORE INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, link["service_id"]) for link in links])
+        database.execute("UPDATE service_navigator_nav_items SET icon_id=?,updated_at=? WHERE id=?", (icon_id, now, row["id"]))
+    for service in database.execute("""SELECT s.*,t.site_id FROM service_navigator_services s
+            JOIN service_navigator_targets t ON t.id=s.target_id""").fetchall():
+        if database.execute("SELECT 1 FROM service_navigator_nav_icon_services WHERE service_id=? LIMIT 1", (service["id"],)).fetchone():
+            continue
+        name = service["display_name"] or service["http_title"] or service["service_name"] or f"TCP/{service['port']}"
+        source = "favicon" if service["favicon_filename"] else "text"
+        icon_id, now = uuid4().hex, now_iso()
+        database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,
+            icon_text,icon_color,favicon_service_id,detected_service_id,preference_revision,sort_order,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, service["site_id"], name, source, "",
+            name[:1], "#4f7cff", service["id"] if source == "favicon" else None, service["id"], 1, 0, now, now))
+        database.execute("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", (icon_id, service["id"]))
 
 
 def _row(row: sqlite3.Row) -> dict[str, Any]:
@@ -314,7 +366,7 @@ def _site_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 def _target_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = _row(row) if isinstance(row, sqlite3.Row) else dict(row)
-    return {"id": item["id"], "label": item["label"], "address": item["address"], "customPorts": item["custom_ports"], "showInNavigation": bool(item.get("show_in_navigation", 1)), "createdAt": item["created_at"], "updatedAt": item["updated_at"]}
+    return {"id": item["id"], "label": item["label"], "address": item["address"], "customPorts": item["custom_ports"], "sortOrder": int(item.get("sort_order", 0)), "showInNavigation": bool(item.get("show_in_navigation", 1)), "createdAt": item["created_at"], "updatedAt": item["updated_at"]}
 
 
 def _service_public(row: sqlite3.Row | dict[str, Any], *, include_fingerprint: bool = True) -> dict[str, Any]:
@@ -474,8 +526,7 @@ def delete_site(user: User) -> None:
     site = _owner_site(user)
     with conn() as database:
         filenames = [row[0] for row in database.execute("SELECT favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=?", (site["id"],)).fetchall()]
-        navigation_filenames = [row[0] for row in database.execute("""SELECT i.icon_filename FROM service_navigator_nav_items i
-            JOIN service_navigator_nav_pages p ON p.id=i.page_id WHERE p.site_id=? AND i.icon_filename<>''""", (site["id"],)).fetchall()]
+        navigation_filenames = [row[0] for row in database.execute("SELECT icon_filename FROM service_navigator_nav_icons WHERE site_id=? AND icon_filename<>''", (site["id"],)).fetchall()]
         background_filename = database.execute("SELECT background_filename FROM service_navigator_sites WHERE id=?", (site["id"],)).fetchone()[0]
         database.execute("DELETE FROM service_navigator_sites WHERE id=?", (site["id"],))
         database.commit()
@@ -502,39 +553,230 @@ def site_detail(site_id: str, user: User) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _navigation_detail(site_id: str) -> dict[str, Any]:
-    """Owner-only layout data. Positions are deliberately stored per fixed grid."""
+    """Return the global icon library plus pages that reference its icons."""
     with conn() as database:
         pages = database.execute("SELECT * FROM service_navigator_nav_pages WHERE site_id=? ORDER BY sort_order,id", (site_id,)).fetchall()
-        items = database.execute("""SELECT i.* FROM service_navigator_nav_items i
-            JOIN service_navigator_nav_pages p ON p.id=i.page_id WHERE p.site_id=? ORDER BY i.created_at,i.id""", (site_id,)).fetchall()
-        services = database.execute("""SELECT s.* FROM service_navigator_services s
-            JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=?""", (site_id,)).fetchall()
-        links = database.execute("""SELECT l.item_id,l.service_id FROM service_navigator_nav_item_services l
-            JOIN service_navigator_nav_items i ON i.id=l.item_id JOIN service_navigator_nav_pages p ON p.id=i.page_id
-            WHERE p.site_id=?""", (site_id,)).fetchall()
+        items = database.execute("""SELECT i.id,i.page_id,i.size,i.created_at,i.updated_at,
+                icon.id AS icon_id,icon.name,icon.icon_source,icon.icon_filename,icon.icon_text,
+                icon.icon_color,icon.favicon_service_id,icon.preference_revision
+            FROM service_navigator_nav_items i
+            JOIN service_navigator_nav_pages page ON page.id=i.page_id
+            JOIN service_navigator_nav_icons icon ON icon.id=i.icon_id
+            WHERE page.site_id=? ORDER BY i.created_at,i.id""", (site_id,)).fetchall()
+        icons = database.execute("SELECT * FROM service_navigator_nav_icons WHERE site_id=? ORDER BY detected_service_id IS NULL,detected_service_id,sort_order,name,id", (site_id,)).fetchall()
+        services = database.execute("""SELECT s.*,t.label AS target_label,t.address AS target_address
+            FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id
+            WHERE t.site_id=? ORDER BY s.display_name,s.port,s.id""", (site_id,)).fetchall()
+        links = database.execute("""SELECT l.icon_id,l.service_id FROM service_navigator_nav_icon_services l
+            JOIN service_navigator_nav_icons icon ON icon.id=l.icon_id WHERE icon.site_id=?""", (site_id,)).fetchall()
         layouts = database.execute("""SELECT l.* FROM service_navigator_nav_item_layouts l
-            JOIN service_navigator_nav_items i ON i.id=l.item_id JOIN service_navigator_nav_pages p ON p.id=i.page_id
-            WHERE p.site_id=?""", (site_id,)).fetchall()
+            JOIN service_navigator_nav_items i ON i.id=l.item_id
+            JOIN service_navigator_nav_pages p ON p.id=i.page_id WHERE p.site_id=?""", (site_id,)).fetchall()
+        targets = database.execute("SELECT id,label,address,custom_ports,show_in_navigation,sort_order FROM service_navigator_targets WHERE site_id=? ORDER BY sort_order,label,address", (site_id,)).fetchall()
     service_by_id = {row["id"]: _service_public(row) for row in services}
     service_ids: dict[str, list[str]] = {}
     for link in links:
-        service_ids.setdefault(link["item_id"], []).append(link["service_id"])
+        service_ids.setdefault(link["icon_id"], []).append(link["service_id"])
     layouts_by_item: dict[str, dict[str, dict[str, int]]] = {}
     for layout in layouts:
         layouts_by_item.setdefault(layout["item_id"], {})[str(layout["breakpoint"])] = {"x": int(layout["grid_x"]), "y": int(layout["grid_y"])}
+
+    def icon_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        selected = [service_by_id[service_id] for service_id in service_ids.get(row["id"], []) if service_id in service_by_id]
+        return {
+            "id": row["id"], "name": row["name"], "iconSource": row["icon_source"],
+            "iconFilename": row["icon_filename"], "iconText": row["icon_text"],
+            "iconColor": _normalise_accent_color(row["icon_color"]),
+            "faviconServiceId": row["favicon_service_id"] or "",
+            "detectedServiceId": dict(row).get("detected_service_id") or "",
+            "preferenceRevision": int(row["preference_revision"]),
+            "serviceIds": [entry["id"] for entry in selected], "services": selected,
+            "iconUrl": f"/service-nav/navigation-icon/{row['id']}" if row["icon_source"] == "custom" and row["icon_filename"] else "",
+            "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+        }
+
+    icon_by_id = {row["id"]: icon_public(row) for row in icons}
     item_by_page: dict[str, list[dict[str, Any]]] = {}
     for row in items:
-        selected = [service_by_id[service_id] for service_id in service_ids.get(row["id"], []) if service_id in service_by_id]
+        icon = icon_by_id[row["icon_id"]]
         item_by_page.setdefault(row["page_id"], []).append({
-            "id": row["id"], "pageId": row["page_id"], "name": row["name"], "size": row["size"],
-            "iconSource": row["icon_source"], "iconFilename": row["icon_filename"],
-            "iconText": row["icon_text"], "iconColor": _normalise_accent_color(row["icon_color"]),
-            "faviconServiceId": row["favicon_service_id"] or "", "preferenceRevision": int(row["preference_revision"]),
-            "serviceIds": [item["id"] for item in selected], "services": selected,
+            "id": row["id"], "pageId": row["page_id"], "iconId": row["icon_id"], "size": row["size"],
+            **{key: value for key, value in icon.items() if key not in {"id", "detectedServiceId", "iconUrl"}},
             "layouts": layouts_by_item.get(row["id"], {}), "createdAt": row["created_at"], "updatedAt": row["updated_at"],
         })
-    return {"breakpoints": [16], "pages": [{"id": row["id"], "name": row["name"], "sortOrder": int(row["sort_order"]), "visible": bool(row["visible"]), "items": item_by_page.get(row["id"], [])} for row in pages]}
+    return {
+        "breakpoints": [16],
+        "pages": [{"id": row["id"], "name": row["name"], "sortOrder": int(row["sort_order"]), "visible": bool(row["visible"]), "items": item_by_page.get(row["id"], [])} for row in pages],
+        "icons": list(icon_by_id.values()),
+        "targetPages": [{"id": f"target:{row['id']}", "targetId": row["id"], "name": row["label"], "address": row["address"], "customPorts": row["custom_ports"], "visible": bool(row["show_in_navigation"])} for row in targets],
+        "services": list(service_by_id.values()),
+    }
 
+
+def get_navigation(user: User) -> dict[str, Any]:
+    return _navigation_detail(_owner_site(user)["id"])
+
+
+def _owned_icon(database: sqlite3.Connection, site_id: str, icon_id: str) -> sqlite3.Row:
+    row = database.execute("SELECT * FROM service_navigator_nav_icons WHERE id=? AND site_id=?", (icon_id, site_id)).fetchone()
+    if not row:
+        raise ToolboxError("NAV_ICON_NOT_FOUND", "导航图标不存在", status_code=404, tool_id=TOOL_ID)
+    return row
+
+
+def _library_source(value: Any, favicon_service_id: str, service_ids: list[str]) -> str:
+    source = str(value or "text")
+    if source not in {"text", "favicon", "custom"}:
+        raise ToolboxError("INVALID_NAV_ICON", "图标来源不合法", status_code=400, tool_id=TOOL_ID)
+    if source == "favicon" and favicon_service_id not in service_ids:
+        raise ToolboxError("INVALID_NAV_ICON", "favicon 必须来自已关联服务", status_code=400, tool_id=TOOL_ID)
+    return source
+
+
+def list_nav_icons(user: User) -> list[dict[str, Any]]:
+    return _navigation_detail(_owner_site(user)["id"])["icons"]
+
+
+def create_nav_icon(payload: dict[str, Any], user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    detected_service_id = str(payload.get("detectedServiceId") or "")
+    service_ids = list(payload.get("serviceIds") or ([detected_service_id] if detected_service_id else []))
+    with conn() as database:
+        service_ids, _kind = _validate_item_services(database, site["id"], service_ids)
+        if detected_service_id and service_ids != [detected_service_id]:
+            raise ToolboxError("INVALID_NAV_SERVICES", "已探测服务图标只能关联当前服务", status_code=400, tool_id=TOOL_ID)
+        favicon_service_id = str(payload.get("faviconServiceId") or "")
+        source = _library_source(payload.get("iconSource", "text"), favicon_service_id, service_ids)
+        icon_id, now = uuid4().hex, now_iso()
+        database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,icon_text,
+            icon_color,favicon_service_id,detected_service_id,preference_revision,sort_order,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, site["id"], _clean_nav_name(payload.get("name"), "图标名称"),
+            source, "", str(payload.get("iconText") or "")[:4], _normalise_accent_color(payload.get("iconColor", "#4f7cff")),
+            favicon_service_id or None, detected_service_id or None, 1, 0, now, now))
+        database.executemany("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, service_id) for service_id in service_ids])
+        database.commit()
+    return _navigation_icon_for_user(icon_id, user)
+
+
+def _navigation_icon_for_user(icon_id: str, user: User) -> dict[str, Any]:
+    for icon in get_navigation(user)["icons"]:
+        if icon["id"] == icon_id:
+            return icon
+    raise ToolboxError("NAV_ICON_NOT_FOUND", "导航图标不存在", status_code=404, tool_id=TOOL_ID)
+
+
+def update_nav_icon(icon_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    with conn() as database:
+        old = _owned_icon(database, site["id"], icon_id)
+        detected_service_id = str(old["detected_service_id"] or payload.get("detectedServiceId") or "")
+        if "serviceIds" in payload or "detectedServiceId" in payload:
+            service_ids = list(payload.get("serviceIds") or ([detected_service_id] if detected_service_id else []))
+            service_ids, _kind = _validate_item_services(database, site["id"], service_ids)
+            if detected_service_id and service_ids != [detected_service_id]:
+                raise ToolboxError("INVALID_NAV_SERVICES", "已探测服务图标只能关联当前服务", status_code=400, tool_id=TOOL_ID)
+        else:
+            service_ids = [row["service_id"] for row in database.execute("SELECT service_id FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,)).fetchall()]
+            _validate_item_services(database, site["id"], service_ids)
+        favicon_service_id = str(payload.get("faviconServiceId", old["favicon_service_id"] or "") or "")
+        source = _library_source(payload.get("iconSource", old["icon_source"]), favicon_service_id, service_ids)
+        database.execute("""UPDATE service_navigator_nav_icons SET name=?,icon_source=?,icon_text=?,icon_color=?,
+            favicon_service_id=?,preference_revision=preference_revision+1,updated_at=? WHERE id=?""",
+            (_clean_nav_name(payload.get("name", old["name"]), "图标名称"), source,
+             str(payload.get("iconText", old["icon_text"]) or "")[:4],
+             _normalise_accent_color(payload.get("iconColor", old["icon_color"])), favicon_service_id or None, now_iso(), icon_id))
+        if "serviceIds" in payload:
+            database.execute("DELETE FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,))
+            database.executemany("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, service_id) for service_id in service_ids])
+        database.commit()
+    return _navigation_icon_for_user(icon_id, user)
+
+
+def delete_nav_icon(icon_id: str, user: User) -> None:
+    site = _owner_site(user)
+    with conn() as database:
+        old = _owned_icon(database, site["id"], icon_id)
+        database.execute("DELETE FROM service_navigator_nav_icons WHERE id=?", (icon_id,))
+        database.commit()
+    _remove_navigation_icon(old["icon_filename"])
+
+
+def create_nav_item(payload: dict[str, Any], user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    with conn() as database:
+        page = _owned_page(database, site["id"], str(payload.get("pageId") or ""))
+        icon = _owned_icon(database, site["id"], str(payload.get("iconId") or ""))
+        size = _nav_size(payload.get("size"))
+        item_id, now = uuid4().hex, now_iso()
+        database.execute("INSERT INTO service_navigator_nav_items(id,page_id,icon_id,name,size,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (item_id, page["id"], icon["id"], icon["name"], size, now, now))
+        x, y = _first_available_layout(database, page["id"], 16, size)
+        database.execute("INSERT INTO service_navigator_nav_item_layouts(item_id,breakpoint,grid_x,grid_y) VALUES(?,?,?,?)", (item_id, 16, x, y))
+        database.commit()
+    return _navigation_item_for_user(item_id, user)
+
+
+def _navigation_item_for_user(item_id: str, user: User) -> dict[str, Any]:
+    for page in get_navigation(user)["pages"]:
+        for item in page["items"]:
+            if item["id"] == item_id:
+                return item
+    raise ToolboxError("NAV_ITEM_NOT_FOUND", "页面图标不存在", status_code=404, tool_id=TOOL_ID)
+
+
+def update_nav_item(item_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    with conn() as database:
+        item = _owned_item(database, site["id"], item_id)
+        if not item["icon_id"]:
+            raise ToolboxError("NAV_ITEM_NOT_FOUND", "页面图标缺少全局图标", status_code=400, tool_id=TOOL_ID)
+        size = _nav_size(payload.get("size", item["size"]))
+        database.execute("UPDATE service_navigator_nav_items SET size=?,updated_at=? WHERE id=?", (size, now_iso(), item_id))
+        database.commit()
+    return _navigation_item_for_user(item_id, user)
+
+
+def delete_nav_item(item_id: str, user: User) -> None:
+    site = _owner_site(user)
+    with conn() as database:
+        _owned_item(database, site["id"], item_id)
+        database.execute("DELETE FROM service_navigator_nav_items WHERE id=?", (item_id,))
+        database.commit()
+
+
+def revoke_nav_default(icon_id: str, user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    with conn() as database:
+        _owned_icon(database, site["id"], icon_id)
+        database.execute("UPDATE service_navigator_nav_icons SET preference_revision=preference_revision+1,updated_at=? WHERE id=?", (now_iso(), icon_id))
+        database.commit()
+    return _navigation_icon_for_user(icon_id, user)
+
+
+def update_nav_custom_icon(icon_id: str, filename: str, content: bytes, user: User) -> dict[str, Any]:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in NAV_ICON_SUFFIXES:
+        raise ToolboxError("INVALID_NAV_ICON", "图标仅支持 PNG、JPEG、WebP 或 ICO", status_code=400, tool_id=TOOL_ID)
+    if not content or len(content) > NAV_ICON_LIMIT:
+        raise ToolboxError("INVALID_NAV_ICON", "图标不能超过 1MB", status_code=400, tool_id=TOOL_ID)
+    site = _owner_site(user)
+    with conn() as database:
+        icon = _owned_icon(database, site["id"], icon_id)
+        saved = f"{icon_id}-{uuid4().hex[:8]}{suffix}"
+        (navigation_icon_dir() / saved).write_bytes(content)
+        database.execute("UPDATE service_navigator_nav_icons SET icon_source='custom',icon_filename=?,updated_at=? WHERE id=?", (saved, now_iso(), icon_id))
+        database.commit()
+    _remove_navigation_icon(icon["icon_filename"])
+    return _navigation_icon_for_user(icon_id, user)
+
+
+def clear_nav_custom_icon(icon_id: str, user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    with conn() as database:
+        icon = _owned_icon(database, site["id"], icon_id)
+        database.execute("UPDATE service_navigator_nav_icons SET icon_source='text',icon_filename='',updated_at=? WHERE id=?", (now_iso(), icon_id))
+        database.commit()
+    _remove_navigation_icon(icon["icon_filename"])
+    return _navigation_icon_for_user(icon_id, user)
 
 def get_navigation(user: User) -> dict[str, Any]:
     return _navigation_detail(_owner_site(user)["id"])
@@ -629,14 +871,6 @@ def _validate_item_services(database: sqlite3.Connection, site_id: str, service_
     return ids, next(iter(kinds))
 
 
-def _clean_icon_source(value: Any, favicon_service_id: str, service_ids: list[str]) -> str:
-    source = str(value or "none")
-    if source not in {"none", "favicon", "custom", "text"}:
-        raise ToolboxError("INVALID_NAV_ICON", "图标来源不合法", status_code=400, tool_id=TOOL_ID)
-    if source == "favicon" and favicon_service_id not in service_ids:
-        raise ToolboxError("INVALID_NAV_ICON", "favicon 必须来自已关联服务", status_code=400, tool_id=TOOL_ID)
-    return source
-
 
 def _first_available_layout(database: sqlite3.Connection, page_id: str, breakpoint: int, size: str) -> tuple[int, int]:
     width, height = NAV_SIZES[size]
@@ -651,64 +885,6 @@ def _first_available_layout(database: sqlite3.Connection, page_id: str, breakpoi
             if all((cell_x, cell_y) not in occupied for cell_x in range(x, x + width) for cell_y in range(y, y + height)):
                 return x, y
     raise ToolboxError("NAV_LAYOUT_FULL", "导航布局已满", status_code=400, tool_id=TOOL_ID)
-
-
-def create_nav_item(payload: dict[str, Any], user: User) -> dict[str, Any]:
-    site = _owner_site(user)
-    with conn() as database:
-        page = _owned_page(database, site["id"], str(payload.get("pageId") or ""))
-        service_ids, _kind = _validate_item_services(database, site["id"], payload.get("serviceIds"))
-        size = _nav_size(payload.get("size"))
-        favicon_service_id = str(payload.get("faviconServiceId") or "")
-        source = _clean_icon_source(payload.get("iconSource"), favicon_service_id, service_ids)
-        item_id, now = uuid4().hex, now_iso()
-        database.execute("INSERT INTO service_navigator_nav_items(id,page_id,name,size,icon_source,icon_text,icon_color,favicon_service_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (item_id, page["id"], _clean_nav_name(payload.get("name"), "图标名称"), size, source, str(payload.get("iconText") or "")[:4], _normalise_accent_color(payload.get("iconColor")), favicon_service_id or None, now, now))
-        database.executemany("INSERT INTO service_navigator_nav_item_services(item_id,service_id) VALUES(?,?)", [(item_id, service_id) for service_id in service_ids])
-        x, y = _first_available_layout(database, page["id"], 16, size)
-        database.execute("INSERT INTO service_navigator_nav_item_layouts(item_id,breakpoint,grid_x,grid_y) VALUES(?,?,?,?)", (item_id, 16, x, y))
-        database.commit()
-    return _navigation_item_for_user(item_id, user)
-
-
-def _navigation_item_for_user(item_id: str, user: User) -> dict[str, Any]:
-    for page in get_navigation(user)["pages"]:
-        for item in page["items"]:
-            if item["id"] == item_id:
-                return item
-    raise ToolboxError("NAV_ITEM_NOT_FOUND", "导航图标不存在", status_code=404, tool_id=TOOL_ID)
-
-
-def update_nav_item(item_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-    site = _owner_site(user)
-    with conn() as database:
-        item = _owned_item(database, site["id"], item_id)
-        existing_ids = [row[0] for row in database.execute("SELECT service_id FROM service_navigator_nav_item_services WHERE item_id=?", (item_id,)).fetchall()]
-        service_ids = existing_ids
-        changed_services = False
-        if "serviceIds" in payload:
-            service_ids, _kind = _validate_item_services(database, site["id"], payload["serviceIds"])
-            changed_services = set(service_ids) != set(existing_ids)
-        else:
-            _validate_item_services(database, site["id"], service_ids)
-        size = _nav_size(payload.get("size", item["size"]))
-        favicon_service_id = str(payload.get("faviconServiceId", item["favicon_service_id"] or "") or "")
-        source = _clean_icon_source(payload.get("iconSource", item["icon_source"]), favicon_service_id, service_ids)
-        revision = int(item["preference_revision"]) + (1 if changed_services else 0)
-        database.execute("UPDATE service_navigator_nav_items SET name=?,size=?,icon_source=?,icon_text=?,icon_color=?,favicon_service_id=?,preference_revision=?,updated_at=? WHERE id=?", (_clean_nav_name(payload.get("name", item["name"]), "图标名称"), size, source, str(payload.get("iconText", item["icon_text"]) or "")[:4], _normalise_accent_color(payload.get("iconColor", item["icon_color"])), favicon_service_id or None, revision, now_iso(), item_id))
-        if changed_services:
-            database.execute("DELETE FROM service_navigator_nav_item_services WHERE item_id=?", (item_id,))
-            database.executemany("INSERT INTO service_navigator_nav_item_services(item_id,service_id) VALUES(?,?)", [(item_id, service_id) for service_id in service_ids])
-        database.commit()
-    return _navigation_item_for_user(item_id, user)
-
-
-def delete_nav_item(item_id: str, user: User) -> None:
-    site = _owner_site(user)
-    with conn() as database:
-        item = _owned_item(database, site["id"], item_id)
-        database.execute("DELETE FROM service_navigator_nav_items WHERE id=?", (item_id,))
-        database.commit()
-    _remove_navigation_icon(item["icon_filename"])
 
 
 def save_nav_layout(page_id: str, breakpoint: int, placements: list[dict[str, Any]], user: User) -> dict[str, Any]:
@@ -742,48 +918,12 @@ def save_nav_layout(page_id: str, breakpoint: int, placements: list[dict[str, An
     return get_navigation(user)
 
 
-def revoke_nav_default(item_id: str, user: User) -> dict[str, Any]:
-    site = _owner_site(user)
-    with conn() as database:
-        _owned_item(database, site["id"], item_id)
-        database.execute("UPDATE service_navigator_nav_items SET preference_revision=preference_revision+1,updated_at=? WHERE id=?", (now_iso(), item_id))
-        database.commit()
-    return _navigation_item_for_user(item_id, user)
-
-
 def _remove_navigation_icon(filename: str) -> None:
     if not filename:
         return
     path = (navigation_icon_dir() / Path(filename).name).resolve()
     if path.parent == navigation_icon_dir().resolve():
         path.unlink(missing_ok=True)
-
-
-def update_nav_custom_icon(item_id: str, filename: str, content: bytes, user: User) -> dict[str, Any]:
-    suffix = Path(filename).suffix.lower()
-    if suffix not in NAV_ICON_SUFFIXES:
-        raise ToolboxError("INVALID_NAV_ICON", "图标仅支持 PNG、JPEG、WebP 或 ICO", status_code=400, tool_id=TOOL_ID)
-    if not content or len(content) > NAV_ICON_LIMIT:
-        raise ToolboxError("INVALID_NAV_ICON", "图标不能超过 1MB", status_code=400, tool_id=TOOL_ID)
-    site = _owner_site(user)
-    with conn() as database:
-        item = _owned_item(database, site["id"], item_id)
-        saved = f"{item_id}-{uuid4().hex[:8]}{suffix}"
-        (navigation_icon_dir() / saved).write_bytes(content)
-        database.execute("UPDATE service_navigator_nav_items SET icon_source='custom',icon_filename=?,updated_at=? WHERE id=?", (saved, now_iso(), item_id))
-        database.commit()
-    _remove_navigation_icon(item["icon_filename"])
-    return _navigation_item_for_user(item_id, user)
-
-
-def clear_nav_custom_icon(item_id: str, user: User) -> dict[str, Any]:
-    site = _owner_site(user)
-    with conn() as database:
-        item = _owned_item(database, site["id"], item_id)
-        database.execute("UPDATE service_navigator_nav_items SET icon_source='none',icon_filename='',updated_at=? WHERE id=?", (now_iso(), item_id))
-        database.commit()
-    _remove_navigation_icon(item["icon_filename"])
-    return _navigation_item_for_user(item_id, user)
 
 
 def update_background_source(source: str, user: User) -> dict[str, Any]:
@@ -833,13 +973,8 @@ def _remove_background(filename: str) -> None:
 
 
 def _cleanup_empty_navigation_items(database: sqlite3.Connection, site_id: str) -> list[str]:
-    """Remove icons that became meaningless after all linked services vanished."""
-    rows = database.execute("""SELECT i.id,i.icon_filename FROM service_navigator_nav_items i
-        JOIN service_navigator_nav_pages p ON p.id=i.page_id WHERE p.site_id=?
-        AND NOT EXISTS (SELECT 1 FROM service_navigator_nav_item_services links WHERE links.item_id=i.id)""", (site_id,)).fetchall()
-    if rows:
-        database.executemany("DELETE FROM service_navigator_nav_items WHERE id=?", [(row["id"],) for row in rows])
-    return [row["icon_filename"] for row in rows if row["icon_filename"]]
+    """Placement and icon cleanup is explicit; deleting services keeps library icons."""
+    return []
 
 
 def add_target(payload: dict[str, Any], user: User) -> dict[str, Any]:
@@ -854,9 +989,10 @@ def add_target(payload: dict[str, Any], user: User) -> dict[str, Any]:
         if count >= MAX_TARGETS:
             raise ToolboxError("TARGET_LIMIT", f"每个站点最多配置 {MAX_TARGETS} 个目标", status_code=400, tool_id=TOOL_ID)
         now = now_iso()
+        order = int(database.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM service_navigator_targets WHERE site_id=?", (site["id"],)).fetchone()[0])
         target_id = uuid4().hex
         try:
-            database.execute("INSERT INTO service_navigator_targets(id,site_id,label,address,custom_ports,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (target_id, site["id"], label, address, custom_ports, now, now))
+            database.execute("INSERT INTO service_navigator_targets(id,site_id,label,address,custom_ports,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (target_id, site["id"], label, address, custom_ports, order, now, now))
             database.commit()
         except sqlite3.IntegrityError as exc:
             raise ToolboxError("TARGET_EXISTS", "该目标已存在", status_code=409, tool_id=TOOL_ID) from exc
@@ -907,8 +1043,20 @@ def delete_target(target_id: str, user: User) -> None:
 def list_targets(user: User) -> list[dict[str, Any]]:
     site = _owner_site(user)
     with conn() as database:
-        rows = database.execute("SELECT * FROM service_navigator_targets WHERE site_id=? ORDER BY label,address", (site["id"],)).fetchall()
+        rows = database.execute("SELECT * FROM service_navigator_targets WHERE site_id=? ORDER BY sort_order,label,address", (site["id"],)).fetchall()
     return [_target_public(row) for row in rows]
+
+
+def reorder_targets(target_ids: list[str], user: User) -> list[dict[str, Any]]:
+    site = _owner_site(user)
+    with conn() as database:
+        existing = [row[0] for row in database.execute("SELECT id FROM service_navigator_targets WHERE site_id=? ORDER BY sort_order,label,address", (site["id"],)).fetchall()]
+        if set(existing) != set(target_ids) or len(existing) != len(target_ids) or any(not target_id for target_id in target_ids):
+            raise ToolboxError("INVALID_TARGET_ORDER", "固定页面排序数据不完整", status_code=400, tool_id=TOOL_ID)
+        for order, target_id in enumerate(target_ids):
+            database.execute("UPDATE service_navigator_targets SET sort_order=?,updated_at=? WHERE id=?", (order, now_iso(), target_id))
+        database.commit()
+    return list_targets(user)
 
 
 def list_services(user: User) -> list[dict[str, Any]]:
@@ -928,8 +1076,8 @@ def update_service(service_id: str, payload: dict[str, Any], user: User) -> dict
         if service_type not in {"http", "port"}:
             raise ToolboxError("INVALID_SERVICE_TYPE", "服务类型必须是 HTTP 服务或端口服务", status_code=400, tool_id=TOOL_ID)
         if service_type != row["service_type"]:
-            conflicting = database.execute("""SELECT 1 FROM service_navigator_nav_item_services links
-                JOIN service_navigator_nav_item_services peers ON peers.item_id=links.item_id AND peers.service_id<>links.service_id
+            conflicting = database.execute("""SELECT 1 FROM service_navigator_nav_icon_services links
+                JOIN service_navigator_nav_icon_services peers ON peers.icon_id=links.icon_id AND peers.service_id<>links.service_id
                 JOIN service_navigator_services peer_service ON peer_service.id=peers.service_id
                 WHERE links.service_id=? AND peer_service.service_type<>? LIMIT 1""", (service_id, service_type)).fetchone()
             if conflicting:
@@ -950,8 +1098,8 @@ def update_service(service_id: str, payload: dict[str, Any], user: User) -> dict
             values["health_enabled"] = 0
             values["health_url"] = ""
         if service_type != row["service_type"] or values["navigation_url"] != row["navigation_url"] or values["connection_command"] != row["connection_command"]:
-            database.execute("""UPDATE service_navigator_nav_items SET preference_revision=preference_revision+1,updated_at=?
-                WHERE id IN (SELECT item_id FROM service_navigator_nav_item_services WHERE service_id=?)""", (values["updated_at"], service_id))
+            database.execute("""UPDATE service_navigator_nav_icons SET preference_revision=preference_revision+1,updated_at=?
+                WHERE id IN (SELECT icon_id FROM service_navigator_nav_icon_services WHERE service_id=?)""", (values["updated_at"], service_id))
         database.execute("""UPDATE service_navigator_services SET display_name=:display_name,description=:description,navigation_url=:navigation_url,connection_command=:connection_command,service_type=:service_type,health_enabled=:health_enabled,health_url=:health_url,updated_at=:updated_at WHERE id=:id""", values)
         database.commit()
         updated = database.execute("SELECT * FROM service_navigator_services WHERE id=?", (service_id,)).fetchone()
@@ -1834,8 +1982,17 @@ def _responsive_layouts(items: list[dict[str, Any]]) -> dict[str, dict[str, dict
     return output
 
 
+def public_icon(service_id: str, site: dict[str, Any]) -> Path | None:
+    with conn() as database:
+        row = database.execute("""SELECT s.favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE s.id=? AND t.site_id=?""", (service_id, site["id"])).fetchone()
+    if not row or not row["favicon_filename"]:
+        return None
+    path = (icon_dir() / Path(row["favicon_filename"]).name).resolve()
+    return path if path.is_file() and path.parent == icon_dir().resolve() else None
+
+
 def public_navigation(site: dict[str, Any]) -> dict[str, Any]:
-    """Return only visitor-safe layout and endpoint data for the SSR page."""
+    """Return visitor-safe page placements; the global library stays owner-only."""
     services = {item["id"]: item for item in public_services(site)}
     detail = _navigation_detail(site["id"])
     pages: list[dict[str, Any]] = []
@@ -1846,16 +2003,16 @@ def public_navigation(site: dict[str, Any]) -> dict[str, Any]:
             linked = [services[service_id] for service_id in item["serviceIds"] if service_id in services]
             if not linked:
                 continue
+            service_types = {entry["serviceType"] for entry in linked}
+            if len(service_types) != 1:
+                continue
             source = item["iconSource"]
             if source == "custom" and item["iconFilename"]:
-                icon_url = f"/service-nav/navigation-icon/{item['id']}"
+                icon_url = f"/service-nav/navigation-icon/{item['iconId']}"
             elif source == "favicon" and item["faviconServiceId"] in services:
                 icon_url = services[item["faviconServiceId"]].get("faviconUrl", "")
             else:
                 icon_url = ""
-            service_types = {entry["serviceType"] for entry in linked}
-            if len(service_types) != 1:
-                continue
             items.append({
                 "id": item["id"], "name": item["name"], "size": item["size"], "iconUrl": icon_url,
                 "iconSource": source, "iconText": item.get("iconText", ""), "iconColor": item.get("iconColor", "#4f7cff"),
@@ -1864,18 +2021,9 @@ def public_navigation(site: dict[str, Any]) -> dict[str, Any]:
             })
         pages.append({"id": page["id"], "name": page["name"], "visible": page.get("visible", True), "items": items})
     with conn() as database:
-        targets = database.execute("SELECT id,label,address,custom_ports,show_in_navigation FROM service_navigator_targets WHERE site_id=? ORDER BY label,address", (site["id"],)).fetchall()
+        targets = database.execute("SELECT id,label,address,custom_ports,show_in_navigation,sort_order FROM service_navigator_targets WHERE site_id=? ORDER BY sort_order,label,address", (site["id"],)).fetchall()
     target_pages = [{"id": f"target:{row['id']}", "targetId": row["id"], "name": row["label"], "address": row["address"], "customPorts": row["custom_ports"], "visible": bool(row["show_in_navigation"])} for row in targets]
     return {"breakpoints": list(NAV_BREAKPOINTS), "targetPages": target_pages, "pages": pages, "services": list(services.values())}
-
-
-def public_icon(service_id: str, site: dict[str, Any]) -> Path | None:
-    with conn() as database:
-        row = database.execute("""SELECT s.favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE s.id=? AND t.site_id=?""", (service_id, site["id"])).fetchone()
-    if not row or not row["favicon_filename"]:
-        return None
-    path = (icon_dir() / Path(row["favicon_filename"]).name).resolve()
-    return path if path.is_file() and path.parent == icon_dir().resolve() else None
 
 
 def public_site_for_icon(service_id: str) -> dict[str, Any] | None:
@@ -1884,18 +2032,16 @@ def public_site_for_icon(service_id: str) -> dict[str, Any] | None:
     return public_site(row["slug"]) if row else None
 
 
-def public_site_for_navigation_icon(item_id: str) -> dict[str, Any] | None:
+def public_site_for_navigation_icon(icon_id: str) -> dict[str, Any] | None:
     with conn() as database:
         row = database.execute("""SELECT site.slug FROM service_navigator_sites site
-            JOIN service_navigator_nav_pages page ON page.site_id=site.id
-            JOIN service_navigator_nav_items item ON item.page_id=page.id WHERE item.id=?""", (item_id,)).fetchone()
+            JOIN service_navigator_nav_icons icon ON icon.site_id=site.id WHERE icon.id=?""", (icon_id,)).fetchone()
     return public_site(row["slug"]) if row else None
 
 
-def public_navigation_icon(item_id: str, site: dict[str, Any]) -> Path | None:
+def public_navigation_icon(icon_id: str, site: dict[str, Any]) -> Path | None:
     with conn() as database:
-        row = database.execute("""SELECT item.icon_filename FROM service_navigator_nav_items item
-            JOIN service_navigator_nav_pages page ON page.id=item.page_id WHERE item.id=? AND page.site_id=?""", (item_id, site["id"])).fetchone()
+        row = database.execute("SELECT icon_filename FROM service_navigator_nav_icons WHERE id=? AND site_id=?", (icon_id, site["id"])).fetchone()
     if not row or not row["icon_filename"]:
         return None
     path = (navigation_icon_dir() / Path(row["icon_filename"]).name).resolve()

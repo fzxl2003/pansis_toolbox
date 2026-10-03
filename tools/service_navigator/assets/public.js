@@ -1,74 +1,1166 @@
-const payloadNode=document.querySelector('#sn-navigation-data');
-const data=payloadNode?JSON.parse(payloadNode.textContent||'{}'):{pages:[],services:[]};
-const content=document.querySelector('[data-navigation-content]');
-const search=document.querySelector('[data-search-input]');
-const modal=document.querySelector('[data-action-modal]');
-const modalContent=document.querySelector('[data-modal-content]');
-const sidebar=document.querySelector('.sn-sidebar');
-const dashboard=document.querySelector('.sn-dashboard');
-let currentPage=data.targetPages?.find(page=>page.visible)?.id||data.pages?.[0]?.id||'all';
-document.querySelector(`[data-page="${currentPage}"]`)?.classList.add('active');
-const sizeSpan={small:[1,1],medium:[2,2],large:[4,4],wide:[4,1]};
-function breakpoint(){const width=window.innerWidth;return width>=1440?16:width>=1080?12:width>=700?8:4;}
-function serviceName(item){return item.name||item.displayName||item.httpTitle||item.serviceName||'未知服务';}
-function healthLabel(item){if(!item.healthMonitored)return '';return item.healthStatus==='healthy'?'健康':item.healthStatus==='unhealthy'?'异常':'尚未检测';}
-function render(){
-  if(!content)return;const page=currentPage==='all'?null:data.pages.find(item=>item.id===currentPage);content.replaceChildren();let count=0;
-  if(currentPage.startsWith('target:')){const targetId=currentPage.slice(7);const target=(data.targetPages||[]).find(item=>item.targetId===targetId);const section=document.createElement('section');section.className='sn-target-group';section.innerHTML='<header><h2></h2><small></small></header>';section.querySelector('h2').textContent=target?.name||'扫描目标';section.querySelector('small').textContent=target?.address||'';const grid=document.createElement('div');grid.className='sn-all-service-grid';for(const item of (data.services||[]).filter(item=>item.targetId===targetId)){grid.append(serviceCard(item));count++;}section.append(grid);content.append(section);}
-  else if(!page){const groups=new Map();for(const item of data.services||[]){const key=item.targetId;if(!groups.has(key))groups.set(key,{label:item.targetLabel||'扫描目标',address:item.targetAddress||'',items:[]});groups.get(key).items.push(item);}for(const group of groups.values()){const section=document.createElement('section');section.className='sn-target-group';section.innerHTML='<header><h2></h2><small></small></header>';section.querySelector('h2').textContent=group.label;section.querySelector('small').textContent=group.address;const grid=document.createElement('div');grid.className='sn-all-service-grid';for(const item of group.items){grid.append(serviceCard(item));count++;}section.append(grid);content.append(section);}}
-  else {const grid=document.createElement('div');grid.className='sn-icon-grid';grid.dataset.columns=String(breakpoint());for(const item of page.items||[]){const card=document.createElement('button');card.type='button';card.className=`sn-nav-icon sn-size-${item.size}`;const layout=item.layouts?.[String(breakpoint())]||{x:0,y:0};const span=sizeSpan[item.size]||sizeSpan.small;card.style.gridColumn=`${layout.x+1} / span ${span[0]}`;card.style.gridRow=`${layout.y+1} / span ${span[1]}`;const fallback=item.iconSource==='text'?(item.iconText||item.name.slice(0,1)):'◌';card.innerHTML=item.iconUrl?'<span class="sn-nav-icon-image"><img alt=""></span><strong></strong><small></small>':'<span class="sn-nav-icon-image"><span class="sn-nav-fallback"></span></span><strong></strong><small></small>';const img=card.querySelector('img');if(img)img.src=item.iconUrl;const fallbackNode=card.querySelector('.sn-nav-fallback');if(fallbackNode){fallbackNode.textContent=fallback;fallbackNode.style.color=item.iconSource==='text'?item.iconColor||'':' ';}card.querySelector('strong').textContent=item.name;card.querySelector('small').textContent=item.services.length>1?`${item.services.length} 个入口`:item.serviceType==='http'?'网页服务':'端口服务';card.addEventListener('click',()=>openItem(item));grid.append(card);count++;}if(!count)grid.innerHTML='<p class="sn-empty">这个页面还没有导航图标。</p>';content.append(grid);}
-  if(!count)content.innerHTML='<p class="sn-empty">暂时没有可展示的服务。</p>';
+const payloadNode = document.querySelector("#sn-navigation-data");
+const data = payloadNode
+  ? JSON.parse(payloadNode.textContent || "{}")
+  : { pages: [], services: [] };
+const content = document.querySelector("[data-navigation-content]");
+const search = document.querySelector("[data-search-input]");
+const modal = document.querySelector("[data-action-modal]");
+const modalContent = document.querySelector("[data-modal-content]");
+let iconFormFile = null;
+let iconPreviewObjectUrl = "";
+const sidebar = document.querySelector(".sn-sidebar");
+const dashboard = document.querySelector(".sn-dashboard");
+let currentPage =
+  data.targetPages?.find((page) => page.visible)?.id ||
+  data.pages?.[0]?.id ||
+  "all";
+document.querySelector(`[data-page="${currentPage}"]`)?.classList.add("active");
+const sizeSpan = { small: [1, 1], medium: [2, 2], large: [4, 4], wide: [4, 1] };
+function breakpoint() {
+  const width = window.innerWidth;
+  return width >= 1440 ? 16 : width >= 1080 ? 12 : width >= 700 ? 8 : 4;
 }
-function serviceCard(item){const card=document.createElement('button');card.type='button';card.className='sn-all-service';card.innerHTML='<span class="sn-all-icon"></span><span><strong></strong><small></small></span><em></em>';const icon=card.querySelector('.sn-all-icon');if(item.faviconUrl){const img=document.createElement('img');img.src=item.faviconUrl;img.alt='';icon.append(img);}else icon.textContent=item.serviceType==='http'?'◌':'⌁';card.querySelector('strong').textContent=serviceName(item);card.querySelector('small').textContent=`${item.protocol||'tcp'}/${item.port} · ${item.serviceType==='http'?'网页':'端口'} 服务`;card.querySelector('em').textContent=healthLabel(item)||(item.state==='offline'?'离线':'在线');card.addEventListener('click',()=>openItem({id:`service-${item.id}`,name:serviceName(item),serviceType:item.serviceType,preferenceRevision:1,services:[item]}));return card;}
-function cookieKey(item){return `sn-nav-default-${location.pathname.replace(/[^a-z0-9]/gi,'_')}-${item.id}`;}
-function getDefault(item){const prefix=`${encodeURIComponent(cookieKey(item))}=`;const value=document.cookie.split('; ').find(row=>row.startsWith(prefix));if(!value)return null;try{const parsed=JSON.parse(decodeURIComponent(value.slice(prefix.length)));return parsed.revision===item.preferenceRevision?parsed:null;}catch{return null;}}
-function saveDefault(item,candidate){document.cookie=`${encodeURIComponent(cookieKey(item))}=${encodeURIComponent(JSON.stringify({revision:item.preferenceRevision,id:candidate.id}))}; Max-Age=31536000; Path=${location.pathname}; SameSite=Lax`;}
-function clearDefault(item){document.cookie=`${encodeURIComponent(cookieKey(item))}=; Max-Age=0; Path=${location.pathname}; SameSite=Lax`;}
-function httpCandidates(item){const seen=new Set();return item.services.flatMap(service=>{const url=service.url||service.navigationUrl||service.detectedUrl||'';if(!url||seen.has(url))return [];seen.add(url);return [{id:`${service.id}:${url}`,url,name:serviceName(service),target:`${service.targetLabel||''} · ${service.targetAddress||''}`}];});}
-async function probe(candidate){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),3500);try{await fetch(candidate.url,{method:'GET',mode:'no-cors',cache:'no-store',redirect:'follow',signal:controller.signal});return 'reachable';}catch{return location.protocol==='https:'&&candidate.url.startsWith('http:')?'unknown':'failed';}finally{clearTimeout(timer);}}
-async function openItem(item){if(item.serviceType!=='http'){openPortModal(item);return;}const candidates=httpCandidates(item);if(!candidates.length){showModal(`<h2>${escapeHtml(item.name)}</h2><p class="sn-modal-note">该图标没有可用的 HTTP 导航地址。</p>`);return;}const defaultChoice=getDefault(item);const defaultCandidate=defaultChoice&&candidates.find(candidate=>candidate.id===defaultChoice.id);if(defaultCandidate){window.open(defaultCandidate.url,'_blank','noopener');return;}const statuses=await Promise.all(candidates.map(async candidate=>({...candidate,status:await probe(candidate)})));const usable=statuses.filter(candidate=>candidate.status==='reachable');if(usable.length===1){window.open(usable[0].url,'_blank','noopener');return;}openHttpModal(item,statuses);}
-function openHttpModal(item,candidates){showModal(`<h2>${escapeHtml(item.name)}</h2><p class="sn-modal-note">以下检测来自当前浏览器；无法检测的地址仍可手动打开。</p><div class="sn-candidate-list"></div><button class="sn-clear-default" type="button">清除我的默认跳转</button>`);const list=modalContent.querySelector('.sn-candidate-list');for(const candidate of candidates){const row=document.createElement('div');row.className='sn-candidate';const status=candidate.status==='reachable'?'可达':candidate.status==='failed'?'不可达':'无法检测';row.innerHTML=`<div><strong></strong><small></small><em class="${candidate.status}">${status}</em></div><label><input type="checkbox">默认跳转</label><button type="button">打开</button>`;row.querySelector('strong').textContent=candidate.name;row.querySelector('small').textContent=candidate.url;row.querySelector('button').addEventListener('click',()=>chooseHttp(item,candidate,Boolean(row.querySelector('input').checked)));list.append(row);}modalContent.querySelector('.sn-clear-default').addEventListener('click',()=>{clearDefault(item);closeModal();});}
-function chooseHttp(item,candidate,shouldDefault){if(shouldDefault)saveDefault(item,candidate);window.open(candidate.url,'_blank','noopener');closeModal();}
-function openPortModal(item){showModal(`<h2>${escapeHtml(item.name)}</h2><div class="sn-port-list"></div>`);const list=modalContent.querySelector('.sn-port-list');for(const service of item.services){const row=document.createElement('div');row.className='sn-port-row';const command=service.command||service.connectionCommand||`${service.targetAddress}:${service.port}`;row.innerHTML='<strong></strong><small></small><code></code><button type="button">复制命令</button>';row.querySelector('strong').textContent=service.serviceName||'端口服务';row.querySelector('small').textContent=`${service.targetLabel||''} · ${service.targetAddress}:${service.port}`;row.querySelector('code').textContent=command;row.querySelector('button').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(command);row.querySelector('button').textContent='已复制';}catch{window.prompt('复制连接命令',command);}});list.append(row);}}
-function showModal(markup){modalContent.innerHTML=markup;modal.hidden=false;}function closeModal(){modal.hidden=true;modalContent.replaceChildren();}function escapeHtml(value){const node=document.createElement('span');node.textContent=value;return node.innerHTML;}
-document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>{currentPage=button.dataset.page||'all';document.querySelectorAll('[data-page]').forEach(item=>item.classList.toggle('active',item===button));render();}));
-document.querySelector('[data-close-modal]')?.addEventListener('click',closeModal);modal?.addEventListener('click',event=>{if(event.target===modal)closeModal();});document.addEventListener('click',async event=>{const logout=event.target.closest('[data-logout]');if(logout){await fetch(logout.dataset.logout,{method:'POST',credentials:'include'});location.reload();}});
-function updateClock(){const now=new Date();const clockTime=document.querySelector('[data-clock-time]');const clockDate=document.querySelector('[data-clock-date]');if(clockTime)clockTime.textContent=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(now);if(clockDate)clockDate.textContent=new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'}).format(now);}
-updateClock();setInterval(updateClock,1000);let previousBreakpoint=breakpoint();window.addEventListener('resize',()=>{const next=breakpoint();if(next!==previousBreakpoint){previousBreakpoint=next;render();}});
-let searchEngine='google';
-const engineTrigger=document.querySelector('[data-engine-trigger]');const engineMenu=document.querySelector('[data-engine-menu]');const selectedEngine=document.querySelector('[data-selected-engine]');
-const engineMarks={google:{name:'Google',mark:'G',className:'sn-engine-google'},baidu:{name:'百度',mark:'⌘',className:'sn-engine-baidu'},bing:{name:'必应',mark:'B',className:'sn-engine-bing'}};
-function chooseSearchEngine(value){searchEngine=engineMarks[value]?value:'google';const selected=engineMarks[searchEngine];if(selectedEngine){selectedEngine.textContent=selected.mark;selectedEngine.className=`sn-engine-mark ${selected.className}`;}engineMenu.hidden=true;engineTrigger?.setAttribute('aria-expanded','false');search?.focus();}
-engineTrigger?.addEventListener('click',()=>{const willOpen=engineMenu.hidden;engineMenu.hidden=!willOpen;engineTrigger.setAttribute('aria-expanded',String(willOpen));});
-document.querySelectorAll('[data-engine]').forEach(button=>button.addEventListener('click',()=>chooseSearchEngine(button.dataset.engine||'google')));
-document.addEventListener('click',event=>{if(engineMenu&&!engineMenu.hidden&&!event.target.closest('.sn-search-area')){engineMenu.hidden=true;engineTrigger?.setAttribute('aria-expanded','false');}});
-document.querySelector('[data-web-search]')?.addEventListener('click',()=>{const query=(search?.value||'').trim();if(!query)return;const base=searchEngine==='baidu'?'https://www.baidu.com/s?wd=':searchEngine==='bing'?'https://www.bing.com/search?q=':'https://www.google.com/search?q=';window.open(base+encodeURIComponent(query),'_blank','noopener');});search?.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();document.querySelector('[data-web-search]')?.click();}});render();
-async function ownerApi(path,method='GET',body){const init={method,credentials:'include'};if(body!==undefined){init.headers={'Content-Type':'application/json'};init.body=JSON.stringify(body);}const response=await fetch(`/api/tools/service-navigator${path}`,init);if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error?.message||'保存失败');return response.json();}
-function setPageEditing(active){sidebar?.classList.toggle('is-editing',active);document.body.classList.remove('sn-layout-editing');if(active)localStorage.setItem('sn-sidebar-editing','1');else localStorage.removeItem('sn-sidebar-editing');const button=document.querySelector('[data-toggle-page-edit]');if(button)button.textContent=active?'完成编辑':'编辑导航';}
-function preservePageEditing(){if(sidebar?.classList.contains('is-editing'))localStorage.setItem('sn-sidebar-editing','1');}
-function openOwnerEditor(){
+function serviceName(item) {
+  return (
+    item.name ||
+    item.displayName ||
+    item.httpTitle ||
+    item.serviceName ||
+    "未知服务"
+  );
+}
+function healthLabel(item) {
+  if (!item.healthMonitored) return "";
+  return item.healthStatus === "healthy"
+    ? "健康"
+    : item.healthStatus === "unhealthy"
+      ? "异常"
+      : "尚未检测";
+}
+function render() {
+  if (!content) return;
+  const page =
+    currentPage === "all"
+      ? null
+      : data.pages.find((item) => item.id === currentPage);
+  content.replaceChildren();
+  let count = 0;
+  if (currentPage.startsWith("target:")) {
+    const targetId = currentPage.slice(7);
+    const target = (data.targetPages || []).find(
+      (item) => item.targetId === targetId,
+    );
+    const section = document.createElement("section");
+    section.className = "sn-target-group";
+    section.innerHTML = "<header><h2></h2><small></small></header>";
+    section.querySelector("h2").textContent = target?.name || "扫描目标";
+    section.querySelector("small").textContent = target?.address || "";
+    const grid = document.createElement("div");
+    grid.className = "sn-all-service-grid";
+    for (const item of (data.services || []).filter(
+      (item) => item.targetId === targetId,
+    )) {
+      grid.append(serviceCard(item));
+      count++;
+    }
+    section.append(grid);
+    content.append(section);
+  } else if (!page) {
+    const groups = new Map();
+    for (const item of data.services || []) {
+      const key = item.targetId;
+      if (!groups.has(key))
+        groups.set(key, {
+          label: item.targetLabel || "扫描目标",
+          address: item.targetAddress || "",
+          items: [],
+        });
+      groups.get(key).items.push(item);
+    }
+    for (const group of groups.values()) {
+      const section = document.createElement("section");
+      section.className = "sn-target-group";
+      section.innerHTML = "<header><h2></h2><small></small></header>";
+      section.querySelector("h2").textContent = group.label;
+      section.querySelector("small").textContent = group.address;
+      const grid = document.createElement("div");
+      grid.className = "sn-all-service-grid";
+      for (const item of group.items) {
+        grid.append(serviceCard(item));
+        count++;
+      }
+      section.append(grid);
+      content.append(section);
+    }
+  } else {
+    const grid = document.createElement("div");
+    grid.className = "sn-icon-grid";
+    grid.dataset.columns = String(breakpoint());
+    for (const item of page.items || []) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = `sn-nav-icon sn-size-${item.size}`;
+      const layout = item.layouts?.[String(breakpoint())] || { x: 0, y: 0 };
+      const span = sizeSpan[item.size] || sizeSpan.small;
+      card.style.gridColumn = `${layout.x + 1} / span ${span[0]}`;
+      card.style.gridRow = `${layout.y + 1} / span ${span[1]}`;
+      const fallback =
+        item.iconSource === "text"
+          ? item.iconText || item.name.slice(0, 1)
+          : "◌";
+      card.innerHTML = item.iconUrl
+        ? '<span class="sn-nav-icon-image"><img alt=""></span><strong></strong><small></small>'
+        : '<span class="sn-nav-icon-image"><span class="sn-nav-fallback"></span></span><strong></strong><small></small>';
+      const img = card.querySelector("img");
+      if (img) img.src = item.iconUrl;
+      const fallbackNode = card.querySelector(".sn-nav-fallback");
+      if (fallbackNode) {
+        fallbackNode.textContent = fallback;
+        fallbackNode.style.color =
+          item.iconSource === "text" ? item.iconColor || "" : " ";
+      }
+      card.querySelector("strong").textContent = item.name;
+      card.querySelector("small").textContent =
+        item.services.length > 1
+          ? `${item.services.length} 个入口`
+          : item.serviceType === "http"
+            ? "网页服务"
+            : "端口服务";
+      card.addEventListener("click", () => openItem(item));
+      grid.append(card);
+      count++;
+    }
+    if (!count)
+      grid.innerHTML = '<p class="sn-empty">这个页面还没有导航图标。</p>';
+    content.append(grid);
+  }
+  if (!count)
+    content.innerHTML = '<p class="sn-empty">暂时没有可展示的服务。</p>';
+}
+function serviceCard(item) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "sn-all-service";
+  card.innerHTML =
+    '<span class="sn-all-icon"></span><span><strong></strong><small></small></span><em></em>';
+  const icon = card.querySelector(".sn-all-icon");
+  if (item.faviconUrl) {
+    const img = document.createElement("img");
+    img.src = item.faviconUrl;
+    img.alt = "";
+    icon.append(img);
+  } else icon.textContent = item.serviceType === "http" ? "◌" : "⌁";
+  card.querySelector("strong").textContent = serviceName(item);
+  card.querySelector("small").textContent =
+    `${item.protocol || "tcp"}/${item.port} · ${item.serviceType === "http" ? "网页" : "端口"} 服务`;
+  card.querySelector("em").textContent =
+    healthLabel(item) || (item.state === "offline" ? "离线" : "在线");
+  card.addEventListener("click", () =>
+    openItem({
+      id: `service-${item.id}`,
+      name: serviceName(item),
+      serviceType: item.serviceType,
+      preferenceRevision: 1,
+      services: [item],
+    }),
+  );
+  return card;
+}
+function cookieKey(item) {
+  return `sn-nav-default-${location.pathname.replace(/[^a-z0-9]/gi, "_")}-${item.id}`;
+}
+function getDefault(item) {
+  const prefix = `${encodeURIComponent(cookieKey(item))}=`;
+  const value = document.cookie
+    .split("; ")
+    .find((row) => row.startsWith(prefix));
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value.slice(prefix.length)));
+    return parsed.revision === item.preferenceRevision ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function saveDefault(item, candidate) {
+  document.cookie = `${encodeURIComponent(cookieKey(item))}=${encodeURIComponent(JSON.stringify({ revision: item.preferenceRevision, id: candidate.id }))}; Max-Age=31536000; Path=${location.pathname}; SameSite=Lax`;
+}
+function clearDefault(item) {
+  document.cookie = `${encodeURIComponent(cookieKey(item))}=; Max-Age=0; Path=${location.pathname}; SameSite=Lax`;
+}
+function httpCandidates(item) {
+  const seen = new Set();
+  return item.services.flatMap((service) => {
+    const url =
+      service.url || service.navigationUrl || service.detectedUrl || "";
+    if (!url || seen.has(url)) return [];
+    seen.add(url);
+    return [
+      {
+        id: `${service.id}:${url}`,
+        url,
+        name: serviceName(service),
+        target: `${service.targetLabel || ""} · ${service.targetAddress || ""}`,
+      },
+    ];
+  });
+}
+async function probe(candidate) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3500);
+  try {
+    await fetch(candidate.url, {
+      method: "GET",
+      mode: "no-cors",
+      cache: "no-store",
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    return "reachable";
+  } catch {
+    return location.protocol === "https:" && candidate.url.startsWith("http:")
+      ? "unknown"
+      : "failed";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function openItem(item) {
+  if (item.serviceType !== "http") {
+    openPortModal(item);
+    return;
+  }
+  const candidates = httpCandidates(item);
+  if (!candidates.length) {
+    showModal(
+      `<h2>${escapeHtml(item.name)}</h2><p class="sn-modal-note">该图标没有可用的 HTTP 导航地址。</p>`,
+    );
+    return;
+  }
+  const defaultChoice = getDefault(item);
+  const defaultCandidate =
+    defaultChoice &&
+    candidates.find((candidate) => candidate.id === defaultChoice.id);
+  if (defaultCandidate) {
+    window.open(defaultCandidate.url, "_blank", "noopener");
+    return;
+  }
+  const statuses = await Promise.all(
+    candidates.map(async (candidate) => ({
+      ...candidate,
+      status: await probe(candidate),
+    })),
+  );
+  const usable = statuses.filter(
+    (candidate) => candidate.status === "reachable",
+  );
+  if (usable.length === 1) {
+    window.open(usable[0].url, "_blank", "noopener");
+    return;
+  }
+  openHttpModal(item, statuses);
+}
+function openHttpModal(item, candidates) {
+  showModal(
+    `<h2>${escapeHtml(item.name)}</h2><p class="sn-modal-note">以下检测来自当前浏览器；无法检测的地址仍可手动打开。</p><div class="sn-candidate-list"></div><button class="sn-clear-default" type="button">清除我的默认跳转</button>`,
+  );
+  const list = modalContent.querySelector(".sn-candidate-list");
+  for (const candidate of candidates) {
+    const row = document.createElement("div");
+    row.className = "sn-candidate";
+    const status =
+      candidate.status === "reachable"
+        ? "可达"
+        : candidate.status === "failed"
+          ? "不可达"
+          : "无法检测";
+    row.innerHTML = `<div><strong></strong><small></small><em class="${candidate.status}">${status}</em></div><label><input type="checkbox">默认跳转</label><button type="button">打开</button>`;
+    row.querySelector("strong").textContent = candidate.name;
+    row.querySelector("small").textContent = candidate.url;
+    row
+      .querySelector("button")
+      .addEventListener("click", () =>
+        chooseHttp(
+          item,
+          candidate,
+          Boolean(row.querySelector("input").checked),
+        ),
+      );
+    list.append(row);
+  }
+  modalContent
+    .querySelector(".sn-clear-default")
+    .addEventListener("click", () => {
+      clearDefault(item);
+      closeModal();
+    });
+}
+function chooseHttp(item, candidate, shouldDefault) {
+  if (shouldDefault) saveDefault(item, candidate);
+  window.open(candidate.url, "_blank", "noopener");
+  closeModal();
+}
+function openPortModal(item) {
+  showModal(
+    `<h2>${escapeHtml(item.name)}</h2><div class="sn-port-list"></div>`,
+  );
+  const list = modalContent.querySelector(".sn-port-list");
+  for (const service of item.services) {
+    const row = document.createElement("div");
+    row.className = "sn-port-row";
+    const command =
+      service.command ||
+      service.connectionCommand ||
+      `${service.targetAddress}:${service.port}`;
+    row.innerHTML =
+      '<strong></strong><small></small><code></code><button type="button">复制命令</button>';
+    row.querySelector("strong").textContent = service.serviceName || "端口服务";
+    row.querySelector("small").textContent =
+      `${service.targetLabel || ""} · ${service.targetAddress}:${service.port}`;
+    row.querySelector("code").textContent = command;
+    row.querySelector("button").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        row.querySelector("button").textContent = "已复制";
+      } catch {
+        window.prompt("复制连接命令", command);
+      }
+    });
+    list.append(row);
+  }
+}
+function showModal(markup) {
+  modalContent.innerHTML = markup;
+  modal.hidden = false;
+}
+function closeModal() {
+  if (iconPreviewObjectUrl) {
+    URL.revokeObjectURL(iconPreviewObjectUrl);
+    iconPreviewObjectUrl = "";
+  }
+  iconFormFile = null;
+  modal.hidden = true;
+  modalContent.replaceChildren();
+}
+function escapeHtml(value) {
+  const node = document.createElement("span");
+  node.textContent = value;
+  return node.innerHTML;
+}
+document.querySelectorAll("[data-page]").forEach((button) =>
+  button.addEventListener("click", () => {
+    currentPage = button.dataset.page || "all";
+    document
+      .querySelectorAll("[data-page]")
+      .forEach((item) => item.classList.toggle("active", item === button));
+    render();
+  }),
+);
+document
+  .querySelector("[data-close-modal]")
+  ?.addEventListener("click", closeModal);
+modal?.addEventListener("click", (event) => {
+  if (event.target === modal) closeModal();
+});
+document.addEventListener("click", async (event) => {
+  const logout = event.target.closest("[data-logout]");
+  if (logout) {
+    await fetch(logout.dataset.logout, {
+      method: "POST",
+      credentials: "include",
+    });
+    location.reload();
+  }
+});
+function updateClock() {
+  const now = new Date();
+  const clockTime = document.querySelector("[data-clock-time]");
+  const clockDate = document.querySelector("[data-clock-date]");
+  if (clockTime)
+    clockTime.textContent = new Intl.DateTimeFormat("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(now);
+  if (clockDate)
+    clockDate.textContent = new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      weekday: "long",
+    }).format(now);
+}
+updateClock();
+setInterval(updateClock, 1000);
+let previousBreakpoint = breakpoint();
+window.addEventListener("resize", () => {
+  const next = breakpoint();
+  if (next !== previousBreakpoint) {
+    previousBreakpoint = next;
+    render();
+  }
+});
+let searchEngine = "google";
+const engineTrigger = document.querySelector("[data-engine-trigger]");
+const engineMenu = document.querySelector("[data-engine-menu]");
+const selectedEngine = document.querySelector("[data-selected-engine]");
+const engineMarks = {
+  google: { name: "Google", mark: "G", className: "sn-engine-google" },
+  baidu: { name: "百度", mark: "⌘", className: "sn-engine-baidu" },
+  bing: { name: "必应", mark: "B", className: "sn-engine-bing" },
+};
+function chooseSearchEngine(value) {
+  searchEngine = engineMarks[value] ? value : "google";
+  const selected = engineMarks[searchEngine];
+  if (selectedEngine) {
+    selectedEngine.textContent = selected.mark;
+    selectedEngine.className = `sn-engine-mark ${selected.className}`;
+  }
+  engineMenu.hidden = true;
+  engineTrigger?.setAttribute("aria-expanded", "false");
+  search?.focus();
+}
+engineTrigger?.addEventListener("click", () => {
+  const willOpen = engineMenu.hidden;
+  engineMenu.hidden = !willOpen;
+  engineTrigger.setAttribute("aria-expanded", String(willOpen));
+});
+document
+  .querySelectorAll("[data-engine]")
+  .forEach((button) =>
+    button.addEventListener("click", () =>
+      chooseSearchEngine(button.dataset.engine || "google"),
+    ),
+  );
+document.addEventListener("click", (event) => {
+  if (
+    engineMenu &&
+    !engineMenu.hidden &&
+    !event.target.closest(".sn-search-area")
+  ) {
+    engineMenu.hidden = true;
+    engineTrigger?.setAttribute("aria-expanded", "false");
+  }
+});
+document.querySelector("[data-web-search]")?.addEventListener("click", () => {
+  const query = (search?.value || "").trim();
+  if (!query) return;
+  const base =
+    searchEngine === "baidu"
+      ? "https://www.baidu.com/s?wd="
+      : searchEngine === "bing"
+        ? "https://www.bing.com/search?q="
+        : "https://www.google.com/search?q=";
+  window.open(base + encodeURIComponent(query), "_blank", "noopener");
+});
+search?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    document.querySelector("[data-web-search]")?.click();
+  }
+});
+render();
+async function ownerApi(path, method = "GET", body) {
+  const init = { method, credentials: "include" };
+  if (body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const response = await fetch(`/api/tools/service-navigator${path}`, init);
+  if (!response.ok)
+    throw new Error(
+      (await response.json().catch(() => ({}))).error?.message || "保存失败",
+    );
+  return response.json();
+}
+function setPageEditing(active) {
+  sidebar?.classList.toggle("is-editing", active);
+  document.body.classList.remove("sn-layout-editing");
+  if (active) localStorage.setItem("sn-sidebar-editing", "1");
+  else localStorage.removeItem("sn-sidebar-editing");
+  const button = document.querySelector("[data-toggle-page-edit]");
+  if (button) button.textContent = active ? "完成编辑" : "编辑导航";
+}
+function preservePageEditing() {
+  if (sidebar?.classList.contains("is-editing"))
+    localStorage.setItem("sn-sidebar-editing", "1");
+}
+function openOwnerEditor() {
   setPageEditing(false);
-  const appearance=data.appearance||{theme:'auto',accentColor:'#4f7cff'};const presets=['#4f7cff','#42b983','#0d9488','#2563eb','#7c3aed','#db2777','#dc2626','#ea580c'];
-  showModal(`<h2>导航外观</h2><p class="sn-modal-note">页面和图标请在左侧栏的编辑模式中管理。</p><section class="sn-editor-section sn-appearance-section"><h3>外观</h3><label class="sn-editor-field">主题<select data-site-theme><option value="auto">跟随系统</option><option value="light">亮色</option><option value="dark">暗黑</option></select></label><div class="sn-editor-field"><span>主题色</span><div class="sn-accent-picker"><div data-accent-presets></div><label><input data-accent-color type="color" aria-label="自定义主题色"><input data-accent-hex maxlength="7" placeholder="#4f7cff" aria-label="主题色十六进制值"></label></div></div><button class="sn-editor-save" data-save-appearance>保存外观</button></section><section class="sn-editor-section"><h3>背景</h3><div class="sn-editor-actions"><button data-background="default">默认背景</button><button data-background="bing">每日 Bing 壁纸</button><label>上传背景<input data-background-upload type="file" accept=".png,.jpg,.jpeg,.webp"></label></div></section>`);
-  const themeInput=modalContent.querySelector('[data-site-theme]');const colorInput=modalContent.querySelector('[data-accent-color]');const hexInput=modalContent.querySelector('[data-accent-hex]');const presetBox=modalContent.querySelector('[data-accent-presets]');
-  themeInput.value=['auto','light','dark'].includes(appearance.theme)?appearance.theme:'auto';colorInput.value=/^#[0-9a-f]{6}$/i.test(appearance.accentColor)?appearance.accentColor:'#4f7cff';hexInput.value=colorInput.value;
-  function selectAccent(value){if(!/^#[0-9a-f]{6}$/i.test(value))return;colorInput.value=value;hexInput.value=value.toLowerCase();presetBox.querySelectorAll('button').forEach(button=>button.classList.toggle('active',button.dataset.accent===value.toLowerCase()));}
-  for(const color of presets){const button=document.createElement('button');button.type='button';button.className='sn-accent-swatch';button.dataset.accent=color;button.style.backgroundColor=color;button.title=color;button.setAttribute('aria-label',`选择主题色 ${color}`);button.addEventListener('click',()=>selectAccent(color));presetBox.append(button);}selectAccent(colorInput.value);
-  colorInput.addEventListener('input',()=>selectAccent(colorInput.value));hexInput.addEventListener('input',()=>{if(/^#[0-9a-f]{6}$/i.test(hexInput.value))selectAccent(hexInput.value);});
-  modalContent.querySelector('[data-save-appearance]').addEventListener('click',async()=>{try{await ownerApi('/site','PUT',{theme:themeInput.value,accentColor:colorInput.value});location.reload();}catch(error){alert(error.message||'外观保存失败');}});
-  modalContent.querySelectorAll('[data-background]').forEach(button=>button.addEventListener('click',async()=>{await ownerApi('/background','PUT',{source:button.dataset.background});location.reload();}));modalContent.querySelector('[data-background-upload]').addEventListener('change',async event=>{const file=event.target.files?.[0];if(!file)return;const form=new FormData();form.append('file',file);const response=await fetch('/api/tools/service-navigator/background/upload',{method:'POST',credentials:'include',body:form});if(!response.ok)alert('背景上传失败');else location.reload();});
+  const appearance = data.appearance || {
+    theme: "auto",
+    accentColor: "#4f7cff",
+  };
+  const presets = [
+    "#4f7cff",
+    "#42b983",
+    "#0d9488",
+    "#2563eb",
+    "#7c3aed",
+    "#db2777",
+    "#dc2626",
+    "#ea580c",
+  ];
+  showModal(
+    `<h2>导航外观</h2><p class="sn-modal-note">页面和图标请在左侧栏的编辑模式中管理。</p><section class="sn-editor-section sn-appearance-section"><h3>外观</h3><label class="sn-editor-field">主题<select data-site-theme><option value="auto">跟随系统</option><option value="light">亮色</option><option value="dark">暗黑</option></select></label><div class="sn-editor-field"><span>主题色</span><div class="sn-accent-picker"><div data-accent-presets></div><label><input data-accent-color type="color" aria-label="自定义主题色"><input data-accent-hex maxlength="7" placeholder="#4f7cff" aria-label="主题色十六进制值"></label></div></div><button class="sn-editor-save" data-save-appearance>保存外观</button></section><section class="sn-editor-section"><h3>背景</h3><div class="sn-editor-actions"><button data-background="default">默认背景</button><button data-background="bing">每日 Bing 壁纸</button><label>上传背景<input data-background-upload type="file" accept=".png,.jpg,.jpeg,.webp"></label></div></section>`,
+  );
+  const themeInput = modalContent.querySelector("[data-site-theme]");
+  const colorInput = modalContent.querySelector("[data-accent-color]");
+  const hexInput = modalContent.querySelector("[data-accent-hex]");
+  const presetBox = modalContent.querySelector("[data-accent-presets]");
+  themeInput.value = ["auto", "light", "dark"].includes(appearance.theme)
+    ? appearance.theme
+    : "auto";
+  colorInput.value = /^#[0-9a-f]{6}$/i.test(appearance.accentColor)
+    ? appearance.accentColor
+    : "#4f7cff";
+  hexInput.value = colorInput.value;
+  function selectAccent(value) {
+    if (!/^#[0-9a-f]{6}$/i.test(value)) return;
+    colorInput.value = value;
+    hexInput.value = value.toLowerCase();
+    presetBox
+      .querySelectorAll("button")
+      .forEach((button) =>
+        button.classList.toggle(
+          "active",
+          button.dataset.accent === value.toLowerCase(),
+        ),
+      );
+  }
+  for (const color of presets) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sn-accent-swatch";
+    button.dataset.accent = color;
+    button.style.backgroundColor = color;
+    button.title = color;
+    button.setAttribute("aria-label", `选择主题色 ${color}`);
+    button.addEventListener("click", () => selectAccent(color));
+    presetBox.append(button);
+  }
+  selectAccent(colorInput.value);
+  colorInput.addEventListener("input", () => selectAccent(colorInput.value));
+  hexInput.addEventListener("input", () => {
+    if (/^#[0-9a-f]{6}$/i.test(hexInput.value)) selectAccent(hexInput.value);
+  });
+  modalContent
+    .querySelector("[data-save-appearance]")
+    .addEventListener("click", async () => {
+      try {
+        await ownerApi("/site", "PUT", {
+          theme: themeInput.value,
+          accentColor: colorInput.value,
+        });
+        location.reload();
+      } catch (error) {
+        alert(error.message || "外观保存失败");
+      }
+    });
+  modalContent.querySelectorAll("[data-background]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      await ownerApi("/background", "PUT", {
+        source: button.dataset.background,
+      });
+      location.reload();
+    }),
+  );
+  modalContent
+    .querySelector("[data-background-upload]")
+    .addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch(
+        "/api/tools/service-navigator/background/upload",
+        { method: "POST", credentials: "include", body: form },
+      );
+      if (!response.ok) alert("背景上传失败");
+      else location.reload();
+    });
 }
-function openItemEditor(page){showModal(`<h2>${escapeHtml(page.name)} · 图标内容</h2><p class="sn-modal-note">图标内容可独立设置；位置和尺寸请使用可视化编辑。</p><button class="sn-editor-save" data-add-item>自定义图标</button><div data-editor-items></div><section class="sn-service-presets"><h3>已探测服务图标集</h3><p>从服务类型、名称和 favicon 创建后，仍可完全自定义。</p><div data-service-presets></div></section>`);const box=modalContent.querySelector('[data-editor-items]');for(const item of page.items||[]){const row=document.createElement('div');row.className='sn-editor-page';row.innerHTML='<strong></strong><small></small><button>编辑</button><button>删除</button>';row.querySelector('strong').textContent=item.name;row.querySelector('small').textContent=`${item.services.length} 个服务 · ${item.iconSource==='custom'?'图片图标':item.iconSource==='text'?'文字图标':'默认图标'}`;const buttons=row.querySelectorAll('button');buttons[0].addEventListener('click',()=>openIconForm(page,item));buttons[1].addEventListener('click',async()=>{if(confirm(`删除图标「${item.name}」？`)){await ownerApi(`/navigation/items/${item.id}`,'DELETE');location.reload();}});box.append(row);}const presets=modalContent.querySelector('[data-service-presets]');for(const service of data.services||[]){const button=document.createElement('button');button.type='button';button.className='sn-service-preset';button.innerHTML='<span></span><strong></strong><small></small>';const icon=button.querySelector('span');if(service.faviconUrl){const image=document.createElement('img');image.src=service.faviconUrl;image.alt='';icon.append(image);}else icon.textContent=service.serviceType==='http'?'◌':'⌁';button.querySelector('strong').textContent=serviceName(service);button.querySelector('small').textContent=`${service.serviceType==='http'?'HTTP':'端口'} · ${service.port}`;button.addEventListener('click',()=>openIconForm(page,{name:serviceName(service),iconSource:service.faviconUrl?'favicon':'text',iconText:serviceName(service).slice(0,1),iconColor:'#4f7cff',faviconServiceId:service.id,serviceIds:[service.id]},service.id));presets.append(button);}modalContent.querySelector('[data-add-item]').addEventListener('click',()=>openIconForm(page,null));}
-function openIconForm(page,item,lockedServiceId=''){const current=item||{name:'',iconSource:'text',iconText:'A',iconColor:'#4f7cff',faviconServiceId:'',serviceIds:[]};const association=lockedServiceId?'<section class="sn-icon-services sn-locked-service-field"><span>关联服务</span><div data-icon-services></div></section>':'<label class="sn-icon-services">关联服务<div data-icon-services></div></label>';showModal(`<h2>${lockedServiceId?'编辑已探测服务图标':item?'编辑图标':'添加自定义图标'}</h2><form class="sn-icon-form" data-icon-form><label>名称<input name="name" required></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option><option value="none">默认图标</option></select></label><label>图标文字<input name="text" maxlength="4" placeholder="A"></label><label>图标颜色<input name="color" type="color"></label>${association}<label>上传图片<input name="file" type="file" accept=".png,.jpg,.jpeg,.webp,.ico"></label><div><button class="sn-editor-save">保存</button></div></form>`);const form=modalContent.querySelector('[data-icon-form]');form.name.value=current.name;form.source.value=current.iconSource||'text';form.text.value=current.iconText||'A';form.color.value=/^#[0-9a-f]{6}$/i.test(current.iconColor)?current.iconColor:'#4f7cff';const servicesBox=form.querySelector('[data-icon-services]');if(lockedServiceId){const service=(data.services||[]).find(entry=>entry.id===lockedServiceId);servicesBox.innerHTML=`<article class="sn-locked-service"><strong>${escapeHtml(serviceName(service||{}))}</strong><small>${service?.serviceType==='http'?'HTTP 服务':'端口服务'} · TCP/${service?.port||'—'}</small><small>${escapeHtml(service?.targetLabel||'未命名扫描目标')}${service?.targetAddress?` · ${escapeHtml(service.targetAddress)}`:''}</small></article>`;}else for(const service of data.services||[]){const label=document.createElement('label');label.innerHTML='<input type="checkbox"> <span></span>';const input=label.querySelector('input');input.value=service.id;input.checked=current.serviceIds.includes(service.id);label.querySelector('span').textContent=`${service.serviceType==='http'?'HTTP':'端口'} · ${serviceName(service)} · ${service.port}`;servicesBox.append(label);}form.addEventListener('submit',async event=>{event.preventDefault();const ids=lockedServiceId?[lockedServiceId]:[...form.querySelectorAll('input[type="checkbox"]:checked')].map(input=>input.value);try{const body={pageId:page.id,name:form.name.value,iconSource:form.source.value,iconText:form.text.value,iconColor:form.color.value,faviconServiceId:lockedServiceId||'',serviceIds:ids};const result=item?await ownerApi(`/navigation/items/${item.id}`,'PUT',body):await ownerApi('/navigation/items','POST',body);const id=item?.id||result.item?.id;const file=form.file.files?.[0];if(file&&id){const upload=new FormData();upload.append('file',file);await fetch(`/api/tools/service-navigator/navigation/items/${id}/icon`,{method:'POST',credentials:'include',body:upload});}location.reload();}catch(error){alert(error.message||'图标保存失败');}});}
-document.querySelector('[data-open-editor]')?.addEventListener('click',()=>openOwnerEditor());
-document.querySelector('[data-toggle-page-edit]')?.addEventListener('click',()=>setPageEditing(!sidebar?.classList.contains('is-editing')));
-document.querySelector('[data-add-page]')?.addEventListener('click',async()=>{try{preservePageEditing();await ownerApi('/navigation/pages','POST',{name:'新页面'});location.reload();}catch(error){alert(error.message||'新增页面失败');}});
-document.querySelector('[data-page-icons]')?.addEventListener('click',()=>{setPageEditing(false);const page=(data.pages||[]).find(item=>item.id===currentPage)||data.pages?.[0];if(page)openItemEditor(page);else alert('请先新建一个页面。');});
-document.querySelectorAll('[data-page-edit]').forEach(button=>button.addEventListener('click',()=>{const page=(data.pages||[]).find(item=>item.id===button.dataset.pageEdit);if(!page)return;showModal(`<h2>编辑页面</h2><form class="sn-target-page-form"><label>页面名称<input name="name" required></label><label class="sn-check"><input name="visible" type="checkbox">在访客侧边栏显示</label><div><button class="sn-editor-delete" type="button">删除页面</button><button class="sn-editor-save">保存</button></div></form>`);const form=modalContent.querySelector('.sn-target-page-form');form.name.value=page.name;form.visible.checked=page.visible!==false;form.querySelector('.sn-editor-delete').addEventListener('click',async()=>{if(confirm(`删除页面「${page.name}」？`)){preservePageEditing();await ownerApi(`/navigation/pages/${page.id}`,'DELETE');location.reload();}});form.addEventListener('submit',async event=>{event.preventDefault();try{preservePageEditing();await ownerApi(`/navigation/pages/${page.id}`,'PUT',{name:form.name.value,visible:form.visible.checked});location.reload();}catch(error){alert(error.message||'页面保存失败');}});}));
-document.querySelectorAll('[data-page-move]').forEach(button=>button.addEventListener('click',async()=>{const pages=[...(data.pages||[])];const index=pages.findIndex(page=>page.id===button.dataset.pageId);const next=index+(button.dataset.pageMove==='up'?-1:1);if(index<0||next<0||next>=pages.length)return;preservePageEditing();[pages[index],pages[next]]=[pages[next],pages[index]];await ownerApi('/navigation/pages/order','PUT',{pageIds:pages.map(page=>page.id)});location.reload();}));
-document.querySelectorAll('[data-target-edit]').forEach(button=>button.addEventListener('click',()=>{const target=(data.targetPages||[]).find(item=>item.targetId===button.dataset.targetEdit);if(!target)return;showModal(`<h2>编辑固定页面</h2><form class="sn-target-page-form"><label>页面名称<input name="name" required></label><label class="sn-check"><input name="visible" type="checkbox">在访客侧边栏显示</label><div><button class="sn-editor-save">保存</button></div></form>`);const form=modalContent.querySelector('.sn-target-page-form');form.name.value=target.name;form.visible.checked=target.visible;form.addEventListener('submit',async event=>{event.preventDefault();try{preservePageEditing();await ownerApi(`/targets/${target.targetId}`,'PUT',{label:form.name.value,address:target.address,customPorts:target.customPorts||'',showInNavigation:form.visible.checked});location.reload();}catch(error){alert(error.message||'固定页面保存失败');}});}));
-function enableLayoutEditing(){const page=(data.pages||[]).find(item=>item.id===currentPage);const grid=document.querySelector('.sn-icon-grid');if(!page||!grid){alert('请先打开一个自定义页面，再调整图标位置。');return;}document.body.classList.add('sn-layout-editing');document.querySelectorAll('.sn-nav-icon').forEach((card,index)=>{card.draggable=true;card.dataset.itemId=page.items[index]?.id||'';card.addEventListener('dragstart',event=>event.dataTransfer.setData('text/plain',card.dataset.itemId));});grid.addEventListener('dragover',event=>event.preventDefault());grid.addEventListener('drop',async event=>{event.preventDefault();const id=event.dataTransfer.getData('text/plain');const rect=grid.getBoundingClientRect();const x=Math.max(0,Math.min(15,Math.floor((event.clientX-rect.left)/(rect.width/16))));const y=Math.max(0,Math.floor((event.clientY-rect.top)/76));try{await ownerApi(`/navigation/pages/${page.id}/layouts/16`,'PUT',{placements:page.items.map(item=>({itemId:item.id,x:item.id===id?x:item.layouts?.['16']?.x||0,y:item.id===id?y:item.layouts?.['16']?.y||0}))});location.reload();}catch(error){alert(error.message||'位置不可用');}});alert('已进入可视化布局：拖动图标改变位置；图标内容请从左侧“编辑图标内容”修改。');}
-if(localStorage.getItem('sn-sidebar-collapsed')==='1')dashboard?.classList.add('is-collapsed');
-if(localStorage.getItem('sn-sidebar-editing')==='1')setPageEditing(true);
-document.querySelector('[data-toggle-sidebar]')?.addEventListener('click',()=>{const collapsed=dashboard?.classList.toggle('is-collapsed');localStorage.setItem('sn-sidebar-collapsed',collapsed?'1':'0');});
-document.querySelector('[data-toggle-catalog]')?.addEventListener('click',async()=>{try{await ownerApi('/catalog-visibility','PUT',{visible:data.catalogVisible===false});location.reload();}catch(error){alert(error.message||'保存失败');}});
+function iconPreviewNode(icon) {
+  const node = document.createElement("span");
+  node.className = "sn-nav-icon-image";
+  const url =
+    icon?.iconSource === "custom"
+      ? icon.iconUrl || ""
+      : icon?.iconSource === "favicon"
+        ? (data.services || []).find(
+            (entry) => entry.id === icon.faviconServiceId,
+          )?.faviconUrl || ""
+        : "";
+  if (url) {
+    const image = new Image();
+    image.src = url;
+    image.alt = "";
+    node.append(image);
+  } else {
+    const fallback = document.createElement("span");
+    fallback.className = "sn-nav-fallback";
+    fallback.textContent =
+      icon?.iconSource === "text"
+        ? icon.iconText || icon.name?.slice(0, 1) || "A"
+        : "◌";
+    fallback.style.color =
+      icon?.iconSource === "text" ? icon.iconColor || "" : "";
+    node.append(fallback);
+  }
+  return node;
+}
+function openGlobalIconLibrary() {
+  setPageEditing(false);
+  const custom = (data.icons || []).filter((icon) => !icon.detectedServiceId);
+  const detected = (data.icons || []).filter((icon) => icon.detectedServiceId);
+  showModal(
+    `<h2>管理图标</h2><p class="sn-modal-note">这里维护全局图标库。各页面只添加、摆放和移除图标；编辑一次图标，所有引用位置同步更新。</p><div class="sn-library-actions"><button class="sn-editor-save" data-add-icon>添加自定义图标</button></div><section class="sn-editor-section"><h3>自定义图标</h3><div class="sn-icon-library" data-custom-icons></div></section><section class="sn-editor-section"><h3>已探测服务图标</h3><div class="sn-icon-library" data-detected-icons></div></section>`,
+  );
+  const renderGroup = (box, icons) => {
+    box.replaceChildren();
+    if (!icons.length) {
+      box.innerHTML = '<p class="sn-empty">暂无图标</p>';
+      return;
+    }
+    for (const icon of icons) {
+      const row = document.createElement("article");
+      row.className = "sn-library-icon";
+      row.append(iconPreviewNode(icon));
+      const body = document.createElement("div");
+      body.innerHTML = "<strong></strong><small></small>";
+      body.querySelector("strong").textContent = icon.name;
+      body.querySelector("small").textContent =
+        `${icon.services.length} 个服务 · ${icon.iconSource === "custom" ? "上传图片" : icon.iconSource === "favicon" ? "favicon" : "文字"}`;
+      row.append(body);
+      const actions = document.createElement("div");
+      actions.innerHTML =
+        '<button>编辑</button><button class="danger">删除</button>';
+      actions
+        .querySelectorAll("button")[0]
+        .addEventListener("click", () => openGlobalIconForm(icon));
+      actions
+        .querySelectorAll("button")[1]
+        .addEventListener("click", async () => {
+          if (
+            !confirm(
+              `删除全局图标「${icon.name}」？所有页面上的对应摆放也会一起删除。`,
+            )
+          )
+            return;
+          await ownerApi(`/navigation/icons/${icon.id}`, "DELETE");
+          location.reload();
+        });
+      row.append(actions);
+      box.append(row);
+    }
+  };
+  renderGroup(modalContent.querySelector("[data-custom-icons]"), custom);
+  renderGroup(modalContent.querySelector("[data-detected-icons]"), detected);
+  modalContent
+    .querySelector("[data-add-icon]")
+    .addEventListener("click", () => openGlobalIconForm(null));
+}
+function openGlobalIconForm(icon, restoreFile = false) {
+  if (!restoreFile) iconFormFile = null;
+  const detected = Boolean(icon?.detectedServiceId);
+  const current = icon || {
+    name: "",
+    iconSource: "text",
+    iconText: "A",
+    iconColor: "#4f7cff",
+    serviceIds: [],
+  };
+  const association = detected
+    ? '<section class="sn-icon-services sn-locked-service-field"><span>关联服务</span><div data-icon-services></div></section>'
+    : '<label class="sn-icon-services">关联服务<div data-icon-services></div></label>';
+  showModal(
+    `<h2>${detected ? "编辑已探测服务图标" : icon ? "编辑自定义图标" : "添加自定义图标"}</h2><form class="sn-icon-form" data-icon-form><label>名称<input name="name" required></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option></select></label>${association}<div data-source-fields></div><button class="sn-icon-preview" type="button" data-icon-preview><span data-icon-preview-image></span><span>图标预览</span><small>点击查看各尺寸效果</small></button><div><button class="sn-editor-save" type="submit">保存</button></div></form>`,
+  );
+  const form = modalContent.querySelector("[data-icon-form]");
+  form.name.value = current.name;
+  form.source.value = ["text", "favicon", "custom"].includes(current.iconSource)
+    ? current.iconSource
+    : "text";
+  const servicesBox = form.querySelector("[data-icon-services]");
+  if (detected) {
+    const service = (data.services || []).find(
+      (entry) => entry.id === current.detectedServiceId,
+    );
+    servicesBox.innerHTML = `<article class="sn-locked-service"><strong>${escapeHtml(serviceName(service || {}))}</strong><small>${service?.serviceType === "http" ? "HTTP 服务" : "端口服务"} · TCP/${service?.port || "—"}</small><small>${escapeHtml(service?.targetLabel || "未命名扫描目标")}${service?.targetAddress ? ` · ${escapeHtml(service.targetAddress)}` : ""}</small></article>`;
+  } else
+    for (const service of data.services || []) {
+      const label = document.createElement("label");
+      label.innerHTML = '<input type="checkbox"><span></span>';
+      const input = label.querySelector("input");
+      input.value = service.id;
+      input.checked = current.serviceIds.includes(service.id);
+      label.querySelector("span").textContent =
+        `${service.serviceType === "http" ? "HTTP" : "端口"} · ${serviceName(service)} · ${service.port}`;
+      servicesBox.append(label);
+    }
+  const linkedServices = (data.services || []).filter((entry) =>
+    detected
+      ? entry.id === current.detectedServiceId
+      : current.serviceIds.includes(entry.id),
+  );
+  const previewUrl = () => {
+    if (form.source.value === "custom") {
+      if (iconFormFile) {
+        if (iconPreviewObjectUrl) URL.revokeObjectURL(iconPreviewObjectUrl);
+        iconPreviewObjectUrl = URL.createObjectURL(iconFormFile);
+        return iconPreviewObjectUrl;
+      }
+      return icon?.iconUrl || "";
+    }
+    if (form.source.value === "favicon") {
+      const select = form.querySelector('[name="favicon"]');
+      return select
+        ? (data.services || []).find((entry) => entry.id === select.value)
+            ?.faviconUrl || ""
+        : "";
+    }
+    return "";
+  };
+  function renderPreview() {
+    const box = form.querySelector("[data-icon-preview-image]");
+    box.replaceChildren();
+    const url = previewUrl();
+    if (url) {
+      const image = new Image();
+      image.src = url;
+      image.alt = "";
+      box.append(image);
+    } else {
+      const fallback = document.createElement("span");
+      fallback.className = "sn-nav-fallback";
+      fallback.textContent =
+        form.source.value === "text"
+          ? form.querySelector('[name="text"]')?.value ||
+            current.name.slice(0, 1) ||
+            "A"
+          : "◌";
+      fallback.style.color =
+        form.source.value === "text"
+          ? form.querySelector('[name="color"]')?.value || ""
+          : "";
+      box.append(fallback);
+    }
+  }
+  const sourceFields = () => {
+    const box = form.querySelector("[data-source-fields]");
+    box.replaceChildren();
+    if (form.source.value === "text")
+      box.insertAdjacentHTML(
+        "beforeend",
+        '<label>图标文字<input name="text" maxlength="4" placeholder="A"></label><label>图标颜色<input name="color" type="color"></label>',
+      );
+    if (form.source.value === "favicon")
+      box.insertAdjacentHTML(
+        "beforeend",
+        '<label>favicon 服务<select name="favicon"></select></label>',
+      );
+    if (form.source.value === "custom")
+      box.insertAdjacentHTML(
+        "beforeend",
+        '<label data-source-custom>上传图片<input name="file" type="file" accept=".png,.jpg,.jpeg,.webp,.ico"></label>',
+      );
+    const text = form.querySelector('[name="text"]');
+    const color = form.querySelector('[name="color"]');
+    const favicon = form.querySelector('[name="favicon"]');
+    const file = form.querySelector('[name="file"]');
+    if (text) {
+      text.value = current.iconText || "A";
+      text.addEventListener("input", renderPreview);
+    }
+    if (color) {
+      color.value = /^#[0-9a-f]{6}$/i.test(current.iconColor)
+        ? current.iconColor
+        : "#4f7cff";
+      color.addEventListener("input", renderPreview);
+    }
+    if (favicon) {
+      for (const service of linkedServices) {
+        const option = document.createElement("option");
+        option.value = service.id;
+        option.textContent = `${serviceName(service)} · ${service.targetAddress || service.targetLabel || service.port}`;
+        favicon.append(option);
+      }
+      if (!favicon.options.length)
+        favicon.append(new Option("当前关联服务暂无 favicon", ""));
+      favicon.value =
+        current.faviconServiceId &&
+        linkedServices.some((entry) => entry.id === current.faviconServiceId)
+          ? current.faviconServiceId
+          : linkedServices[0]?.id || "";
+      favicon.addEventListener("change", renderPreview);
+    }
+    if (file) {
+      if (iconFormFile) {
+        const transfer = new DataTransfer();
+        transfer.items.add(iconFormFile);
+        file.files = transfer.files;
+      }
+      file.addEventListener("change", () => {
+        iconFormFile = file.files?.[0] || null;
+        renderPreview();
+      });
+    }
+    renderPreview();
+  };
+  sourceFields();
+  form.source.addEventListener("change", sourceFields);
+  form
+    .querySelector("[data-icon-preview]")
+    .addEventListener("click", () =>
+      openGlobalIconSizePreview(
+        {
+          name: form.name.value,
+          iconSource: form.source.value,
+          iconText: form.querySelector('[name="text"]')?.value || "",
+          iconColor: form.querySelector('[name="color"]')?.value || "",
+          faviconServiceId: form.querySelector('[name="favicon"]')?.value || "",
+          iconUrl: previewUrl(),
+        },
+        icon,
+        restoreFile,
+      ),
+    );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const serviceIds = detected
+      ? [current.detectedServiceId]
+      : [...form.querySelectorAll("[data-icon-services] input:checked")].map(
+          (input) => input.value,
+        );
+    const body = {
+      name: form.name.value,
+      iconSource: form.source.value,
+      iconText: form.querySelector('[name="text"]')?.value || "",
+      iconColor: form.querySelector('[name="color"]')?.value || "",
+      faviconServiceId:
+        form.source.value === "favicon"
+          ? form.querySelector('[name="favicon"]')?.value || ""
+          : "",
+      serviceIds,
+      detectedServiceId: detected ? current.detectedServiceId : "",
+    };
+    try {
+      const result = icon
+        ? await ownerApi(`/navigation/icons/${icon.id}`, "PUT", body)
+        : await ownerApi("/navigation/icons", "POST", body);
+      const iconId = icon?.id || result.icon?.id;
+      if (iconFormFile && iconId) {
+        const upload = new FormData();
+        upload.append("file", iconFormFile);
+        const response = await fetch(
+          `/api/tools/service-navigator/navigation/icons/${iconId}/icon`,
+          { method: "POST", credentials: "include", body: upload },
+        );
+        if (!response.ok) throw new Error("图标上传失败");
+      }
+      location.reload();
+    } catch (error) {
+      alert(error.message || "图标保存失败");
+    }
+  });
+}
+function openGlobalIconSizePreview(draft, icon, restoreFile = false) {
+  showModal(
+    `<h2>图标尺寸预览</h2><p class="sn-modal-note">保存后可在页面上选择摆放尺寸。</p><div class="sn-icon-size-preview" data-size-preview></div><button class="sn-editor-save" data-return-icon-form>返回编辑</button>`,
+  );
+  const box = modalContent.querySelector("[data-size-preview]");
+  for (const [size, label] of [
+    ["small", "小图标 · 1×1"],
+    ["medium", "中图标 · 2×2"],
+    ["large", "大图标 · 4×4"],
+    ["wide", "宽图标 · 4×1"],
+  ]) {
+    const card = document.createElement("article");
+    card.className = `sn-nav-icon sn-size-${size}`;
+    card.innerHTML = "<strong></strong><small></small>";
+    card.querySelector("strong").textContent = draft.name || "服务图标";
+    card.querySelector("small").textContent = label;
+    card.prepend(
+      iconPreviewNode({
+        ...draft,
+        iconSource: draft.iconSource,
+        iconUrl: draft.iconUrl,
+        faviconServiceId: draft.faviconServiceId,
+      }),
+    );
+    box.append(card);
+  }
+  modalContent
+    .querySelector("[data-return-icon-form]")
+    .addEventListener("click", () => openGlobalIconForm(icon, restoreFile));
+}
+function openPagePlacementManager(page) {
+  const available = (data.icons || []).filter(
+    (icon) => !page.items.some((item) => item.iconId === icon.id),
+  );
+  showModal(
+    `<h2>${escapeHtml(page.name)} · 管理摆放</h2><p class="sn-modal-note">从全局图标库选择图标加入此页面；位置在页面上拖拽调整，移除摆放不会删除图标库中的图标。</p><section class="sn-editor-section"><h3>添加图标</h3><form class="sn-placement-form" data-placement-form><select data-placement-icon required></select><select data-placement-size><option value="small">小图标 · 1×1</option><option value="medium">中图标 · 2×2</option><option value="large">大图标 · 4×4</option><option value="wide">宽图标 · 4×1</option></select><button class="sn-editor-save">添加到页面</button></form><div class="sn-placement-list" data-placement-list></div></section>`,
+  );
+  const iconSelect = modalContent.querySelector("[data-placement-icon]");
+  for (const icon of available) {
+    const option = document.createElement("option");
+    option.value = icon.id;
+    option.textContent = icon.name;
+    iconSelect.append(option);
+  }
+  if (!available.length)
+    iconSelect.append(new Option("图标库中没有可用图标", ""));
+  const sizeSelect = modalContent.querySelector("[data-placement-size]");
+  const list = modalContent.querySelector("[data-placement-list]");
+  for (const item of page.items) {
+    const icon = (data.icons || []).find((entry) => entry.id === item.iconId);
+    const row = document.createElement("article");
+    row.className = "sn-library-icon";
+    row.append(iconPreviewNode(icon));
+    const body = document.createElement("div");
+    body.innerHTML = "<strong></strong><small></small>";
+    body.querySelector("strong").textContent = item.name;
+    body.querySelector("small").textContent =
+      `${item.size === "small" ? "小" : item.size === "medium" ? "中" : item.size === "large" ? "大" : "宽"}图标 · ${item.services.length} 个服务`;
+    row.append(body);
+    const select = document.createElement("select");
+    for (const [value, label] of [
+      ["small", "小"],
+      ["medium", "中"],
+      ["large", "大"],
+      ["wide", "宽"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.append(option);
+    }
+    select.value = item.size;
+    select.addEventListener("change", async () => {
+      try {
+        await ownerApi(`/navigation/items/${item.id}`, "PUT", {
+          size: select.value,
+        });
+        location.reload();
+      } catch (error) {
+        alert(error.message || "尺寸保存失败");
+      }
+    });
+    const remove = document.createElement("button");
+    remove.textContent = "移除";
+    remove.className = "danger";
+    remove.addEventListener("click", async () => {
+      await ownerApi(`/navigation/items/${item.id}`, "DELETE");
+      location.reload();
+    });
+    const actions = document.createElement("div");
+    actions.append(select, remove);
+    row.append(actions);
+    list.append(row);
+  }
+  if (!page.items.length)
+    list.innerHTML = '<p class="sn-empty">这个页面暂无图标。</p>';
+  modalContent
+    .querySelector("[data-placement-form]")
+    .addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!iconSelect.value) {
+        alert("请先在“管理图标”中添加图标。");
+        return;
+      }
+      try {
+        await ownerApi("/navigation/items", "POST", {
+          pageId: page.id,
+          iconId: iconSelect.value,
+          size: sizeSelect.value,
+        });
+        location.reload();
+      } catch (error) {
+        alert(error.message || "图标摆放失败");
+      }
+    });
+}
+document
+  .querySelector("[data-open-editor]")
+  ?.addEventListener("click", () => openOwnerEditor());
+document
+  .querySelector("[data-toggle-page-edit]")
+  ?.addEventListener("click", () =>
+    setPageEditing(!sidebar?.classList.contains("is-editing")),
+  );
+document
+  .querySelector("[data-add-page]")
+  ?.addEventListener("click", async () => {
+    try {
+      preservePageEditing();
+      await ownerApi("/navigation/pages", "POST", { name: "新页面" });
+      location.reload();
+    } catch (error) {
+      alert(error.message || "新增页面失败");
+    }
+  });
+document
+  .querySelector("[data-page-icons]")
+  ?.addEventListener("click", openGlobalIconLibrary);
+document.querySelectorAll("[data-page-edit]").forEach((button) =>
+  button.addEventListener("click", () => {
+    const page = (data.pages || []).find(
+      (item) => item.id === button.dataset.pageEdit,
+    );
+    if (!page) return;
+    showModal(
+      `<h2>编辑页面</h2><form class="sn-target-page-form"><label>页面名称<input name="name" required></label><label class="sn-check"><input name="visible" type="checkbox">在访客侧边栏显示</label><div><button class="sn-editor-delete" type="button">删除页面</button><button type="button" class="sn-page-icons-button" data-manage-placements>管理页面图标</button><button class="sn-editor-save">保存</button></div></form>`,
+    );
+    const form = modalContent.querySelector(".sn-target-page-form");
+    form.name.value = page.name;
+    form.visible.checked = page.visible !== false;
+    form
+      .querySelector(".sn-editor-delete")
+      .addEventListener("click", async () => {
+        if (confirm(`删除页面「${page.name}」？`)) {
+          preservePageEditing();
+          await ownerApi(`/navigation/pages/${page.id}`, "DELETE");
+          location.reload();
+        }
+      });
+    form
+      .querySelector("[data-manage-placements]")
+      .addEventListener("click", () => openPagePlacementManager(page));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        preservePageEditing();
+        await ownerApi(`/navigation/pages/${page.id}`, "PUT", {
+          name: form.name.value,
+          visible: form.visible.checked,
+        });
+        location.reload();
+      } catch (error) {
+        alert(error.message || "页面保存失败");
+      }
+    });
+  }),
+);
+document.querySelectorAll("[data-page-move]").forEach((button) =>
+  button.addEventListener("click", async () => {
+    const pages = [...(data.pages || [])];
+    const index = pages.findIndex((page) => page.id === button.dataset.pageId);
+    const next = index + (button.dataset.pageMove === "up" ? -1 : 1);
+    if (index < 0 || next < 0 || next >= pages.length) return;
+    preservePageEditing();
+    [pages[index], pages[next]] = [pages[next], pages[index]];
+    await ownerApi("/navigation/pages/order", "PUT", {
+      pageIds: pages.map((page) => page.id),
+    });
+    location.reload();
+  }),
+);
+document.querySelectorAll("[data-target-move]").forEach((button) =>
+  button.addEventListener("click", async () => {
+    const targets = [...(data.targetPages || [])];
+    const index = targets.findIndex(
+      (target) => target.targetId === button.dataset.targetId,
+    );
+    const next = index + (button.dataset.targetMove === "up" ? -1 : 1);
+    if (index < 0 || next < 0 || next >= targets.length) return;
+    preservePageEditing();
+    [targets[index], targets[next]] = [targets[next], targets[index]];
+    await ownerApi("/targets/order", "PUT", {
+      targetIds: targets.map((target) => target.targetId),
+    });
+    location.reload();
+  }),
+);
+document.querySelectorAll("[data-target-edit]").forEach((button) =>
+  button.addEventListener("click", () => {
+    const target = (data.targetPages || []).find(
+      (item) => item.targetId === button.dataset.targetEdit,
+    );
+    if (!target) return;
+    showModal(
+      `<h2>编辑固定页面</h2><form class="sn-target-page-form"><label>页面名称<input name="name" required></label><label class="sn-check"><input name="visible" type="checkbox">在访客侧边栏显示</label><div><button class="sn-editor-save">保存</button></div></form>`,
+    );
+    const form = modalContent.querySelector(".sn-target-page-form");
+    form.name.value = target.name;
+    form.visible.checked = target.visible;
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        preservePageEditing();
+        await ownerApi(`/targets/${target.targetId}`, "PUT", {
+          label: form.name.value,
+          address: target.address,
+          customPorts: target.customPorts || "",
+          showInNavigation: form.visible.checked,
+        });
+        location.reload();
+      } catch (error) {
+        alert(error.message || "固定页面保存失败");
+      }
+    });
+  }),
+);
+function enableLayoutEditing() {
+  const page = (data.pages || []).find((item) => item.id === currentPage);
+  const grid = document.querySelector(".sn-icon-grid");
+  if (!page || !grid) {
+    alert("请先打开一个自定义页面，再调整图标位置。");
+    return;
+  }
+  document.body.classList.add("sn-layout-editing");
+  document.querySelectorAll(".sn-nav-icon").forEach((card, index) => {
+    card.draggable = true;
+    card.dataset.itemId = page.items[index]?.id || "";
+    card.addEventListener("dragstart", (event) =>
+      event.dataTransfer.setData("text/plain", card.dataset.itemId),
+    );
+  });
+  grid.addEventListener("dragover", (event) => event.preventDefault());
+  grid.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    const id = event.dataTransfer.getData("text/plain");
+    const rect = grid.getBoundingClientRect();
+    const x = Math.max(
+      0,
+      Math.min(15, Math.floor((event.clientX - rect.left) / (rect.width / 16))),
+    );
+    const y = Math.max(0, Math.floor((event.clientY - rect.top) / 76));
+    try {
+      await ownerApi(`/navigation/pages/${page.id}/layouts/16`, "PUT", {
+        placements: page.items.map((item) => ({
+          itemId: item.id,
+          x: item.id === id ? x : item.layouts?.["16"]?.x || 0,
+          y: item.id === id ? y : item.layouts?.["16"]?.y || 0,
+        })),
+      });
+      location.reload();
+    } catch (error) {
+      alert(error.message || "位置不可用");
+    }
+  });
+  alert(
+    "已进入可视化布局：拖动图标改变位置；图标内容请从左侧“编辑图标内容”修改。",
+  );
+}
+if (localStorage.getItem("sn-sidebar-collapsed") === "1")
+  dashboard?.classList.add("is-collapsed");
+if (localStorage.getItem("sn-sidebar-editing") === "1") setPageEditing(true);
+document
+  .querySelector("[data-toggle-sidebar]")
+  ?.addEventListener("click", () => {
+    const collapsed = dashboard?.classList.toggle("is-collapsed");
+    localStorage.setItem("sn-sidebar-collapsed", collapsed ? "1" : "0");
+  });
+document
+  .querySelector("[data-toggle-catalog]")
+  ?.addEventListener("click", async () => {
+    try {
+      await ownerApi("/catalog-visibility", "PUT", {
+        visible: data.catalogVisible === false,
+      });
+      location.reload();
+    } catch (error) {
+      alert(error.message || "保存失败");
+    }
+  });

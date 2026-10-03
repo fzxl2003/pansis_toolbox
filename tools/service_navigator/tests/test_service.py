@@ -43,6 +43,27 @@ def test_target_validation_and_limits(isolated_storage, owner: User) -> None:
     assert error.value.code == "TARGET_LIMIT"
 
 
+def test_fixed_target_pages_support_ordering(isolated_storage, owner: User) -> None:
+    service.create_site({"title": "Lab", "slug": "lab-services"}, owner)
+    first = service.add_target({"label": "First", "address": "10.0.0.1"}, owner)
+    second = service.add_target({"label": "Second", "address": "10.0.0.2"}, owner)
+    third = service.add_target({"label": "Third", "address": "10.0.0.3"}, owner)
+    assert [target["id"] for target in service.list_targets(owner)] == [first["id"], second["id"], third["id"]]
+
+    service.reorder_targets([third["id"], first["id"], second["id"]], owner)
+    site = service._owner_site(owner)
+    assert site is not None
+    assert [target["id"] for target in service.list_targets(owner)] == [third["id"], first["id"], second["id"]]
+    assert [page["targetId"] for page in service.public_navigation(site)["targetPages"]] == [third["id"], first["id"], second["id"]]
+
+    with pytest.raises(ToolboxError) as incomplete:
+        service.reorder_targets([third["id"], first["id"]], owner)
+    assert incomplete.value.code == "INVALID_TARGET_ORDER"
+    with pytest.raises(ToolboxError) as duplicate:
+        service.reorder_targets([third["id"], first["id"], first["id"]], owner)
+    assert duplicate.value.code == "INVALID_TARGET_ORDER"
+
+
 def test_site_appearance_persists_only_valid_theme_and_accent(isolated_storage, owner: User) -> None:
     service.create_site({"title": "Lab", "slug": "lab-services"}, owner)
     updated = service.update_site({"theme": "light", "accentColor": " #7C3AED "}, owner)
@@ -204,12 +225,20 @@ def test_navigation_uses_one_editable_layout_and_derives_narrow_grids(isolated_s
     http = next(item for item in services if item["serviceType"] == "http")
     port = next(item for item in services if item["serviceType"] == "port")
     page = service.create_nav_page({"name": "常用"}, owner)
-    item = service.create_nav_item({"pageId": page["id"], "name": "控制台", "size": "large", "serviceIds": [http["id"]], "iconSource": "none"}, owner)
+    icon = service.create_nav_icon({"name": "控制台", "size": "large", "serviceIds": [http["id"]], "iconSource": "text", "iconText": "控"}, owner)
+    item = service.create_nav_item({"pageId": page["id"], "iconId": icon["id"], "size": "large"}, owner)
     assert set(item["layouts"]) == {"16"}
     assert item["size"] == "large"
     with pytest.raises(ToolboxError) as error:
-        service.create_nav_item({"pageId": page["id"], "name": "错误混用", "size": "small", "serviceIds": [http["id"], port["id"]]}, owner)
+        service.create_nav_icon({"name": "错误混用", "serviceIds": [http["id"], port["id"]]}, owner)
     assert error.value.code == "MIXED_NAV_SERVICES"
+    second_page = service.create_nav_page({"name": "第二页"}, owner)
+    second_item = service.create_nav_item({"pageId": second_page["id"], "iconId": icon["id"], "size": "small"}, owner)
+    updated = service.update_nav_icon(icon["id"], {"name": "统一控制台", "iconText": "服"}, owner)
+    assert updated["name"] == "统一控制台"
+    assert all(page["items"][0]["name"] == "统一控制台" for page in [service.get_navigation(owner)["pages"][0], service.get_navigation(owner)["pages"][1]])
+    service.delete_nav_item(second_item["id"], owner)
+    assert any(entry["id"] == icon["id"] for entry in service.list_nav_icons(owner))
     layout = service.save_nav_layout(page["id"], 16, [{"itemId": item["id"], "x": 0, "y": 2}], owner)
     stored = layout["pages"][0]["items"][0]["layouts"]
     assert stored["16"] == {"x": 0, "y": 2}

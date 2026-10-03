@@ -14,7 +14,7 @@ from backend.app.core.security import get_optional_user
 from tools.service_navigator.backend import service
 
 VISITOR_COOKIE_NAME = "service_navigator_visitor"
-ASSET_VERSION = "12"
+ASSET_VERSION = "16"
 
 
 def _esc(value: object) -> str:
@@ -42,8 +42,9 @@ def _gate(request: Request, slug: str) -> HTMLResponse:
 
 def render_site(site: dict, principal: dict) -> HTMLResponse:
     navigation = service.public_navigation(site)
-    target_pages = "".join(f'<div class="sn-page-entry sn-target-page"><button class="sn-page-link" data-page="{_esc(target["id"])}" title="{_esc(target["name"])}">{_esc(target["name"])}</button><button class="sn-page-edit" data-target-edit="{_esc(target["targetId"])}" title="编辑扫描目标" aria-label="编辑扫描目标">✎</button></div>' for target in navigation["targetPages"] if target["visible"] or principal.get("kind") == "owner")
-    pages = "".join(f'<div class="sn-page-entry" data-page-entry="{_esc(page["id"])}"><button class="sn-page-link" data-page="{_esc(page["id"])}" title="{_esc(page["name"])}">{_esc(page["name"])}</button><div class="sn-page-order"><button data-page-move="up" data-page-id="{_esc(page["id"])}" title="上移" aria-label="上移">↑</button><button data-page-move="down" data-page-id="{_esc(page["id"])}" title="下移" aria-label="下移">↓</button></div><button class="sn-page-edit" data-page-edit="{_esc(page["id"])}" title="编辑页面" aria-label="编辑页面">✎</button></div>' for page in navigation["pages"] if page.get("visible", True) or principal.get("kind") == "owner")
+    owner = principal.get("kind") == "owner"
+    target_pages = "".join(f'<div class="sn-page-entry sn-target-page{" sn-page-hidden" if not target["visible"] else ""}"><button class="sn-page-link" data-page="{_esc(target["id"])}" title="{_esc(target["name"])}">{_esc(target["name"])}</button><div class="sn-page-order"><button data-target-move="up" data-target-id="{_esc(target["targetId"])}" title="上移" aria-label="上移">↑</button><button data-target-move="down" data-target-id="{_esc(target["targetId"])}" title="下移" aria-label="下移">↓</button></div><button class="sn-page-edit" data-target-edit="{_esc(target["targetId"])}" title="编辑扫描目标" aria-label="编辑扫描目标">✎</button></div>' for target in navigation["targetPages"] if owner or target["visible"])
+    pages = "".join(f'<div class="sn-page-entry{" sn-page-hidden" if not page.get("visible", True) else ""}" data-page-entry="{_esc(page["id"])}"><button class="sn-page-link" data-page="{_esc(page["id"])}" title="{_esc(page["name"])}">{_esc(page["name"])}</button><div class="sn-page-order"><button data-page-move="up" data-page-id="{_esc(page["id"])}" title="上移" aria-label="上移">↑</button><button data-page-move="down" data-page-id="{_esc(page["id"])}" title="下移" aria-label="下移">↓</button></div><button class="sn-page-edit" data-page-edit="{_esc(page["id"])}" title="编辑页面" aria-label="编辑页面">✎</button></div>' for page in navigation["pages"] if owner or page.get("visible", True))
     background = f"/service-nav/background/{quote(site['slug'])}" if site.get("background_source") in {"custom", "bing"} else ""
     theme = service._normalise_site_theme(site.get("theme", "auto"))
     accent_color = service._normalise_accent_color(site.get("accent_color", "#4f7cff"))
@@ -76,13 +77,13 @@ def mount_extra(app: FastAPI) -> None:
         path = service.public_icon(service_id, site)
         return FileResponse(path, headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}) if path else Response(status_code=404)
 
-    @app.get("/service-nav/navigation-icon/{item_id}", include_in_schema=False)
-    def navigation_icon(request: Request, item_id: str):
-        site = service.public_site_for_navigation_icon(item_id)
+    @app.get("/service-nav/navigation-icon/{icon_id}", include_in_schema=False)
+    def navigation_icon(request: Request, icon_id: str):
+        site = service.public_site_for_navigation_icon(icon_id)
         token, _created = _visitor(request)
         if not site or not service.site_access(site, get_optional_user(request), token)["allowed"]:
             return Response(status_code=404)
-        path = service.public_navigation_icon(item_id, site)
+        path = service.public_navigation_icon(icon_id, site)
         return FileResponse(path, headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}) if path else Response(status_code=404)
 
     @app.get("/service-nav/background/{slug}", include_in_schema=False)

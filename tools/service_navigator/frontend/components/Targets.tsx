@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Radar, Trash2 } from "lucide-react";
 import { API, blankTarget, type Run, type Target } from "../types";
 import { Field, Modal, Progress } from "./shared";
 
@@ -41,11 +41,13 @@ export function TargetTable({
             </td>
             <td>
               <button
-                className="sn-btn-link"
+                className="sn-icon-button"
                 disabled={!!active}
                 onClick={() => onScan(item.id)}
+                title="扫描"
+                aria-label="扫描"
               >
-                扫描
+                <Radar size={15} />
               </button>
               <button className="sn-icon-button" onClick={() => onEdit(item)}>
                 <Pencil size={14} />

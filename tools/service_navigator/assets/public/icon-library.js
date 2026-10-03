@@ -1,6 +1,6 @@
-import { data } from "./state.js";
+import { data, modalContent } from "./state.js";
 import { escapeHtml, serviceName } from "./utils.js";
-import { iconEdit, showModal } from "./modal.js";
+import { closeModal, iconEdit, showModal } from "./modal.js";
 import { ownerApi } from "./owner-api.js";
 import { setPageEditing } from "./page-editing.js";
 
@@ -86,7 +86,7 @@ export function openGlobalIconLibrary() {
     .addEventListener("click", () => openGlobalIconForm(null));
 }
 
-export function openGlobalIconForm(icon, restoreFile = false) {
+export function openGlobalIconForm(icon, restoreFile = false, onSaved = null) {
   if (!restoreFile) iconEdit.file = null;
   const detected = Boolean(icon?.detectedServiceId);
   const current = icon || {
@@ -249,6 +249,7 @@ export function openGlobalIconForm(icon, restoreFile = false) {
         },
         icon,
         restoreFile,
+        onSaved,
       ),
     );
   form.addEventListener("submit", async (event) => {
@@ -283,41 +284,46 @@ export function openGlobalIconForm(icon, restoreFile = false) {
           { method: "POST", credentials: "include", body: upload },
         );
         if (!response.ok) throw new Error("图标上传失败");
+        const uploaded = await response.json();
+        result.icon = uploaded.icon || result.icon;
       }
-      location.reload();
+      if (onSaved && result.icon) {
+        closeModal();
+        onSaved(result.icon);
+      } else location.reload();
     } catch (error) {
       alert(error.message || "图标保存失败");
     }
   });
 }
 
-function openGlobalIconSizePreview(draft, icon, restoreFile = false) {
+function openGlobalIconSizePreview(draft, icon, restoreFile = false, onSaved = null) {
   showModal(
     `<h2>图标尺寸预览</h2><p class="sn-modal-note">保存后可在页面上选择摆放尺寸。</p><div class="sn-icon-size-preview" data-size-preview></div><button class="sn-editor-save" data-return-icon-form>返回编辑</button>`,
   );
   const box = modalContent.querySelector("[data-size-preview]");
-  for (const [size, label] of [
-    ["small", "小图标 · 1×1"],
-    ["medium", "中图标 · 2×2"],
-    ["large", "大图标 · 4×4"],
-    ["wide", "宽图标 · 4×1"],
+  for (const [size] of [
+    ["small"],
+    ["medium"],
+    ["large"],
+    ["wide"],
   ]) {
     const card = document.createElement("article");
     card.className = `sn-nav-icon sn-size-${size}`;
-    card.innerHTML = "<strong></strong><small></small>";
-    card.querySelector("strong").textContent = draft.name || "服务图标";
-    card.querySelector("small").textContent = label;
-    card.prepend(
-      iconPreviewNode({
-        ...draft,
-        iconSource: draft.iconSource,
-        iconUrl: draft.iconUrl,
-        faviconServiceId: draft.faviconServiceId,
-      }),
-    );
+    card.append(iconPreviewNode(draft));
+    if (size !== "small") {
+      const body = document.createElement("span");
+      body.className = "sn-nav-card-body";
+      body.innerHTML = "<strong></strong><small></small>";
+      body.querySelector("strong").textContent = draft.name || "服务图标";
+      body.querySelector("small").textContent = "tcp/4000 · 网页 服务";
+      const status = document.createElement("em");
+      status.textContent = "在线";
+      card.append(body, status);
+    }
     box.append(card);
   }
   modalContent
     .querySelector("[data-return-icon-form]")
-    .addEventListener("click", () => openGlobalIconForm(icon, restoreFile));
+    .addEventListener("click", () => openGlobalIconForm(icon, restoreFile, onSaved));
 }

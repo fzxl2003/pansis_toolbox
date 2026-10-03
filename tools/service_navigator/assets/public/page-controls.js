@@ -2,7 +2,6 @@ import { data, modalContent } from "./state.js";
 import { showModal } from "./modal.js";
 import { ownerApi } from "./owner-api.js";
 import { preservePageEditing } from "./page-editing.js";
-import { openPagePlacementManager } from "./page-placements.js";
 import { openGlobalIconLibrary } from "./icon-library.js";
 
 export function bindPageControls() {
@@ -27,7 +26,7 @@ export function bindPageControls() {
       );
       if (!page) return;
       showModal(
-        `<h2>编辑页面</h2><form class="sn-target-page-form"><label>页面名称<input name="name" required></label><label class="sn-check"><input name="visible" type="checkbox">在访客侧边栏显示</label><div><button class="sn-editor-delete" type="button">删除页面</button><button type="button" class="sn-page-icons-button" data-manage-placements>管理页面图标</button><button class="sn-editor-save">保存</button></div></form>`,
+        `<h2>编辑页面</h2><form class="sn-target-page-form"><label>页面名称<input name="name" required></label><label class="sn-check"><input name="visible" type="checkbox">在访客侧边栏显示</label><p class="sn-modal-note">图标的添加、摆放和删除请使用侧边栏中的“编辑页面”。</p><div><button class="sn-editor-delete" type="button">删除页面</button><button class="sn-editor-save">保存</button></div></form>`,
       );
       const form = modalContent.querySelector(".sn-target-page-form");
       form.name.value = page.name;
@@ -41,9 +40,6 @@ export function bindPageControls() {
             location.reload();
           }
         });
-      form
-        .querySelector("[data-manage-placements]")
-        .addEventListener("click", () => openPagePlacementManager(page));
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         try {

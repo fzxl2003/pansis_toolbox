@@ -43,6 +43,8 @@ export type Run = {
     targetCount?: number;
     completedTargetCount?: number;
     successCount?: number;
+    portCount?: number;
+    completedPortCount?: number;
   };
 };
 

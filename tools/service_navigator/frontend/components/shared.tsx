@@ -88,8 +88,8 @@ export function Alert({ text, error = false }: { text: string; error?: boolean }
 }
 
 export function Progress({ run }: { run: Run }) {
-  const total = run.summary.targetCount || 0;
-  const done = run.summary.completedTargetCount || 0;
+  const total = run.summary.portCount ?? run.summary.targetCount ?? 0;
+  const done = run.summary.completedPortCount ?? run.summary.completedTargetCount ?? 0;
   const percent = total ? Math.round((done * 100) / total) : 0;
   return (
     <span className="sn-progress">

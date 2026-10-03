@@ -14,7 +14,7 @@ export let currentPage =
 export function setCurrentPage(value) {
   currentPage = value;
 }
-export const sizeSpan = { small: [1, 1], medium: [2, 2], large: [4, 4], wide: [4, 1] };
+export const sizeSpan = { small: [1, 1], medium: [2, 2], large: [4, 4], wide: [4, 2] };
 export function breakpoint() {
   const width = window.innerWidth;
   return width >= 1440 ? 16 : width >= 1080 ? 12 : width >= 700 ? 8 : 4;

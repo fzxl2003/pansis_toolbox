@@ -342,6 +342,61 @@ def save_nav_layout(page_id: str, breakpoint: int, placements: list[dict[str, An
         database.commit()
     return get_navigation(user)
 
+
+def save_nav_canvas(page_id: str, canvas_items: list[dict[str, Any]], user: User) -> dict[str, Any]:
+    """Atomically persist every size and position on a page's editable canvas."""
+    site = _owner_site(user)
+    with conn() as database:
+        _owned_page(database, site["id"], page_id)
+        stored = {
+            row["id"]: row
+            for row in database.execute(
+                "SELECT * FROM service_navigator_nav_items WHERE page_id=?", (page_id,)
+            ).fetchall()
+        }
+        submitted = {
+            str(entry.get("itemId") or ""): entry
+            for entry in canvas_items
+            if isinstance(entry, dict)
+        }
+        if set(submitted) != set(stored) or len(canvas_items) != len(stored):
+            raise ToolboxError("INVALID_NAV_LAYOUT", "画布必须包含页面内所有图标", status_code=400, tool_id=TOOL_ID)
+        occupied: set[tuple[int, int]] = set()
+        validated: list[tuple[str, str, int, int]] = []
+        for item_id in stored:
+            entry = submitted[item_id]
+            try:
+                size = _nav_size(entry.get("size"))
+                x, y = int(entry.get("x")), int(entry.get("y"))
+            except (TypeError, ValueError):
+                raise ToolboxError("INVALID_NAV_LAYOUT", "尺寸和画布坐标必须有效", status_code=400, tool_id=TOOL_ID) from None
+            width, height = NAV_SIZES[size]
+            if x < 0 or y < 0 or x + width > 16 or y > 1000:
+                raise ToolboxError("INVALID_NAV_LAYOUT", "图标超出当前网格范围", status_code=400, tool_id=TOOL_ID)
+            cells = {
+                (column, row)
+                for column in range(x, x + width)
+                for row in range(y, y + height)
+            }
+            if occupied & cells:
+                raise ToolboxError("INVALID_NAV_LAYOUT", "图标不能重叠", status_code=400, tool_id=TOOL_ID)
+            occupied |= cells
+            validated.append((item_id, size, x, y))
+        now = now_iso()
+        for item_id, size, x, y in validated:
+            database.execute(
+                "UPDATE service_navigator_nav_items SET size=?,updated_at=? WHERE id=?",
+                (size, now, item_id),
+            )
+            database.execute(
+                """INSERT INTO service_navigator_nav_item_layouts(item_id,breakpoint,grid_x,grid_y)
+                VALUES(?,?,?,?) ON CONFLICT(item_id,breakpoint) DO UPDATE SET
+                grid_x=excluded.grid_x,grid_y=excluded.grid_y""",
+                (item_id, 16, x, y),
+            )
+        database.commit()
+    return get_navigation(user)
+
 def _remove_navigation_icon(filename: str) -> None:
     if not filename:
         return
@@ -395,4 +450,4 @@ def _cleanup_empty_navigation_items(database: sqlite3.Connection, site_id: str) 
     """Placement and icon cleanup is explicit; deleting services keeps library icons."""
     return []
 
-__all__ = ['_clean_nav_name', '_cleanup_empty_navigation_items', '_first_available_layout', '_library_source', '_nav_size', '_navigation_detail', '_navigation_icon_for_user', '_navigation_item_for_user', '_owned_icon', '_owned_item', '_owned_page', '_remove_background', '_remove_navigation_icon', '_validate_item_services', 'clear_nav_custom_icon', 'create_nav_icon', 'create_nav_item', 'create_nav_page', 'delete_nav_icon', 'delete_nav_item', 'delete_nav_page', 'get_navigation', 'list_nav_icons', 'reorder_nav_pages', 'revoke_nav_default', 'save_nav_layout', 'set_all_services_visible', 'update_background_source', 'update_custom_background', 'update_nav_custom_icon', 'update_nav_icon', 'update_nav_item', 'update_nav_page']
+__all__ = ['_clean_nav_name', '_cleanup_empty_navigation_items', '_first_available_layout', '_library_source', '_nav_size', '_navigation_detail', '_navigation_icon_for_user', '_navigation_item_for_user', '_owned_icon', '_owned_item', '_owned_page', '_remove_background', '_remove_navigation_icon', '_validate_item_services', 'clear_nav_custom_icon', 'create_nav_icon', 'create_nav_item', 'create_nav_page', 'delete_nav_icon', 'delete_nav_item', 'delete_nav_page', 'get_navigation', 'list_nav_icons', 'reorder_nav_pages', 'revoke_nav_default', 'save_nav_canvas', 'save_nav_layout', 'set_all_services_visible', 'update_background_source', 'update_custom_background', 'update_nav_custom_icon', 'update_nav_icon', 'update_nav_item', 'update_nav_page']

@@ -1,4 +1,4 @@
-import { data, search } from "./state.js";
+import { data, modalContent, search } from "./state.js";
 import { escapeHtml, serviceName } from "./utils.js";
 import { closeModal, showModal } from "./modal.js";
 
@@ -61,7 +61,7 @@ async function probe(candidate) {
     clearTimeout(timer);
   }
 }
-async function openItem(item) {
+export async function openItem(item) {
   if (item.serviceType !== "http") {
     openPortModal(item);
     return;

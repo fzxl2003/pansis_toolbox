@@ -97,7 +97,7 @@ COMMAND_TEMPLATES = {
 }
 NAV_BREAKPOINTS = (16, 12, 8, 4)
 NAV_SIZES: dict[str, tuple[int, int]] = {
-    "small": (1, 1), "medium": (2, 2), "large": (4, 4), "wide": (4, 1),
+    "small": (1, 1), "medium": (2, 2), "large": (4, 4), "wide": (4, 2),
 }
 NAV_ICON_LIMIT = 1024 * 1024
 NAV_ICON_SUFFIXES = {".ico", ".png", ".jpg", ".jpeg", ".webp"}

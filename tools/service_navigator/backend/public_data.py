@@ -54,8 +54,8 @@ def public_icon(service_id: str, site: dict[str, Any]) -> Path | None:
     path = (icon_dir() / Path(row["favicon_filename"]).name).resolve()
     return path if path.is_file() and path.parent == icon_dir().resolve() else None
 
-def public_navigation(site: dict[str, Any]) -> dict[str, Any]:
-    """Return visitor-safe page placements; the global library stays owner-only."""
+def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> dict[str, Any]:
+    """Return visitor-safe placements, with the icon library for the owner only."""
     services = {item["id"]: item for item in public_services(site)}
     detail = _navigation_detail(site["id"])
     pages: list[dict[str, Any]] = []
@@ -77,7 +77,7 @@ def public_navigation(site: dict[str, Any]) -> dict[str, Any]:
             else:
                 icon_url = ""
             items.append({
-                "id": item["id"], "name": item["name"], "size": item["size"], "iconUrl": icon_url,
+                "id": item["id"], "iconId": item["iconId"], "name": item["name"], "size": item["size"], "iconUrl": icon_url,
                 "iconSource": source, "iconText": item.get("iconText", ""), "iconColor": item.get("iconColor", "#4f7cff"),
                 "preferenceRevision": item["preferenceRevision"], "serviceType": next(iter(service_types)),
                 "layouts": responsive_layouts.get(item["id"], {}), "services": linked,
@@ -86,7 +86,15 @@ def public_navigation(site: dict[str, Any]) -> dict[str, Any]:
     with conn() as database:
         targets = database.execute("SELECT id,label,address,custom_ports,show_in_navigation,sort_order FROM service_navigator_targets WHERE site_id=? ORDER BY sort_order,label,address", (site["id"],)).fetchall()
     target_pages = [{"id": f"target:{row['id']}", "targetId": row["id"], "name": row["label"], "address": row["address"], "customPorts": row["custom_ports"], "visible": bool(row["show_in_navigation"])} for row in targets]
-    return {"breakpoints": list(NAV_BREAKPOINTS), "targetPages": target_pages, "pages": pages, "services": list(services.values())}
+    output = {
+        "breakpoints": list(NAV_BREAKPOINTS),
+        "targetPages": target_pages,
+        "pages": pages,
+        "services": list(services.values()),
+    }
+    if include_icons:
+        output["icons"] = detail["icons"]
+    return output
 
 def public_site_for_icon(service_id: str) -> dict[str, Any] | None:
     with conn() as database:

@@ -119,14 +119,15 @@ def test_python_scan_aggregates_addresses_and_custom_ports(monkeypatch, isolated
 
 
 def test_scan_run_persists_target_progress(isolated_storage, owner: User) -> None:
-    _site, _target = _site_and_target(owner)
+    _site, target = _site_and_target(owner)
+    service.update_target(target["id"], {"address": target["address"], "customPorts": "1-20000"}, owner)
     queued = service.request_scan(owner)
-    assert service.get_scan(queued["id"], owner)["summary"] == {"targetCount": 1, "completedTargetCount": 0, "successCount": 0}
+    assert service.get_scan(queued["id"], owner)["summary"] == {"targetCount": 1, "completedTargetCount": 0, "successCount": 0, "portCount": 20000, "completedPortCount": 0}
     with service.conn() as database:
         database.execute("UPDATE service_navigator_scan_runs SET status='running' WHERE id=?", (queued["id"],))
         database.commit()
-    service._update_run_progress(queued["id"], completed=1, total=1, successes=1)
-    assert service.get_scan(queued["id"], owner)["summary"] == {"targetCount": 1, "completedTargetCount": 1, "successCount": 1}
+    service._update_run_progress(queued["id"], completed=0, total=1, successes=0, completed_ports=250, total_ports=20000)
+    assert service.get_scan(queued["id"], owner)["summary"] == {"targetCount": 1, "completedTargetCount": 0, "successCount": 0, "portCount": 20000, "completedPortCount": 250}
 
 
 def test_private_access_password_is_revocable(monkeypatch, isolated_storage, owner: User) -> None:
@@ -217,6 +218,7 @@ def test_service_type_can_override_scanner_and_changes_form_fields(isolated_stor
 
 def test_navigation_uses_one_editable_layout_and_derives_narrow_grids(isolated_storage, owner: User) -> None:
     _site, target = _site_and_target(owner)
+    assert service.NAV_SIZES["wide"] == (4, 2)
     service._persist_target_scan({"id": target["id"], "address": target["address"]}, [
         {"port": 22, "protocol": "tcp", "serviceName": "ssh", "product": "", "version": "", "extraInfo": "", "resolvedAddresses": ["10.0.0.8"], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""},
         {"port": 8080, "protocol": "tcp", "serviceName": "http", "product": "", "version": "", "extraInfo": "", "resolvedAddresses": ["10.0.0.8"], "httpTitle": "Console", "detectedUrl": "http://10.0.0.8:8080", "faviconFilename": ""},
@@ -244,5 +246,27 @@ def test_navigation_uses_one_editable_layout_and_derives_narrow_grids(isolated_s
     assert stored["16"] == {"x": 0, "y": 2}
     with pytest.raises(ToolboxError):
         service.save_nav_layout(page["id"], 4, [{"itemId": item["id"], "x": 1, "y": 0}], owner)
+    canvas = service.save_nav_canvas(page["id"], [{"itemId": item["id"], "size": "wide", "x": 4, "y": 3}], owner)
+    assert canvas["pages"][0]["items"][0]["size"] == "wide"
+    assert canvas["pages"][0]["items"][0]["layouts"]["16"] == {"x": 4, "y": 3}
+    second_icon = service.create_nav_icon({"name": "终端", "serviceIds": [port["id"]], "iconSource": "text", "iconText": "终"}, owner)
+    second_item = service.create_nav_item({"pageId": page["id"], "iconId": second_icon["id"], "size": "small"}, owner)
+    with pytest.raises(ToolboxError):
+        service.save_nav_canvas(page["id"], [
+            {"itemId": item["id"], "size": "wide", "x": 4, "y": 3},
+            {"itemId": second_item["id"], "size": "small", "x": 4, "y": 3},
+        ], owner)
+    with pytest.raises(ToolboxError):
+        service.save_nav_canvas(page["id"], [
+            {"itemId": item["id"], "size": "large", "x": 14, "y": 0},
+            {"itemId": second_item["id"], "size": "small", "x": 0, "y": 0},
+        ], owner)
+    duplicate = service.create_nav_item({"pageId": page["id"], "iconId": second_icon["id"], "size": "medium"}, owner)
+    assert duplicate["iconId"] == second_icon["id"]
+    assert len(service.get_navigation(owner)["pages"][0]["items"]) == 3
     public = service.public_navigation(_site)
     assert set(public["pages"][0]["items"][0]["layouts"]) == {"16", "12", "8", "4"}
+    assert "icons" not in public
+    owner_navigation = service.public_navigation(_site, include_icons=True)
+    detected_icons = [entry for entry in owner_navigation["icons"] if entry["detectedServiceId"]]
+    assert {entry["detectedServiceId"] for entry in detected_icons} == {http["id"], port["id"]}

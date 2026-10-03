@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .catalog import default_command
 from .database import *
 from .sites import _owned_target, _owner_site
@@ -10,14 +12,21 @@ from .sites import _owned_target, _owner_site
 def request_scan(user: User, target_id: str | None = None) -> dict[str, Any]:
     site = _owner_site(user)
     with conn() as database:
+        targets: list[sqlite3.Row]
         if target_id:
-            _owned_target(database, site["id"], target_id)
+            targets = [_owned_target(database, site["id"], target_id)]
+        else:
+            targets = database.execute(
+                "SELECT * FROM service_navigator_targets WHERE site_id=?",
+                (site["id"],),
+            ).fetchall()
         exists = database.execute("SELECT 1 FROM service_navigator_scan_runs WHERE site_id=? AND status IN ('queued','running')", (site["id"],)).fetchone()
         if exists:
             raise ToolboxError("SCAN_IN_PROGRESS", "该站点已有扫描任务正在进行", status_code=409, tool_id=TOOL_ID)
         run_id = uuid4().hex
-        target_count = 1 if target_id else database.execute("SELECT COUNT(*) FROM service_navigator_targets WHERE site_id=?", (site["id"],)).fetchone()[0]
-        summary = json.dumps({"targetCount": target_count, "completedTargetCount": 0, "successCount": 0}, ensure_ascii=False)
+        target_count = len(targets)
+        port_count = sum(len(ports_for_target(target["custom_ports"])) for target in targets)
+        summary = json.dumps({"targetCount": target_count, "completedTargetCount": 0, "successCount": 0, "portCount": port_count, "completedPortCount": 0}, ensure_ascii=False)
         database.execute("INSERT INTO service_navigator_scan_runs(id,site_id,target_id,status,requested_at,summary_json) VALUES(?,?,?,'queued',?,?)", (run_id, site["id"], target_id, now_iso(), summary))
         database.commit()
     return {"id": run_id, "status": "queued"}
@@ -44,22 +53,67 @@ def run_scan(run_id: str) -> None:
             targets = database.execute("SELECT * FROM service_navigator_targets WHERE site_id=?" + (" AND id=?" if run["target_id"] else "") + " ORDER BY label,address", ((run["site_id"], run["target_id"]) if run["target_id"] else (run["site_id"],))).fetchall()
             database.commit()
         if not targets:
-            _finish_run(run_id, "failed", "没有可扫描的目标", {"targetCount": 0, "completedTargetCount": 0, "successCount": 0})
+            _finish_run(run_id, "failed", "没有可扫描的目标", {"targetCount": 0, "completedTargetCount": 0, "successCount": 0, "portCount": 0, "completedPortCount": 0})
             return
+        ports_by_target = {
+            target["id"]: len(ports_for_target(target["custom_ports"]))
+            for target in targets
+        }
+        total_ports = sum(ports_by_target.values())
         results: list[dict[str, Any]] = []
-        _update_run_progress(run_id, completed=0, total=len(targets), successes=0)
+        completed_ports: dict[str, int] = dict.fromkeys(ports_by_target, 0)
+        progress_lock = threading.Lock()
+
+        def publish_progress() -> None:
+            with progress_lock:
+                completed = len(results)
+                successes = sum(1 for item in results if item.get("ok"))
+                scanned_ports = sum(completed_ports.values())
+            _update_run_progress(
+                run_id,
+                completed=completed,
+                total=len(targets),
+                successes=successes,
+                completed_ports=scanned_ports,
+                total_ports=total_ports,
+            )
+
+        def report_target_port_progress(target_id: str, current: int) -> None:
+            # Persist at most one update per 100 completed ports. This keeps
+            # long scans responsive without turning progress into thousands of
+            # SQLite writes.
+            with progress_lock:
+                previous = completed_ports[target_id]
+                capped = min(current, ports_by_target[target_id])
+                if capped < ports_by_target[target_id] and capped < previous + 100:
+                    return
+                completed_ports[target_id] = max(previous, capped)
+            publish_progress()
+
+        publish_progress()
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(_scan_target, dict(target)) for target in targets]
+            futures = [
+                executor.submit(
+                    _scan_target,
+                    dict(target),
+                    lambda current, target_id=target["id"]: report_target_port_progress(target_id, current),
+                )
+                for target in targets
+            ]
             for future in concurrent.futures.as_completed(futures):
                 try:
                     results.append(future.result())
                 except Exception as exc:  # defensive: individual failures should not discard other targets
                     results.append({"ok": False, "error": str(exc)[:500], "targetId": ""})
-                _update_run_progress(run_id, completed=len(results), total=len(targets), successes=sum(1 for item in results if item.get("ok")))
+                result_target_id = results[-1].get("targetId")
+                if result_target_id in completed_ports:
+                    with progress_lock:
+                        completed_ports[result_target_id] = ports_by_target[result_target_id]
+                publish_progress()
         successes = sum(1 for item in results if item.get("ok"))
         status = "success" if successes == len(results) else ("partial" if successes else "failed")
         error = "" if status == "success" else "部分目标扫描失败" if status == "partial" else "所有目标扫描失败"
-        _finish_run(run_id, status, error, {"targets": results, "successCount": successes, "targetCount": len(results), "completedTargetCount": len(results)})
+        _finish_run(run_id, status, error, {"targets": results, "successCount": successes, "targetCount": len(results), "completedTargetCount": len(results), "portCount": total_ports, "completedPortCount": total_ports})
     except Exception as exc:  # noqa: BLE001
         _finish_run(run_id, "failed", str(exc)[:500], {})
     finally:
@@ -71,13 +125,15 @@ def _finish_run(run_id: str, status: str, error: str, summary: dict[str, Any]) -
         database.execute("UPDATE service_navigator_scan_runs SET status=?,finished_at=?,error=?,summary_json=? WHERE id=?", (status, now_iso(), error, json.dumps(summary, ensure_ascii=False), run_id))
         database.commit()
 
-def _update_run_progress(run_id: str, *, completed: int, total: int, successes: int) -> None:
+def _update_run_progress(run_id: str, *, completed: int, total: int, successes: int, completed_ports: int | None = None, total_ports: int | None = None) -> None:
     summary = {"targetCount": total, "completedTargetCount": completed, "successCount": successes}
+    if completed_ports is not None and total_ports is not None:
+        summary.update({"portCount": total_ports, "completedPortCount": completed_ports})
     with conn() as database:
         database.execute("UPDATE service_navigator_scan_runs SET summary_json=? WHERE id=? AND status='running'", (json.dumps(summary, ensure_ascii=False), run_id))
         database.commit()
 
-def _scan_target(target: dict[str, Any]) -> dict[str, Any]:
+def _scan_target(target: dict[str, Any], on_port_progress: Callable[[int], None] | None = None) -> dict[str, Any]:
     target_id, address = target["id"], target["address"]
     try:
         addresses = resolve_addresses(address)
@@ -90,9 +146,18 @@ def _scan_target(target: dict[str, Any]) -> dict[str, Any]:
     # This semaphore covers the complete target operation (not just a child
     # process), so separate site scans cannot exceed three active targets.
     with SCAN_SEMAPHORE:
-        for concrete_address in addresses:
+        for address_index, concrete_address in enumerate(addresses):
             try:
-                for item in _scan_address(concrete_address, ports):
+                # A target's configured port set is the user-visible unit of
+                # work. Domains may resolve to several addresses, but only the
+                # first address advances the displayed port counter.
+                progress = on_port_progress if address_index == 0 else None
+                scanned = (
+                    _scan_address(concrete_address, ports, progress)
+                    if progress
+                    else _scan_address(concrete_address, ports)
+                )
+                for item in scanned:
                     port = int(item["port"])
                     current = discovered.get(port)
                     resolved = set(current.get("resolvedAddresses", set())) if current else set()
@@ -140,13 +205,14 @@ def ports_for_target(custom_ports: str) -> tuple[int, ...]:
             custom.add(int(value))
     return tuple(sorted(set(COMMON_TCP_PORTS).union(custom)))
 
-def _scan_address(address: str, ports: tuple[int, ...]) -> list[dict[str, Any]]:
+def _scan_address(address: str, ports: tuple[int, ...], on_port_progress: Callable[[int], None] | None = None) -> list[dict[str, Any]]:
     """Connect-scan one concrete IP without executing external programs."""
     deadline = time.monotonic() + HOST_SCAN_TIMEOUT
     discovered: list[dict[str, Any]] = []
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=PORT_SCAN_WORKERS)
     iterator = iter(ports)
     futures: set[concurrent.futures.Future[dict[str, Any] | None]] = set()
+    completed_count = 0
 
     def submit_next() -> bool:
         try:
@@ -169,6 +235,9 @@ def _scan_address(address: str, ports: tuple[int, ...]) -> list[dict[str, Any]]:
             for future in done:
                 futures.remove(future)
                 item = future.result()
+                completed_count += 1
+                if on_port_progress:
+                    on_port_progress(completed_count)
                 if item:
                     discovered.append(item)
                 submit_next()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .database import *
+from .scanning import _SafeRedirectHandler
 from .sites import _owner_site
 
 

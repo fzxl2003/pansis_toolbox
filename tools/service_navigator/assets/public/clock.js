@@ -17,4 +17,10 @@ export function updateClock() {
       weekday: "long",
     }).format(now);
 }
-updateClock();
+function scheduleClockUpdate() {
+  updateClock();
+  // Align updates to the next real second so the display never drifts.
+  window.setTimeout(scheduleClockUpdate, 1000 - (Date.now() % 1000) + 10);
+}
+
+scheduleClockUpdate();

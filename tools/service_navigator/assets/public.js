@@ -13,17 +13,23 @@ import { render } from "./public/render.js";
 import { setPageEditing } from "./public/page-editing.js";
 import { openOwnerEditor } from "./public/owner-editor.js";
 import { bindPageControls } from "./public/page-controls.js";
-import { enableLayoutEditing } from "./public/layout.js";
+import {
+  refreshCanvasEditButton,
+  stopPageCanvasEditing,
+  togglePageCanvasEditing,
+} from "./public/page-canvas.js";
 import { ownerApi } from "./public/owner-api.js";
 
 render();
 document.querySelectorAll("[data-page]").forEach((button) =>
   button.addEventListener("click", () => {
+    stopPageCanvasEditing();
     setCurrentPage(button.dataset.page || "all");
     document
       .querySelectorAll("[data-page]")
       .forEach((item) => item.classList.toggle("active", item === button));
     render();
+    refreshCanvasEditButton();
   }),
 );
 document
@@ -55,8 +61,8 @@ document
     ),
   );
 document
-  .querySelector("[data-layout-edit]")
-  ?.addEventListener("click", enableLayoutEditing);
+  .querySelector("[data-page-canvas-edit]")
+  ?.addEventListener("click", togglePageCanvasEditing);
 bindPageControls();
 
 let previousBreakpoint = breakpoint();
@@ -70,6 +76,7 @@ window.addEventListener("resize", () => {
 if (localStorage.getItem("sn-sidebar-collapsed") === "1")
   dashboard?.classList.add("is-collapsed");
 if (localStorage.getItem("sn-sidebar-editing") === "1") setPageEditing(true);
+refreshCanvasEditButton();
 document
   .querySelector("[data-toggle-sidebar]")
   ?.addEventListener("click", () => {

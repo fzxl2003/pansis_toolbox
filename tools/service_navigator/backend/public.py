@@ -40,8 +40,8 @@ def _gate(request: Request, slug: str) -> HTMLResponse:
 
 
 def render_site(site: dict, principal: dict) -> HTMLResponse:
-    navigation = service.public_navigation(site)
     owner = principal.get("kind") == "owner"
+    navigation = service.public_navigation(site, include_icons=owner)
     target_pages = "".join(f'<div class="sn-page-entry sn-target-page{" sn-page-hidden" if not target["visible"] else ""}"><button class="sn-page-link" data-page="{_esc(target["id"])}" title="{_esc(target["name"])}">{_esc(target["name"])}</button><div class="sn-page-order"><button data-target-move="up" data-target-id="{_esc(target["targetId"])}" title="上移" aria-label="上移">↑</button><button data-target-move="down" data-target-id="{_esc(target["targetId"])}" title="下移" aria-label="下移">↓</button></div><button class="sn-page-edit" data-target-edit="{_esc(target["targetId"])}" title="编辑扫描目标" aria-label="编辑扫描目标">✎</button></div>' for target in navigation["targetPages"] if owner or target["visible"])
     pages = "".join(f'<div class="sn-page-entry{" sn-page-hidden" if not page.get("visible", True) else ""}" data-page-entry="{_esc(page["id"])}"><button class="sn-page-link" data-page="{_esc(page["id"])}" title="{_esc(page["name"])}">{_esc(page["name"])}</button><div class="sn-page-order"><button data-page-move="up" data-page-id="{_esc(page["id"])}" title="上移" aria-label="上移">↑</button><button data-page-move="down" data-page-id="{_esc(page["id"])}" title="下移" aria-label="下移">↓</button></div><button class="sn-page-edit" data-page-edit="{_esc(page["id"])}" title="编辑页面" aria-label="编辑页面">✎</button></div>' for page in navigation["pages"] if owner or page.get("visible", True))
     background = f"/service-nav/background/{quote(site['slug'])}" if site.get("background_source") in {"custom", "bing"} else ""
@@ -50,7 +50,7 @@ def render_site(site: dict, principal: dict) -> HTMLResponse:
     navigation["appearance"] = {"theme": theme, "accentColor": accent_color}
     navigation_json = json.dumps(navigation, ensure_ascii=False).replace("</", "<\\/")
     page_add = '<button class="sn-page-add" data-add-page type="button" title="新增页面" aria-label="新增页面">+</button>' if principal.get("kind") == "owner" else ""
-    owner_controls = '<button class="sn-owner-edit" data-toggle-page-edit>编辑导航</button><button class="sn-owner-edit" data-page-icons>管理图标</button><button class="sn-owner-edit" data-open-editor>外观与背景</button>' if principal.get("kind") == "owner" else ""
+    owner_controls = '<button class="sn-owner-edit" data-toggle-page-edit>编辑导航</button><button class="sn-owner-edit" data-page-canvas-edit>编辑页面</button><button class="sn-owner-edit" data-page-icons>管理图标</button><button class="sn-owner-edit" data-open-editor>外观与背景</button>' if principal.get("kind") == "owner" else ""
     identity = ""
     if principal.get("kind") in {"owner", "user", "password"}:
         label = "Guest" if principal.get("kind") == "password" else str(principal.get("label") or "")

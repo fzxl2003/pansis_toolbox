@@ -2,7 +2,7 @@ import { breakpoint, content, currentPage, data, sizeSpan } from "./state.js";
 import { healthLabel, serviceName } from "./utils.js";
 import { openItem } from "./service-interactions.js";
 
-function render() {
+export function render() {
   if (!content) return;
   const page =
     currentPage === "all"
@@ -62,36 +62,11 @@ function render() {
     grid.className = "sn-icon-grid";
     grid.dataset.columns = String(breakpoint());
     for (const item of page.items || []) {
-      const card = document.createElement("button");
-      card.type = "button";
-      card.className = `sn-nav-icon sn-size-${item.size}`;
+      const card = navigationCard(item);
       const layout = item.layouts?.[String(breakpoint())] || { x: 0, y: 0 };
       const span = sizeSpan[item.size] || sizeSpan.small;
       card.style.gridColumn = `${layout.x + 1} / span ${span[0]}`;
       card.style.gridRow = `${layout.y + 1} / span ${span[1]}`;
-      const fallback =
-        item.iconSource === "text"
-          ? item.iconText || item.name.slice(0, 1)
-          : "◌";
-      card.innerHTML = item.iconUrl
-        ? '<span class="sn-nav-icon-image"><img alt=""></span><strong></strong><small></small>'
-        : '<span class="sn-nav-icon-image"><span class="sn-nav-fallback"></span></span><strong></strong><small></small>';
-      const img = card.querySelector("img");
-      if (img) img.src = item.iconUrl;
-      const fallbackNode = card.querySelector(".sn-nav-fallback");
-      if (fallbackNode) {
-        fallbackNode.textContent = fallback;
-        fallbackNode.style.color =
-          item.iconSource === "text" ? item.iconColor || "" : " ";
-      }
-      card.querySelector("strong").textContent = item.name;
-      card.querySelector("small").textContent =
-        item.services.length > 1
-          ? `${item.services.length} 个入口`
-          : item.serviceType === "http"
-            ? "网页服务"
-            : "端口服务";
-      card.addEventListener("click", () => openItem(item));
       grid.append(card);
       count++;
     }
@@ -102,6 +77,55 @@ function render() {
   if (!count)
     content.innerHTML = '<p class="sn-empty">暂时没有可展示的服务。</p>';
 }
+
+function navigationCard(item) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `sn-nav-icon sn-size-${item.size}`;
+  card.dataset.itemId = item.id;
+  card.title = item.name;
+  card.setAttribute("aria-label", item.name);
+  const icon = document.createElement("span");
+  icon.className = "sn-nav-icon-image";
+  if (item.iconUrl) {
+    const image = document.createElement("img");
+    image.src = item.iconUrl;
+    image.alt = "";
+    icon.append(image);
+  } else {
+    const fallback = document.createElement("span");
+    fallback.className = "sn-nav-fallback";
+    fallback.textContent =
+      item.iconSource === "text" ? item.iconText || item.name.slice(0, 1) : "◌";
+    fallback.style.color = item.iconSource === "text" ? item.iconColor || "" : "";
+    icon.append(fallback);
+  }
+  card.append(icon);
+  if (item.size !== "small") {
+    const primary = item.services[0] || {};
+    const body = document.createElement("span");
+    body.className = "sn-nav-card-body";
+    body.innerHTML = "<strong></strong><small></small>";
+    body.querySelector("strong").textContent = item.name;
+    body.querySelector("small").textContent =
+      item.services.length > 1
+        ? `${item.services.length} 个服务`
+        : `${primary.protocol || "tcp"}/${primary.port || "—"} · ${item.serviceType === "http" ? "网页" : "端口"} 服务`;
+    const status = document.createElement("em");
+    status.textContent =
+      primary.healthMonitored && primary.healthStatus === "healthy"
+        ? "健康"
+        : primary.healthMonitored && primary.healthStatus === "unhealthy"
+          ? "异常"
+          : primary.state === "offline"
+            ? "离线"
+            : "在线";
+    card.append(body, status);
+  }
+  card.addEventListener("click", () => openItem(item));
+  return card;
+}
+
 function serviceCard(item) {
   const card = document.createElement("button");
   card.type = "button";

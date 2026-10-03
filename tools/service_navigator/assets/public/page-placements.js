@@ -1,4 +1,4 @@
-import { data } from "./state.js";
+import { data, modalContent } from "./state.js";
 import { escapeHtml } from "./utils.js";
 import { showModal } from "./modal.js";
 import { ownerApi } from "./owner-api.js";
@@ -9,7 +9,7 @@ export function openPagePlacementManager(page) {
     (icon) => !page.items.some((item) => item.iconId === icon.id),
   );
   showModal(
-    `<h2>${escapeHtml(page.name)} · 管理摆放</h2><p class="sn-modal-note">从全局图标库选择图标加入此页面；位置在页面上拖拽调整，移除摆放不会删除图标库中的图标。</p><section class="sn-editor-section"><h3>添加图标</h3><form class="sn-placement-form" data-placement-form><select data-placement-icon required></select><select data-placement-size><option value="small">小图标 · 1×1</option><option value="medium">中图标 · 2×2</option><option value="large">大图标 · 4×4</option><option value="wide">宽图标 · 4×1</option></select><button class="sn-editor-save">添加到页面</button></form><div class="sn-placement-list" data-placement-list></div></section>`,
+    `<h2>${escapeHtml(page.name)} · 管理摆放</h2><p class="sn-modal-note">从全局图标库选择图标加入此页面；位置在页面上拖拽调整，移除摆放不会删除图标库中的图标。</p><section class="sn-editor-section"><h3>添加图标</h3><form class="sn-placement-form" data-placement-form><select data-placement-icon required></select><select data-placement-size><option value="small">小图标 · 1×1</option><option value="medium">中图标 · 2×2</option><option value="large">大图标 · 4×4</option><option value="wide">宽卡片 · 4×2</option></select><button class="sn-editor-save">添加到页面</button></form><div class="sn-placement-list" data-placement-list></div></section>`,
   );
   const iconSelect = modalContent.querySelector("[data-placement-icon]");
   for (const icon of available) {
@@ -31,7 +31,7 @@ export function openPagePlacementManager(page) {
     body.innerHTML = "<strong></strong><small></small>";
     body.querySelector("strong").textContent = item.name;
     body.querySelector("small").textContent =
-      `${item.size === "small" ? "小" : item.size === "medium" ? "中" : item.size === "large" ? "大" : "宽"}图标 · ${item.services.length} 个服务`;
+      `${{ small: "小 · 1×1", medium: "中 · 2×2", large: "大 · 4×4", wide: "宽 · 4×2" }[item.size] || "小 · 1×1"} · ${item.services.length} 个服务`;
     row.append(body);
     const select = document.createElement("select");
     for (const [value, label] of [

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from backend.app.core.security import require_user
 from tools.service_navigator.backend import service
+from tools.service_navigator.backend.public import mount_extra
 
 router = APIRouter()
 
@@ -88,6 +89,10 @@ class NavigationIconPayload(BaseModel):
 
 class NavigationLayoutPayload(BaseModel):
     placements: list[dict] = []
+
+
+class NavigationCanvasPayload(BaseModel):
+    items: list[dict] = []
 
 
 class BackgroundPayload(BaseModel):
@@ -241,6 +246,11 @@ def delete_navigation_page(request: Request, page_id: str) -> dict[str, bool]:
 @router.put("/navigation/pages/{page_id}/layouts/{breakpoint}")
 def update_navigation_layout(request: Request, page_id: str, breakpoint: int, payload: NavigationLayoutPayload) -> dict:
     return {"navigation": service.save_nav_layout(page_id, breakpoint, payload.placements, require_user(request))}
+
+
+@router.put("/navigation/pages/{page_id}/canvas")
+def update_navigation_canvas(request: Request, page_id: str, payload: NavigationCanvasPayload) -> dict:
+    return {"navigation": service.save_nav_canvas(page_id, payload.items, require_user(request))}
 
 
 @router.post("/navigation/items", status_code=201)

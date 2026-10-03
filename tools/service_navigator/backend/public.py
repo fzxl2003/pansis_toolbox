@@ -14,7 +14,7 @@ from backend.app.core.security import get_optional_user
 from tools.service_navigator.backend import service
 
 VISITOR_COOKIE_NAME = "service_navigator_visitor"
-ASSET_VERSION = "1"
+ASSET_VERSION = "12"
 
 
 def _esc(value: object) -> str:
@@ -40,37 +40,23 @@ def _gate(request: Request, slug: str) -> HTMLResponse:
     return HTMLResponse(page, status_code=401)
 
 
-def _service_card(item: dict) -> str:
-    title = item["name"]
-    protocol = item["serviceName"] or "unknown"
-    offline = " is-offline" if item["state"] == "offline" else ""
-    state = "离线（上次扫描）" if item["state"] == "offline" else "在线"
-    icon = f'<img class="sn-service-icon" src="{_esc(item["faviconUrl"])}" alt="" loading="lazy">' if item.get("faviconUrl") else '<span class="sn-service-icon sn-service-icon-fallback">◌</span>'
-    detail = f'{_esc(item["targetLabel"])} · {_esc(item["targetAddress"])}:{item["port"]}'
-    description = f'<p class="sn-service-description">{_esc(item["description"])}</p>' if item.get("description") else ""
-    if item.get("url"):
-        action = f'<a class="sn-open" href="{_esc(item["url"])}" target="_blank" rel="noreferrer">打开服务 ↗</a>'
-    else:
-        action = f'<button class="sn-copy" type="button" data-command="{_esc(item["command"])}">复制连接命令</button>'
-    search = _esc(" ".join([title, protocol, item["targetLabel"], item["targetAddress"], item.get("category", "")]))
-    category = item.get("category") or "未分类"
-    category_tag = f'<span>{_esc(item["category"])}</span>' if item.get("category") else ""
-    return f'<article class="sn-service{offline}" data-service-card data-search="{search}" data-category="{_esc(category)}" data-target="{_esc(item["targetId"])}"><header>{icon}<div><h2>{_esc(title)}</h2><p>{detail}</p></div><span class="sn-state">{state}</span></header><div class="sn-service-meta"><span>{_esc(protocol)}</span><span>TCP/{item["port"]}</span>{category_tag}</div>{description}<footer>{action}</footer></article>'
-
-
 def render_site(site: dict, principal: dict) -> HTMLResponse:
-    services = service.public_services(site)
-    categories = sorted({item.get("category") or "未分类" for item in services})
-    targets = sorted({(item["targetId"], item["targetLabel"]) for item in services}, key=lambda pair: pair[1])
-    cards = "".join(_service_card(item) for item in services) or '<p class="sn-empty">尚未发现可展示的服务。</p>'
-    category_buttons = '<button class="sn-filter is-active" data-filter-category="">全部</button>' + "".join(f'<button class="sn-filter" data-filter-category="{_esc(category)}">{_esc(category)}</button>' for category in categories)
-    target_options = '<option value="">全部目标</option>' + "".join(f'<option value="{_esc(target_id)}">{_esc(label)}</option>' for target_id, label in targets)
+    navigation = service.public_navigation(site)
+    target_pages = "".join(f'<div class="sn-page-entry sn-target-page"><button class="sn-page-link" data-page="{_esc(target["id"])}" title="{_esc(target["name"])}">{_esc(target["name"])}</button><button class="sn-page-edit" data-target-edit="{_esc(target["targetId"])}" title="编辑扫描目标" aria-label="编辑扫描目标">✎</button></div>' for target in navigation["targetPages"] if target["visible"] or principal.get("kind") == "owner")
+    pages = "".join(f'<div class="sn-page-entry" data-page-entry="{_esc(page["id"])}"><button class="sn-page-link" data-page="{_esc(page["id"])}" title="{_esc(page["name"])}">{_esc(page["name"])}</button><div class="sn-page-order"><button data-page-move="up" data-page-id="{_esc(page["id"])}" title="上移" aria-label="上移">↑</button><button data-page-move="down" data-page-id="{_esc(page["id"])}" title="下移" aria-label="下移">↓</button></div><button class="sn-page-edit" data-page-edit="{_esc(page["id"])}" title="编辑页面" aria-label="编辑页面">✎</button></div>' for page in navigation["pages"] if page.get("visible", True) or principal.get("kind") == "owner")
+    background = f"/service-nav/background/{quote(site['slug'])}" if site.get("background_source") in {"custom", "bing"} else ""
+    theme = service._normalise_site_theme(site.get("theme", "auto"))
+    accent_color = service._normalise_accent_color(site.get("accent_color", "#4f7cff"))
+    navigation["appearance"] = {"theme": theme, "accentColor": accent_color}
+    navigation_json = json.dumps(navigation, ensure_ascii=False).replace("</", "<\\/")
+    page_add = '<button class="sn-page-add" data-add-page type="button" title="新增页面" aria-label="新增页面">+</button>' if principal.get("kind") == "owner" else ""
+    owner_controls = f'<button class="sn-owner-edit" data-toggle-page-edit>编辑导航</button><button class="sn-owner-edit" data-page-icons>管理图标</button><button class="sn-owner-edit" data-open-editor>外观与背景</button>' if principal.get("kind") == "owner" else ""
     identity = ""
     if principal.get("kind") in {"owner", "user", "password"}:
         label = "Guest" if principal.get("kind") == "password" else str(principal.get("label") or "")
         endpoint = f'/service-nav/{quote(site["slug"])}/logout' if principal.get("kind") == "password" else "/api/auth/logout"
         identity = f'<button class="sn-identity" data-logout="{_esc(endpoint)}" title="退出认证">{_esc(label)} · 退出</button>'
-    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="{_esc(site["description"])}"><title>{_esc(site["title"])} · 服务导航</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body><main class="sn-public-shell"><header class="sn-public-head"><div><p class="sn-eyebrow">SERVICE NAVIGATOR</p><h1>{_esc(site["title"])}</h1><p>{_esc(site["description"] or "扫描发现的网络服务导航")}</p></div>{identity}</header><section class="sn-controls"><label class="sn-search">⌕<input data-search-input placeholder="搜索服务、协议或目标"></label><select data-target-select>{target_options}</select><div class="sn-filters">{category_buttons}</div></section><p class="sn-result-count" data-result-count></p><section class="sn-service-grid" data-service-grid>{cards}</section></main><script type="module" src="/tool-assets/service_navigator/public.js?v={ASSET_VERSION}"></script></body></html>'''
+    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="{_esc(site["description"])}"><title>{_esc(site["title"])} · 服务导航</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body class="sn-dashboard-body sn-theme-{_esc(theme)}" data-owner="{str(principal.get("kind") == "owner").lower()}" style="--sn-user-background:url('{_esc(background)}');--sn-user-accent:{_esc(accent_color)}"><main class="sn-dashboard"><aside class="sn-sidebar"><div class="sn-sidebar-top"><a class="sn-brand" href="/service-nav/{_esc(site["slug"])}" aria-label="返回服务导航首页"><span>◈</span><strong>{_esc(site["title"])}</strong></a><button class="sn-sidebar-toggle" data-toggle-sidebar type="button" aria-label="收起导航栏" title="收起导航栏"><span></span><span></span></button></div><nav aria-label="导航页面">{target_pages}{pages}{page_add}</nav><div class="sn-sidebar-footer">{owner_controls}{identity}</div></aside><section class="sn-dashboard-main"><header class="sn-dashboard-head"><time class="sn-clock" aria-label="当前时间"><strong data-clock-time></strong><small data-clock-date></small></time></header><div class="sn-search-area" role="search"><div class="sn-search-row"><button class="sn-engine-trigger" data-engine-trigger type="button" aria-haspopup="true" aria-expanded="false" aria-label="选择搜索引擎" title="选择搜索引擎"><span class="sn-engine-mark sn-engine-google" data-selected-engine>G</span><span class="sn-engine-caret" aria-hidden="true">⌄</span></button><label class="sn-dashboard-search"><input data-search-input type="search" placeholder="输入搜索内容"></label><button class="sn-web-search" data-web-search type="button" aria-label="搜索" title="搜索"><span aria-hidden="true"></span></button></div><div class="sn-engine-menu" data-engine-menu hidden><button type="button" data-engine="baidu"><span class="sn-engine-mark sn-engine-baidu">⌘</span><strong>百度</strong></button><button type="button" data-engine="google"><span class="sn-engine-mark sn-engine-google">G</span><strong>Google</strong></button><button type="button" data-engine="bing"><span class="sn-engine-mark sn-engine-bing">B</span><strong>必应</strong></button></div></div><section data-navigation-content></section></section></main><div class="sn-public-modal" data-action-modal hidden><div class="sn-public-modal-card" role="dialog" aria-modal="true"><button class="sn-modal-close" data-close-modal aria-label="关闭">×</button><div data-modal-content></div></div></div><script id="sn-navigation-data" type="application/json">{navigation_json}</script><script type="module" src="/tool-assets/service_navigator/public.js?v={ASSET_VERSION}"></script></body></html>'''
     return HTMLResponse(page)
 
 
@@ -89,6 +75,24 @@ def mount_extra(app: FastAPI) -> None:
             return Response(status_code=404)
         path = service.public_icon(service_id, site)
         return FileResponse(path, headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}) if path else Response(status_code=404)
+
+    @app.get("/service-nav/navigation-icon/{item_id}", include_in_schema=False)
+    def navigation_icon(request: Request, item_id: str):
+        site = service.public_site_for_navigation_icon(item_id)
+        token, _created = _visitor(request)
+        if not site or not service.site_access(site, get_optional_user(request), token)["allowed"]:
+            return Response(status_code=404)
+        path = service.public_navigation_icon(item_id, site)
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}) if path else Response(status_code=404)
+
+    @app.get("/service-nav/background/{slug}", include_in_schema=False)
+    def background(request: Request, slug: str):
+        site = service.public_site(slug)
+        token, _created = _visitor(request)
+        if not site or not service.site_access(site, get_optional_user(request), token)["allowed"]:
+            return Response(status_code=404)
+        path = service.public_background(site)
+        return FileResponse(path, headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}) if path else Response(status_code=404)
 
     @app.post("/service-nav/{slug}/unlock", include_in_schema=False)
     def unlock(request: Request, slug: str, payload: dict = Body(...)):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, File, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from backend.app.core.security import require_user
@@ -13,22 +13,33 @@ class SitePayload(BaseModel):
     title: str = ""
     slug: str = ""
     description: str = ""
+    theme: str = "auto"
+    accentColor: str = "#4f7cff"
 
 
 class TargetPayload(BaseModel):
     label: str = ""
     address: str
     customPorts: str = ""
+    showInNavigation: bool = True
 
 
 class ServicePayload(BaseModel):
+    serviceType: str = "port"
     displayName: str = ""
-    category: str = ""
     description: str = ""
     navigationUrl: str = ""
     connectionCommand: str = ""
-    visible: bool = True
-    sortOrder: int = 0
+    healthEnabled: bool = True
+    healthUrl: str = ""
+
+
+class HealthSettingsPayload(BaseModel):
+    checkIntervalSeconds: int = 300
+    emailRecipients: list[str] | str = []
+    confirmCount: int = 3
+    repeatIntervalSeconds: int = 3600
+    maxRepeatCount: int = 0
 
 
 class VisibilityPayload(BaseModel):
@@ -43,6 +54,38 @@ class PasswordPayload(BaseModel):
     label: str = ""
     password: str = ""
     enabled: bool = True
+
+
+class NavigationPagePayload(BaseModel):
+    name: str = ""
+    visible: bool = True
+
+
+class NavigationOrderPayload(BaseModel):
+    pageIds: list[str] = []
+
+
+class NavigationItemPayload(BaseModel):
+    pageId: str = ""
+    name: str = ""
+    size: str = "small"
+    iconSource: str = "none"
+    faviconServiceId: str = ""
+    iconText: str = ""
+    iconColor: str = "#4f7cff"
+    serviceIds: list[str] = []
+
+
+class NavigationLayoutPayload(BaseModel):
+    placements: list[dict] = []
+
+
+class BackgroundPayload(BaseModel):
+    source: str = "default"
+
+
+class CatalogVisibilityPayload(BaseModel):
+    visible: bool = True
 
 
 @router.get("/site")
@@ -115,6 +158,115 @@ def services(request: Request) -> dict:
 @router.put("/services/{service_id}")
 def update_service(request: Request, service_id: str, payload: ServicePayload) -> dict:
     return {"service": service.update_service(service_id, payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.get("/navigation")
+def navigation(request: Request) -> dict:
+    return {"navigation": service.get_navigation(require_user(request))}
+
+
+@router.post("/navigation/pages", status_code=201)
+def create_navigation_page(request: Request, payload: NavigationPagePayload) -> dict:
+    return {"page": service.create_nav_page(payload.model_dump(), require_user(request))}
+
+
+@router.put("/navigation/pages/order")
+def order_navigation_pages(request: Request, payload: NavigationOrderPayload) -> dict:
+    return {"navigation": service.reorder_nav_pages(payload.pageIds, require_user(request))}
+
+
+@router.put("/navigation/pages/{page_id}")
+def update_navigation_page(request: Request, page_id: str, payload: NavigationPagePayload) -> dict:
+    return {"page": service.update_nav_page(page_id, payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.delete("/navigation/pages/{page_id}")
+def delete_navigation_page(request: Request, page_id: str) -> dict[str, bool]:
+    service.delete_nav_page(page_id, require_user(request))
+    return {"deleted": True}
+
+
+@router.put("/navigation/pages/{page_id}/layouts/{breakpoint}")
+def update_navigation_layout(request: Request, page_id: str, breakpoint: int, payload: NavigationLayoutPayload) -> dict:
+    return {"navigation": service.save_nav_layout(page_id, breakpoint, payload.placements, require_user(request))}
+
+
+@router.post("/navigation/items", status_code=201)
+def create_navigation_item(request: Request, payload: NavigationItemPayload) -> dict:
+    return {"item": service.create_nav_item(payload.model_dump(), require_user(request))}
+
+
+@router.put("/navigation/items/{item_id}")
+def update_navigation_item(request: Request, item_id: str, payload: NavigationItemPayload) -> dict:
+    return {"item": service.update_nav_item(item_id, payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.delete("/navigation/items/{item_id}")
+def delete_navigation_item(request: Request, item_id: str) -> dict[str, bool]:
+    service.delete_nav_item(item_id, require_user(request))
+    return {"deleted": True}
+
+
+@router.post("/navigation/items/{item_id}/icon", status_code=201)
+async def upload_navigation_icon(request: Request, item_id: str, file: UploadFile = File(...)) -> dict:
+    content = await file.read(service.NAV_ICON_LIMIT + 1)
+    return {"item": service.update_nav_custom_icon(item_id, file.filename or "icon", content, require_user(request))}
+
+
+@router.delete("/navigation/items/{item_id}/icon")
+def delete_navigation_icon(request: Request, item_id: str) -> dict:
+    return {"item": service.clear_nav_custom_icon(item_id, require_user(request))}
+
+
+@router.post("/navigation/items/{item_id}/revoke-default")
+def revoke_navigation_default(request: Request, item_id: str) -> dict:
+    return {"item": service.revoke_nav_default(item_id, require_user(request))}
+
+
+@router.put("/background")
+def update_background(request: Request, payload: BackgroundPayload) -> dict:
+    return {"site": service.update_background_source(payload.source, require_user(request))}
+
+
+@router.post("/background/upload")
+async def upload_background(request: Request, file: UploadFile = File(...)) -> dict:
+    content = await file.read(service.BACKGROUND_LIMIT + 1)
+    return {"site": service.update_custom_background(file.filename or "background", content, require_user(request))}
+
+
+@router.put("/catalog-visibility")
+def catalog_visibility(request: Request, payload: CatalogVisibilityPayload) -> dict:
+    return {"site": service.set_all_services_visible(payload.visible, require_user(request))}
+
+
+@router.get("/health/settings")
+def health_settings(request: Request) -> dict:
+    return {"settings": service.get_health_settings(require_user(request))}
+
+
+@router.put("/health/settings")
+def update_health_settings(request: Request, payload: HealthSettingsPayload) -> dict:
+    return {"settings": service.update_health_settings(payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.post("/health/checks")
+def check_all_health(request: Request) -> dict:
+    return {"checks": service.check_site_health(require_user(request))}
+
+
+@router.post("/services/{service_id}/health/check")
+def check_service_health(request: Request, service_id: str) -> dict:
+    return {"check": service.check_health(service_id, require_user(request))}
+
+
+@router.get("/services/{service_id}/health/snapshots")
+def health_snapshots(request: Request, service_id: str, limit: int = 100) -> dict:
+    return {"snapshots": service.list_health_snapshots(service_id, require_user(request), limit)}
+
+
+@router.get("/health/events")
+def health_events(request: Request, limit: int = 100) -> dict:
+    return {"events": service.list_health_events(require_user(request), limit)}
 
 
 @router.get("/access")

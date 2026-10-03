@@ -15,7 +15,7 @@ def _app() -> FastAPI:
     return app
 
 
-def test_private_public_page_hides_fingerprint_and_hidden_services(monkeypatch, tmp_path) -> None:
+def test_private_public_page_hides_fingerprint_and_exposes_all_services(monkeypatch, tmp_path) -> None:
     owner = User(id="public-owner", username="owner", display_name="Owner")
     monkeypatch.setattr(service, "root_dir", lambda: tmp_path)
     service.RECOVERY_DONE = False
@@ -26,7 +26,6 @@ def test_private_public_page_hides_fingerprint_and_hidden_services(monkeypatch, 
     target = service.add_target({"label": "Gateway", "address": "10.0.0.8"}, owner)
     service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "product": "OpenSSH", "version": "9.5", "extraInfo": "Ubuntu", "resolvedAddresses": ["10.0.0.8"], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
     password = service.add_password("Guests", "secret", owner)
-    service.update_service(service.get_site(owner)["services"][0]["id"], {"visible": False}, owner)
     client = TestClient(_app())
     gate = client.get("/service-nav/lab-public")
     assert gate.status_code == 401
@@ -35,10 +34,12 @@ def test_private_public_page_hides_fingerprint_and_hidden_services(monkeypatch, 
     page = client.get("/service-nav/lab-public")
     assert page.status_code == 200
     assert "OpenSSH" not in page.text
-    assert "ssh -p" not in page.text
-    service.update_service(service.get_site(owner)["services"][0]["id"], {"visible": True}, owner)
-    visible = client.get("/service-nav/lab-public")
-    assert "复制连接命令" in visible.text
-    assert "OpenSSH" not in visible.text
+    assert '"serviceType": "port"' in page.text
+    assert "全部服务" not in page.text
+    assert 'data-page="target:' in page.text
+    assert "SERVICE NAVIGATOR" not in page.text
+    assert "data-search-engine" not in page.text
+    assert "data-engine=\"google\"" in page.text
+    assert "data-toggle-sidebar" in page.text
     service.update_password(password["id"], {"label": "Guests", "password": "new-secret", "enabled": True}, owner)
     assert client.get("/service-nav/lab-public").status_code == 401

@@ -6,6 +6,7 @@ export const generatedToolViews = {
   "experiment_monitor": lazy(() => import("../../../tools/experiment_monitor/frontend/index")),
   "git_blog": lazy(() => import("../../../tools/git_blog/frontend/index")),
   "server_monitor": lazy(() => import("../../../tools/server_monitor/frontend/index")),
+  "service_navigator": lazy(() => import("../../../tools/service_navigator/frontend/index")),
   "ssh_workspace": lazy(() => import("../../../tools/ssh_workspace/frontend/index")),
   "tensorboard_dashboard": lazy(() => import("../../../tools/tensorboard_dashboard/frontend/index")),
   "tensorboard_progress_monitor": lazy(() => import("../../../tools/tensorboard_progress_monitor/frontend/index")),

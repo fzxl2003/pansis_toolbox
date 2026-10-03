@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from backend.app.core.errors import ToolboxError, toolbox_error_handler
+from backend.app.services.auth_service import User
+from tools.service_navigator.backend import public, service
+
+
+def _app() -> FastAPI:
+    app = FastAPI()
+    app.add_exception_handler(ToolboxError, toolbox_error_handler)
+    public.mount_extra(app)
+    return app
+
+
+def test_private_public_page_hides_fingerprint_and_hidden_services(monkeypatch, tmp_path) -> None:
+    owner = User(id="public-owner", username="owner", display_name="Owner")
+    monkeypatch.setattr(service, "root_dir", lambda: tmp_path)
+    service.RECOVERY_DONE = False
+    monkeypatch.setattr(service, "list_users", lambda: [owner])
+    monkeypatch.setattr(service, "can_access_tool", lambda _tool_id, _user: True)
+    monkeypatch.setattr(public, "get_optional_user", lambda _request: None)
+    service.create_site({"title": "Lab", "slug": "lab-public"}, owner)
+    target = service.add_target({"label": "Gateway", "address": "10.0.0.8"}, owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "product": "OpenSSH", "version": "9.5", "extraInfo": "Ubuntu", "resolvedAddresses": ["10.0.0.8"], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
+    password = service.add_password("Guests", "secret", owner)
+    service.update_service(service.get_site(owner)["services"][0]["id"], {"visible": False}, owner)
+    client = TestClient(_app())
+    gate = client.get("/service-nav/lab-public")
+    assert gate.status_code == 401
+    assert "访问密码" in gate.text
+    assert client.post("/service-nav/lab-public/unlock", json={"password": "secret"}).status_code == 200
+    page = client.get("/service-nav/lab-public")
+    assert page.status_code == 200
+    assert "OpenSSH" not in page.text
+    assert "ssh -p" not in page.text
+    service.update_service(service.get_site(owner)["services"][0]["id"], {"visible": True}, owner)
+    visible = client.get("/service-nav/lab-public")
+    assert "复制连接命令" in visible.text
+    assert "OpenSSH" not in visible.text
+    service.update_password(password["id"], {"label": "Guests", "password": "new-secret", "enabled": True}, owner)
+    assert client.get("/service-nav/lab-public").status_code == 401

@@ -287,6 +287,8 @@ def init_database(database: sqlite3.Connection) -> None:
           icon_source TEXT NOT NULL DEFAULT 'text', icon_filename TEXT NOT NULL DEFAULT '',
           icon_text TEXT NOT NULL DEFAULT '', icon_color TEXT NOT NULL DEFAULT '#4f7cff',
           favicon_service_id TEXT, detected_service_id TEXT,
+          destination_type TEXT NOT NULL DEFAULT 'service', external_url TEXT NOT NULL DEFAULT '',
+          external_favicon_filename TEXT NOT NULL DEFAULT '',
           preference_revision INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           FOREIGN KEY(site_id) REFERENCES service_navigator_sites(id) ON DELETE CASCADE,
@@ -342,6 +344,9 @@ def init_database(database: sqlite3.Connection) -> None:
     _ensure_column(database, "service_navigator_targets", "show_in_navigation", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(database, "service_navigator_targets", "sort_order", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(database, "service_navigator_nav_pages", "visible", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(database, "service_navigator_nav_icons", "destination_type", "TEXT NOT NULL DEFAULT 'service'")
+    _ensure_column(database, "service_navigator_nav_icons", "external_url", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(database, "service_navigator_nav_icons", "external_favicon_filename", "TEXT NOT NULL DEFAULT ''")
     # Services created before health checks existed have the column default of
     # one. Do this compatibility write only once per database so simultaneous
     # health result writes do not contend for SQLite's write lock.

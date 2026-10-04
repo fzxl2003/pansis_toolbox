@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .catalog import _service_public
+from .catalog import _clean_navigation_url, _service_public
 from .database import *
 from .sites import _owner_site
 
@@ -38,15 +38,24 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
 
     def icon_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         selected = [service_by_id[service_id] for service_id in service_ids.get(row["id"], []) if service_id in service_by_id]
+        item = dict(row)
+        destination_type = item.get("destination_type") or "service"
+        icon_url = ""
+        if row["icon_source"] == "custom" and row["icon_filename"]:
+            icon_url = f"/service-nav/navigation-icon/{row['id']}"
+        elif destination_type == "external" and row["icon_source"] == "favicon" and item.get("external_favicon_filename"):
+            icon_url = f"/service-nav/navigation-icon/{row['id']}"
         return {
             "id": row["id"], "name": row["name"], "iconSource": row["icon_source"],
             "iconFilename": row["icon_filename"], "iconText": row["icon_text"],
             "iconColor": _normalise_accent_color(row["icon_color"]),
             "faviconServiceId": row["favicon_service_id"] or "",
             "detectedServiceId": dict(row).get("detected_service_id") or "",
+            "destinationType": destination_type,
+            "externalUrl": item.get("external_url") or "",
             "preferenceRevision": int(row["preference_revision"]),
             "serviceIds": [entry["id"] for entry in selected], "services": selected,
-            "iconUrl": f"/service-nav/navigation-icon/{row['id']}" if row["icon_source"] == "custom" and row["icon_filename"] else "",
+            "iconUrl": icon_url,
             "createdAt": row["created_at"], "updatedAt": row["updated_at"],
         }
 
@@ -56,7 +65,7 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
         icon = icon_by_id[row["icon_id"]]
         item_by_page.setdefault(row["page_id"], []).append({
             "id": row["id"], "pageId": row["page_id"], "iconId": row["icon_id"], "size": row["size"],
-            **{key: value for key, value in icon.items() if key not in {"id", "detectedServiceId", "iconUrl"}},
+            **{key: value for key, value in icon.items() if key not in {"id", "detectedServiceId"}},
             "layouts": layouts_by_item.get(row["id"], {}), "createdAt": row["created_at"], "updatedAt": row["updated_at"],
         })
     return {
@@ -76,33 +85,70 @@ def _owned_icon(database: sqlite3.Connection, site_id: str, icon_id: str) -> sql
         raise ToolboxError("NAV_ICON_NOT_FOUND", "导航图标不存在", status_code=404, tool_id=TOOL_ID)
     return row
 
-def _library_source(value: Any, favicon_service_id: str, service_ids: list[str]) -> str:
+def _library_source(value: Any, favicon_service_id: str, service_ids: list[str], destination_type: str) -> str:
     source = str(value or "text")
     if source not in {"text", "favicon", "custom"}:
         raise ToolboxError("INVALID_NAV_ICON", "图标来源不合法", status_code=400, tool_id=TOOL_ID)
-    if source == "favicon" and favicon_service_id not in service_ids:
+    if destination_type == "service" and source == "favicon" and favicon_service_id not in service_ids:
         raise ToolboxError("INVALID_NAV_ICON", "favicon 必须来自已关联服务", status_code=400, tool_id=TOOL_ID)
     return source
+
+def _destination_type(value: Any, *, detected: bool = False) -> str:
+    destination_type = str(value or "service").strip().lower()
+    if destination_type not in {"service", "external"}:
+        raise ToolboxError("INVALID_NAV_DESTINATION", "导航目标类型不合法", status_code=400, tool_id=TOOL_ID)
+    if detected and destination_type != "service":
+        raise ToolboxError("DETECTED_NAV_ICON_LOCKED", "已探测服务图标必须关联当前服务", status_code=400, tool_id=TOOL_ID)
+    return destination_type
+
+def _external_url(value: Any) -> str:
+    url = _clean_navigation_url(str(value or ""))
+    if not url:
+        raise ToolboxError("INVALID_NAVIGATION_URL", "外部链接不能为空", status_code=400, tool_id=TOOL_ID)
+    return url
+
+def _download_external_favicon(url: str) -> str:
+    """Fetch a website icon through the existing bounded web metadata probe."""
+    from .scanning import _remove_icon, fetch_web_metadata
+
+    metadata = fetch_web_metadata(url) or {}
+    source_name = str(metadata.get("faviconFilename") or "")
+    source = (icon_dir() / Path(source_name).name).resolve()
+    if not source_name or not source.is_file() or source.parent != icon_dir().resolve():
+        return ""
+    saved = f"external-{uuid4().hex}{source.suffix.lower()}"
+    destination = navigation_icon_dir() / saved
+    try:
+        source.replace(destination)
+    except OSError:
+        return ""
+    _remove_icon(source_name)
+    return saved
 
 def list_nav_icons(user: User) -> list[dict[str, Any]]:
     return _navigation_detail(_owner_site(user)["id"])["icons"]
 
 def create_nav_icon(payload: dict[str, Any], user: User) -> dict[str, Any]:
     site = _owner_site(user)
+    name = _clean_nav_name(payload.get("name"), "图标名称")
     detected_service_id = str(payload.get("detectedServiceId") or "")
-    service_ids = list(payload.get("serviceIds") or ([detected_service_id] if detected_service_id else []))
+    destination_type = _destination_type(payload.get("destinationType", "service"), detected=bool(detected_service_id))
+    external_url = _external_url(payload.get("externalUrl")) if destination_type == "external" else ""
+    service_ids = list(payload.get("serviceIds") or ([detected_service_id] if detected_service_id else [])) if destination_type == "service" else []
+    favicon_service_id = str(payload.get("faviconServiceId") or "") if destination_type == "service" else ""
+    source = _library_source(payload.get("iconSource", "favicon" if destination_type == "external" else "text"), favicon_service_id, service_ids, destination_type)
+    external_favicon_filename = _download_external_favicon(external_url) if destination_type == "external" and source == "favicon" else ""
     with conn() as database:
-        service_ids, _kind = _validate_item_services(database, site["id"], service_ids)
+        if destination_type == "service":
+            service_ids, _kind = _validate_item_services(database, site["id"], service_ids)
         if detected_service_id and service_ids != [detected_service_id]:
             raise ToolboxError("INVALID_NAV_SERVICES", "已探测服务图标只能关联当前服务", status_code=400, tool_id=TOOL_ID)
-        favicon_service_id = str(payload.get("faviconServiceId") or "")
-        source = _library_source(payload.get("iconSource", "text"), favicon_service_id, service_ids)
         icon_id, now = uuid4().hex, now_iso()
         database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,icon_text,
-            icon_color,favicon_service_id,detected_service_id,preference_revision,sort_order,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, site["id"], _clean_nav_name(payload.get("name"), "图标名称"),
+            icon_color,favicon_service_id,detected_service_id,destination_type,external_url,external_favicon_filename,preference_revision,sort_order,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, site["id"], name,
             source, "", str(payload.get("iconText") or "")[:4], _normalise_accent_color(payload.get("iconColor", "#4f7cff")),
-            favicon_service_id or None, detected_service_id or None, 1, 0, now, now))
+            favicon_service_id or None, detected_service_id or None, destination_type, external_url, external_favicon_filename, 1, 0, now, now))
         database.executemany("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, service_id) for service_id in service_ids])
         database.commit()
     return _navigation_icon_for_user(icon_id, user)
@@ -117,26 +163,43 @@ def update_nav_icon(icon_id: str, payload: dict[str, Any], user: User) -> dict[s
     site = _owner_site(user)
     with conn() as database:
         old = _owned_icon(database, site["id"], icon_id)
+        name = _clean_nav_name(payload.get("name", old["name"]), "图标名称")
         detected_service_id = str(old["detected_service_id"] or payload.get("detectedServiceId") or "")
-        if "serviceIds" in payload or "detectedServiceId" in payload:
-            service_ids = list(payload.get("serviceIds") or ([detected_service_id] if detected_service_id else []))
-            service_ids, _kind = _validate_item_services(database, site["id"], service_ids)
-            if detected_service_id and service_ids != [detected_service_id]:
-                raise ToolboxError("INVALID_NAV_SERVICES", "已探测服务图标只能关联当前服务", status_code=400, tool_id=TOOL_ID)
+        destination_type = _destination_type(payload.get("destinationType", old["destination_type"] or "service"), detected=bool(detected_service_id))
+        if destination_type == "service":
+            if "serviceIds" in payload or "detectedServiceId" in payload or old["destination_type"] != "service":
+                service_ids = list(payload.get("serviceIds") or ([detected_service_id] if detected_service_id else []))
+                service_ids, _kind = _validate_item_services(database, site["id"], service_ids)
+            else:
+                service_ids = [row["service_id"] for row in database.execute("SELECT service_id FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,)).fetchall()]
+                _validate_item_services(database, site["id"], service_ids)
+            favicon_service_id = str(payload.get("faviconServiceId", old["favicon_service_id"] or "") or "")
+            external_url = ""
         else:
-            service_ids = [row["service_id"] for row in database.execute("SELECT service_id FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,)).fetchall()]
-            _validate_item_services(database, site["id"], service_ids)
-        favicon_service_id = str(payload.get("faviconServiceId", old["favicon_service_id"] or "") or "")
-        source = _library_source(payload.get("iconSource", old["icon_source"]), favicon_service_id, service_ids)
+            service_ids, favicon_service_id = [], ""
+            external_url = _external_url(payload.get("externalUrl", old["external_url"] or ""))
+        source = _library_source(payload.get("iconSource", old["icon_source"]), favicon_service_id, service_ids, destination_type)
+        old_external_favicon = old["external_favicon_filename"] or ""
+        should_refresh_favicon = destination_type == "external" and source == "favicon" and (
+            old["destination_type"] != "external"
+            or old["icon_source"] != "favicon"
+            or external_url != (old["external_url"] or "")
+        )
+        external_favicon_filename = _download_external_favicon(external_url) if should_refresh_favicon else (old_external_favicon if destination_type == "external" and source == "favicon" else "")
         database.execute("""UPDATE service_navigator_nav_icons SET name=?,icon_source=?,icon_text=?,icon_color=?,
-            favicon_service_id=?,preference_revision=preference_revision+1,updated_at=? WHERE id=?""",
-            (_clean_nav_name(payload.get("name", old["name"]), "图标名称"), source,
+            favicon_service_id=?,destination_type=?,external_url=?,external_favicon_filename=?,preference_revision=preference_revision+1,updated_at=? WHERE id=?""",
+            (name, source,
              str(payload.get("iconText", old["icon_text"]) or "")[:4],
-             _normalise_accent_color(payload.get("iconColor", old["icon_color"])), favicon_service_id or None, now_iso(), icon_id))
-        if "serviceIds" in payload:
+             _normalise_accent_color(payload.get("iconColor", old["icon_color"])), favicon_service_id or None,
+             destination_type, external_url, external_favicon_filename, now_iso(), icon_id))
+        if destination_type == "service" and ("serviceIds" in payload or old["destination_type"] != "service"):
             database.execute("DELETE FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,))
             database.executemany("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, service_id) for service_id in service_ids])
+        elif destination_type == "external":
+            database.execute("DELETE FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,))
         database.commit()
+    if old_external_favicon and old_external_favicon != external_favicon_filename:
+        _remove_navigation_icon(old_external_favicon)
     return _navigation_icon_for_user(icon_id, user)
 
 def delete_nav_icon(icon_id: str, user: User) -> None:
@@ -148,6 +211,7 @@ def delete_nav_icon(icon_id: str, user: User) -> None:
         database.execute("DELETE FROM service_navigator_nav_icons WHERE id=?", (icon_id,))
         database.commit()
     _remove_navigation_icon(old["icon_filename"])
+    _remove_navigation_icon(old["external_favicon_filename"])
 
 def create_nav_item(payload: dict[str, Any], user: User) -> dict[str, Any]:
     site = _owner_site(user)
@@ -198,9 +262,10 @@ def update_nav_custom_icon(icon_id: str, filename: str, content: bytes, user: Us
         icon = _owned_icon(database, site["id"], icon_id)
         saved = f"{icon_id}-{uuid4().hex[:8]}{suffix}"
         (navigation_icon_dir() / saved).write_bytes(content)
-        database.execute("UPDATE service_navigator_nav_icons SET icon_source='custom',icon_filename=?,updated_at=? WHERE id=?", (saved, now_iso(), icon_id))
+        database.execute("UPDATE service_navigator_nav_icons SET icon_source='custom',icon_filename=?,external_favicon_filename='',updated_at=? WHERE id=?", (saved, now_iso(), icon_id))
         database.commit()
     _remove_navigation_icon(icon["icon_filename"])
+    _remove_navigation_icon(icon["external_favicon_filename"])
     return _navigation_icon_for_user(icon_id, user)
 
 def clear_nav_custom_icon(icon_id: str, user: User) -> dict[str, Any]:

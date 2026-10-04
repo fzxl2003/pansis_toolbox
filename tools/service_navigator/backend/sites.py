@@ -64,7 +64,8 @@ def delete_site(user: User) -> None:
     site = _owner_site(user)
     with conn() as database:
         filenames = [row[0] for row in database.execute("SELECT favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=?", (site["id"],)).fetchall()]
-        navigation_filenames = [row[0] for row in database.execute("SELECT icon_filename FROM service_navigator_nav_icons WHERE site_id=? AND icon_filename<>''", (site["id"],)).fetchall()]
+        navigation_filenames = [filename for row in database.execute("""SELECT icon_filename,external_favicon_filename
+            FROM service_navigator_nav_icons WHERE site_id=?""", (site["id"],)).fetchall() for filename in row if filename]
         background_filename = database.execute("SELECT background_filename FROM service_navigator_sites WHERE id=?", (site["id"],)).fetchone()[0]
         database.execute("DELETE FROM service_navigator_sites WHERE id=?", (site["id"],))
         database.commit()

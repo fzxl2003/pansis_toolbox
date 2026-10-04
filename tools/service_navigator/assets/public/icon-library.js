@@ -8,13 +8,12 @@ export function iconPreviewNode(icon) {
   const node = document.createElement("span");
   node.className = "sn-nav-icon-image";
   const url =
-    icon?.iconSource === "custom"
-      ? icon.iconUrl || ""
-      : icon?.iconSource === "favicon"
-        ? (data.services || []).find(
-            (entry) => entry.id === icon.faviconServiceId,
-          )?.faviconUrl || ""
-        : "";
+    icon?.iconUrl ||
+    (icon?.iconSource === "favicon"
+      ? (data.services || []).find(
+          (entry) => entry.id === icon.faviconServiceId,
+        )?.faviconUrl || ""
+      : "");
   if (url) {
     const image = new Image();
     image.src = url;
@@ -24,11 +23,13 @@ export function iconPreviewNode(icon) {
     const fallback = document.createElement("span");
     fallback.className = "sn-nav-fallback";
     fallback.textContent =
-      icon?.iconSource === "text"
+      icon?.iconSource === "text" || icon?.destinationType === "external"
         ? icon.iconText || icon.name?.slice(0, 1) || "A"
         : "◌";
     fallback.style.color =
-      icon?.iconSource === "text" ? icon.iconColor || "" : "";
+      icon?.iconSource === "text" || icon?.destinationType === "external"
+        ? icon.iconColor || ""
+        : "";
     node.append(fallback);
   }
   return node;
@@ -125,12 +126,11 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     iconText: "A",
     iconColor: "#4f7cff",
     serviceIds: [],
+    destinationType: "service",
+    externalUrl: "",
   }), ...(draft || {}) };
-  const association = detected
-    ? '<section class="sn-icon-services sn-locked-service-field"><span>关联服务</span><div data-icon-services></div></section>'
-    : '<label class="sn-icon-services">关联服务<div data-icon-services></div></label>';
   showModal(
-    `<h2>${detected ? "编辑已探测服务图标" : icon ? "编辑自定义图标" : "添加自定义图标"}</h2><form class="sn-icon-form" data-icon-form><label>名称<input name="name" required></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option></select></label>${association}<div data-source-fields></div><button class="sn-icon-preview" type="button" data-icon-preview><span data-icon-preview-image></span><span>图标预览</span><small>点击查看各尺寸效果</small></button><div><button class="sn-editor-save" type="submit">保存</button></div></form>`,
+    `<h2>${detected ? "编辑已探测服务图标" : icon ? "编辑自定义图标" : "添加自定义图标"}</h2><form class="sn-icon-form" data-icon-form><label>名称<input name="name" required></label><label>目标类型<select name="destination"><option value="service">关联服务</option><option value="external">外部链接</option></select></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option></select></label><div data-destination-fields></div><div data-source-fields></div><button class="sn-icon-preview" type="button" data-icon-preview><span data-icon-preview-image></span><span>图标预览</span><small>点击查看各尺寸效果</small></button><div><button class="sn-editor-save" type="submit">保存</button></div></form>`,
     "icon-form",
   );
   const form = modalContent.querySelector("[data-icon-form]");
@@ -138,57 +138,64 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
   form.source.value = ["text", "favicon", "custom"].includes(current.iconSource)
     ? current.iconSource
     : "text";
-  const servicesBox = form.querySelector("[data-icon-services]");
-  if (detected) {
-    const service = (data.services || []).find(
-      (entry) => entry.id === current.detectedServiceId,
-    );
-    servicesBox.innerHTML = `<article class="sn-locked-service"><strong>${escapeHtml(serviceName(service || {}))}</strong><small>${service?.serviceType === "http" ? "HTTP 服务" : "端口服务"} · TCP/${service?.port || "—"}</small><small>${escapeHtml(service?.targetLabel || "未命名扫描目标")}${service?.targetAddress ? ` · ${escapeHtml(service.targetAddress)}` : ""}</small></article>`;
-  } else {
-    const services = data.services || [];
+  form.destination.value = detected ? "service" : current.destinationType || "service";
+  form.destination.disabled = detected;
+  const linkedServices = () => (data.services || []).filter((entry) =>
+    detected
+      ? entry.id === current.detectedServiceId
+      : [...form.querySelectorAll("[data-icon-services] input:checked")].some((input) => input.value === entry.id),
+  );
+  const destinationFields = () => {
+    const box = form.querySelector("[data-destination-fields]");
+    box.replaceChildren();
+    form.querySelector('[name="source"] option[value="favicon"]').textContent =
+      form.destination.value === "external" ? "网站 favicon" : "服务 favicon";
+    if (form.destination.value === "external") {
+      box.innerHTML = '<label>外部链接 URL<input name="external-url" type="url" required placeholder="https://example.com"></label>';
+      box.querySelector('[name="external-url"]').value = current.externalUrl || "";
+      return;
+    }
+    box.innerHTML = detected
+      ? '<section class="sn-icon-services sn-locked-service-field"><span>关联服务</span><div data-icon-services></div></section>'
+      : '<label class="sn-icon-services">关联服务<div data-icon-services></div></label>';
+    const servicesBox = box.querySelector("[data-icon-services]");
+    if (detected) {
+      const service = (data.services || []).find((entry) => entry.id === current.detectedServiceId);
+      servicesBox.innerHTML = `<article class="sn-locked-service"><strong>${escapeHtml(serviceName(service || {}))}</strong><small>${service?.serviceType === "http" ? "HTTP 服务" : "端口服务"} · TCP/${service?.port || "—"}</small><small>${escapeHtml(service?.targetLabel || "未命名扫描目标")}${service?.targetAddress ? ` · ${escapeHtml(service.targetAddress)}` : ""}</small></article>`;
+      return;
+    }
     const targets = data.targetPages || [];
     const targetById = new Map(targets.map((target) => [target.targetId, target]));
     const grouped = new Map();
-    for (const service of services) {
-      const target = targetById.get(service.targetId);
+    for (const service of data.services || []) {
       const key = service.targetId || "unassigned";
-      if (!grouped.has(key)) grouped.set(key, { target, services: [] });
+      if (!grouped.has(key)) grouped.set(key, { target: targetById.get(key), services: [] });
       grouped.get(key).services.push(service);
     }
-    const orderedGroups = [
+    const groups = [
       ...targets.filter((target) => grouped.has(target.targetId)).map((target) => grouped.get(target.targetId)),
       ...[...grouped.entries()].filter(([id]) => !targetById.has(id)).map(([, group]) => group),
     ];
-    for (const group of orderedGroups) {
+    for (const group of groups) {
       const section = document.createElement("section");
       section.className = "sn-icon-service-target";
-      const heading = document.createElement("header");
-      const title = document.createElement("strong");
-      title.textContent = group.target?.name || group.services[0]?.targetLabel || "未命名扫描目标";
-      const address = document.createElement("small");
-      address.textContent = group.target?.address || group.services[0]?.targetAddress || "";
-      heading.append(title, address);
-      const list = document.createElement("div");
-      list.className = "sn-icon-service-list";
+      section.innerHTML = "<header><strong></strong><small></small></header><div class=\"sn-icon-service-list\"></div>";
+      section.querySelector("strong").textContent = group.target?.name || group.services[0]?.targetLabel || "未命名扫描目标";
+      section.querySelector("small").textContent = group.target?.address || group.services[0]?.targetAddress || "";
+      const list = section.querySelector(".sn-icon-service-list");
       for (const service of group.services) {
         const label = document.createElement("label");
         label.innerHTML = '<input type="checkbox"><span></span>';
         const input = label.querySelector("input");
         input.value = service.id;
         input.checked = current.serviceIds.includes(service.id);
-        label.querySelector("span").textContent =
-          `${service.serviceType === "http" ? "HTTP" : "端口"} · ${serviceName(service)} · ${service.port}`;
+        label.querySelector("span").textContent = `${service.serviceType === "http" ? "HTTP" : "端口"} · ${serviceName(service)} · ${service.port}`;
         list.append(label);
       }
-      section.append(heading, list);
       servicesBox.append(section);
     }
-  }
-  const linkedServices = (data.services || []).filter((entry) =>
-    detected
-      ? entry.id === current.detectedServiceId
-      : current.serviceIds.includes(entry.id),
-  );
+  };
+  destinationFields();
   const previewUrl = () => {
     if (form.source.value === "custom") {
       if (iconEdit.file) {
@@ -199,6 +206,7 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
       return icon?.iconUrl || "";
     }
     if (form.source.value === "favicon") {
+      if (form.destination.value === "external") return current.iconUrl || "";
       const select = form.querySelector('[name="favicon"]');
       return select
         ? (data.services || []).find((entry) => entry.id === select.value)
@@ -220,13 +228,13 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
       const fallback = document.createElement("span");
       fallback.className = "sn-nav-fallback";
       fallback.textContent =
-        form.source.value === "text"
+        form.source.value === "text" || form.destination.value === "external"
           ? form.querySelector('[name="text"]')?.value ||
             current.name.slice(0, 1) ||
             "A"
           : "◌";
       fallback.style.color =
-        form.source.value === "text"
+        form.source.value === "text" || form.destination.value === "external"
           ? form.querySelector('[name="color"]')?.value || ""
           : "";
       box.append(fallback);
@@ -240,10 +248,15 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
         "beforeend",
         '<label>图标文字<input name="text" maxlength="4" placeholder="A"></label><label>图标颜色<input name="color" type="color"></label>',
       );
-    if (form.source.value === "favicon")
+    if (form.source.value === "favicon" && form.destination.value === "service")
       box.insertAdjacentHTML(
         "beforeend",
         '<label>favicon 服务<select name="favicon"></select></label>',
+      );
+    if (form.source.value === "favicon" && form.destination.value === "external")
+      box.insertAdjacentHTML(
+        "beforeend",
+        '<p class="sn-modal-note">保存时会自动抓取网站 favicon；抓取失败时显示文字占位图标。</p>',
       );
     if (form.source.value === "custom")
       box.insertAdjacentHTML(
@@ -265,7 +278,7 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
       color.addEventListener("input", renderPreview);
     }
     if (favicon) {
-      for (const service of linkedServices) {
+      for (const service of linkedServices()) {
         const option = document.createElement("option");
         option.value = service.id;
         option.textContent = `${serviceName(service)} · ${service.targetAddress || service.targetLabel || service.port}`;
@@ -275,9 +288,9 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
         favicon.append(new Option("当前关联服务暂无 favicon", ""));
       favicon.value =
         current.faviconServiceId &&
-        linkedServices.some((entry) => entry.id === current.faviconServiceId)
+        linkedServices().some((entry) => entry.id === current.faviconServiceId)
           ? current.faviconServiceId
-          : linkedServices[0]?.id || "";
+          : linkedServices()[0]?.id || "";
       favicon.addEventListener("change", renderPreview);
     }
     if (file) {
@@ -295,6 +308,12 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
   };
   sourceFields();
   form.source.addEventListener("change", sourceFields);
+  form.destination.addEventListener("change", () => {
+    if (form.destination.value === "external" && form.source.value === "text")
+      form.source.value = "favicon";
+    destinationFields();
+    sourceFields();
+  });
   form
     .querySelector("[data-icon-preview]")
     .addEventListener("click", () =>
@@ -305,11 +324,13 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
           iconText: form.querySelector('[name="text"]')?.value || "",
           iconColor: form.querySelector('[name="color"]')?.value || "",
           faviconServiceId: form.querySelector('[name="favicon"]')?.value || "",
-          serviceIds: detected
+          destinationType: form.destination.value,
+          externalUrl: form.querySelector('[name="external-url"]')?.value || "",
+          serviceIds: form.destination.value === "service" && detected
             ? [current.detectedServiceId]
-            : [...form.querySelectorAll("[data-icon-services] input:checked")].map(
+            : form.destination.value === "service" ? [...form.querySelectorAll("[data-icon-services] input:checked")].map(
                 (input) => input.value,
-              ),
+              ) : [],
           iconUrl: previewUrl(),
         },
         icon,
@@ -319,22 +340,27 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     );
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const serviceIds = detected
+    const destinationType = form.destination.value;
+    const serviceIds = destinationType === "service" && detected
       ? [current.detectedServiceId]
-      : [...form.querySelectorAll("[data-icon-services] input:checked")].map(
+      : destinationType === "service" ? [...form.querySelectorAll("[data-icon-services] input:checked")].map(
           (input) => input.value,
-        );
+        ) : [];
     const body = {
       name: form.name.value,
       iconSource: form.source.value,
       iconText: form.querySelector('[name="text"]')?.value || "",
       iconColor: form.querySelector('[name="color"]')?.value || "",
       faviconServiceId:
-        form.source.value === "favicon"
+        destinationType === "service" && form.source.value === "favicon"
           ? form.querySelector('[name="favicon"]')?.value || ""
           : "",
       serviceIds,
       detectedServiceId: detected ? current.detectedServiceId : "",
+      destinationType,
+      externalUrl: destinationType === "external"
+        ? form.querySelector('[name="external-url"]')?.value || ""
+        : "",
     };
     try {
       const result = icon
@@ -381,9 +407,10 @@ function openGlobalIconSizePreview(draft, icon, restoreFile = false, onSaved = n
       body.className = "sn-nav-card-body";
       body.innerHTML = "<strong></strong><small></small>";
       body.querySelector("strong").textContent = draft.name || "服务图标";
-      body.querySelector("small").textContent = "tcp/4000 · 网页 服务";
+      body.querySelector("small").textContent =
+        draft.destinationType === "external" ? "外部链接" : "tcp/4000 · 网页 服务";
       const status = document.createElement("em");
-      status.textContent = "在线";
+      status.textContent = draft.destinationType === "external" ? "打开链接" : "在线";
       card.append(body, status);
     }
     box.append(card);

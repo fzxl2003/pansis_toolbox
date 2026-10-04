@@ -4,7 +4,7 @@ import pytest
 
 from backend.app.core.errors import ToolboxError
 from backend.app.services.auth_service import User
-from tools.service_navigator.backend import access, database, health, scanning, service
+from tools.service_navigator.backend import access, database, health, navigation, scanning, service
 
 
 @pytest.fixture
@@ -298,3 +298,51 @@ def test_navigation_uses_one_editable_layout_and_derives_narrow_grids(isolated_s
     owner_navigation = service.public_navigation(_site, include_icons=True)
     detected_icons = [entry for entry in owner_navigation["icons"] if entry["detectedServiceId"]]
     assert {entry["detectedServiceId"] for entry in detected_icons} == {http["id"], port["id"]}
+
+
+def test_external_navigation_icon_fetches_favicon_and_cleans_replaced_files(isolated_storage, owner: User, monkeypatch) -> None:
+    site, _target = _site_and_target(owner)
+    page = service.create_nav_page({"name": "常用"}, owner)
+    downloaded: list[str] = []
+
+    def fake_download(url: str) -> str:
+        filename = f"external-{len(downloaded)}.ico"
+        (database.navigation_icon_dir() / filename).write_bytes(url.encode())
+        downloaded.append(filename)
+        return filename
+
+    monkeypatch.setattr(navigation, "_download_external_favicon", fake_download)
+    icon = service.create_nav_icon({
+        "name": "文档", "destinationType": "external", "externalUrl": "https://docs.example",
+        "iconSource": "favicon", "iconText": "文",
+    }, owner)
+    assert icon["destinationType"] == "external"
+    assert icon["externalUrl"] == "https://docs.example"
+    assert icon["serviceIds"] == []
+    assert icon["iconUrl"].endswith(icon["id"])
+    first_file = downloaded[-1]
+    assert (database.navigation_icon_dir() / first_file).is_file()
+
+    item = service.create_nav_item({"pageId": page["id"], "iconId": icon["id"], "size": "medium"}, owner)
+    public_item = service.public_navigation(site)["pages"][0]["items"][0]
+    assert public_item["id"] == item["id"]
+    assert public_item["destinationType"] == "external"
+    assert public_item["externalUrl"] == "https://docs.example"
+    assert public_item["services"] == []
+
+    updated = service.update_nav_icon(icon["id"], {"externalUrl": "https://guide.example", "destinationType": "external", "iconSource": "favicon"}, owner)
+    second_file = downloaded[-1]
+    assert updated["externalUrl"] == "https://guide.example"
+    assert not (database.navigation_icon_dir() / first_file).exists()
+    assert (database.navigation_icon_dir() / second_file).is_file()
+
+    service.update_nav_icon(icon["id"], {"destinationType": "external", "iconSource": "text", "iconText": "链"}, owner)
+    assert not (database.navigation_icon_dir() / second_file).exists()
+    service.update_nav_icon(icon["id"], {"destinationType": "external", "iconSource": "favicon"}, owner)
+    third_file = downloaded[-1]
+    assert (database.navigation_icon_dir() / third_file).is_file()
+    service.delete_nav_icon(icon["id"], owner)
+    assert not (database.navigation_icon_dir() / third_file).exists()
+    with pytest.raises(ToolboxError) as error:
+        service.create_nav_icon({"name": "缺少链接", "destinationType": "external", "externalUrl": ""}, owner)
+    assert error.value.code == "INVALID_NAVIGATION_URL"

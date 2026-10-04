@@ -68,6 +68,22 @@ def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> d
         responsive_layouts = _responsive_layouts(page["items"])
         items: list[dict[str, Any]] = []
         for item in page["items"]:
+            destination_type = item.get("destinationType") or "service"
+            if destination_type == "external":
+                source = item["iconSource"]
+                icon_url = ""
+                if source == "custom" and item.get("iconFilename"):
+                    icon_url = f"/service-nav/navigation-icon/{item['iconId']}"
+                elif source == "favicon" and item.get("iconUrl"):
+                    icon_url = item["iconUrl"]
+                items.append({
+                    "id": item["id"], "iconId": item["iconId"], "name": item["name"], "size": item["size"],
+                    "iconUrl": icon_url, "iconSource": source, "iconText": item.get("iconText", ""),
+                    "iconColor": item.get("iconColor", "#4f7cff"), "destinationType": "external",
+                    "externalUrl": item.get("externalUrl", ""), "layouts": responsive_layouts.get(item["id"], {}),
+                    "services": [],
+                })
+                continue
             linked = [services[service_id] for service_id in item["serviceIds"] if service_id in services]
             if not linked:
                 continue
@@ -84,7 +100,7 @@ def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> d
             items.append({
                 "id": item["id"], "iconId": item["iconId"], "name": item["name"], "size": item["size"], "iconUrl": icon_url,
                 "iconSource": source, "iconText": item.get("iconText", ""), "iconColor": item.get("iconColor", "#4f7cff"),
-                "serviceType": next(iter(service_types)),
+                "destinationType": "service", "serviceType": next(iter(service_types)),
                 "layouts": responsive_layouts.get(item["id"], {}), "services": linked,
             })
         pages.append({"id": page["id"], "name": page["name"], "visible": page.get("visible", True), "items": items})
@@ -114,10 +130,16 @@ def public_site_for_navigation_icon(icon_id: str) -> dict[str, Any] | None:
 
 def public_navigation_icon(icon_id: str, site: dict[str, Any]) -> Path | None:
     with conn() as database:
-        row = database.execute("SELECT icon_filename FROM service_navigator_nav_icons WHERE id=? AND site_id=?", (icon_id, site["id"])).fetchone()
-    if not row or not row["icon_filename"]:
+        row = database.execute("""SELECT icon_source,icon_filename,destination_type,external_favicon_filename
+            FROM service_navigator_nav_icons WHERE id=? AND site_id=?""", (icon_id, site["id"])).fetchone()
+    if not row:
         return None
-    path = (navigation_icon_dir() / Path(row["icon_filename"]).name).resolve()
+    filename = row["icon_filename"] if row["icon_source"] == "custom" else (
+        row["external_favicon_filename"] if row["destination_type"] == "external" and row["icon_source"] == "favicon" else ""
+    )
+    if not filename:
+        return None
+    path = (navigation_icon_dir() / Path(filename).name).resolve()
     return path if path.is_file() and path.parent == navigation_icon_dir().resolve() else None
 
 def public_background(site: dict[str, Any]) -> Path | None:

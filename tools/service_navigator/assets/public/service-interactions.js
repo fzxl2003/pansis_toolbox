@@ -40,6 +40,10 @@ async function probe(candidate) {
   }
 }
 export async function openItem(item) {
+  if (item.destinationType === "external") {
+    if (item.externalUrl) window.open(item.externalUrl, "_blank", "noopener");
+    return;
+  }
   if (item.serviceType !== "http") {
     openPortModal(item);
     return;

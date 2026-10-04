@@ -13,7 +13,7 @@ from backend.app.core.security import get_optional_user
 from tools.service_navigator.backend import service
 
 VISITOR_COOKIE_NAME = "service_navigator_visitor"
-ASSET_VERSION = "31"
+ASSET_VERSION = "33"
 
 
 def _esc(value: object) -> str:
@@ -33,9 +33,11 @@ def _set_visitor(response: Response, token: str, created: bool, request: Request
     return response
 
 
-def _gate(request: Request, slug: str) -> HTMLResponse:
+def _gate(request: Request, slug: str, site: dict) -> HTMLResponse:
     target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
-    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>需要访问权限</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body class="sn-gate-page"><main class="sn-gate"><h1>此服务导航站为私密站点</h1><p>请使用受邀平台账号登录，或输入站点访问密码。</p><form data-access-password data-endpoint="/service-nav/{quote(slug)}/unlock"><label>访问密码<input required name="password" type="password" autocomplete="current-password"></label><button>使用密码进入</button></form><div class="sn-divider">或</div><form data-platform-login><label>用户名<input required name="username" autocomplete="username"></label><label>平台密码<input required name="password" type="password" autocomplete="current-password"></label><button>登录并继续</button></form><p class="sn-error" data-error></p></main><script>const error=document.querySelector('[data-error]');for(const form of document.querySelectorAll('form'))form.addEventListener('submit',async(e)=>{{e.preventDefault();error.textContent='';const endpoint=form.hasAttribute('data-platform-login')?'/api/auth/login':form.dataset.endpoint;const r=await fetch(endpoint,{{method:'POST',credentials:'include',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(Object.fromEntries(new FormData(form)))}});if(r.ok)location.href={json.dumps(target)};else{{const b=await r.json().catch(()=>({{}}));error.textContent=b.error?.message||'认证失败';}}}});</script></body></html>'''
+    theme = service._normalise_site_theme(site.get("theme", "auto"))
+    accent_color = service._normalise_accent_color(site.get("accent_color", "#4f7cff"))
+    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>需要访问权限</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body class="sn-gate-page sn-dashboard-body sn-theme-{_esc(theme)}" style="--sn-user-accent:{_esc(accent_color)}"><main class="sn-gate"><h1>此服务导航站为私密站点</h1><p>请使用受邀平台账号登录，或输入站点访问密码。</p><form data-access-password data-endpoint="/service-nav/{quote(slug)}/unlock"><label>访问密码<input required name="password" type="password" autocomplete="current-password"></label><button>使用密码进入</button></form><div class="sn-divider">或</div><form data-platform-login><label>用户名<input required name="username" autocomplete="username"></label><label>平台密码<input required name="password" type="password" autocomplete="current-password"></label><button>登录并继续</button></form><p class="sn-error" data-error></p></main><script>const error=document.querySelector('[data-error]');for(const form of document.querySelectorAll('form'))form.addEventListener('submit',async(e)=>{{e.preventDefault();error.textContent='';const endpoint=form.hasAttribute('data-platform-login')?'/api/auth/login':form.dataset.endpoint;const r=await fetch(endpoint,{{method:'POST',credentials:'include',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(Object.fromEntries(new FormData(form)))}});if(r.ok)location.href={json.dumps(target)};else{{const b=await r.json().catch(()=>({{}}));error.textContent=b.error?.message||'认证失败';}}}});</script></body></html>'''
     return HTMLResponse(page, status_code=401)
 
 
@@ -126,5 +128,5 @@ def mount_extra(app: FastAPI) -> None:
         if not site:
             return HTMLResponse("<!doctype html><title>404</title><h1>服务导航站不存在</h1>", status_code=404)
         if not principal["allowed"]:
-            return _set_visitor(_gate(request, slug), token, created, request)
+            return _set_visitor(_gate(request, slug, site), token, created, request)
         return _set_visitor(render_site(site, principal), token, created, request)

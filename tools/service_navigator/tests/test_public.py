@@ -30,6 +30,7 @@ def test_private_public_page_hides_fingerprint_and_exposes_all_services(monkeypa
     gate = client.get("/service-nav/lab-public")
     assert gate.status_code == 401
     assert "访问密码" in gate.text
+    assert 'sn-gate-page sn-dashboard-body sn-theme-auto' in gate.text
     assert client.post("/service-nav/lab-public/unlock", json={"password": "secret"}).status_code == 200
     page = client.get("/service-nav/lab-public")
     assert page.status_code == 200
@@ -44,3 +45,20 @@ def test_private_public_page_hides_fingerprint_and_exposes_all_services(monkeypa
     assert "data-toggle-sidebar" in page.text
     service.update_password(password["id"], {"label": "Guests", "password": "new-secret", "enabled": True}, owner)
     assert client.get("/service-nav/lab-public").status_code == 401
+
+
+def test_light_theme_is_applied_to_the_private_gate(monkeypatch, tmp_path) -> None:
+    owner = User(id="light-public-owner", username="light-owner", display_name="Light Owner")
+    monkeypatch.setattr(database, "root_dir", lambda: tmp_path)
+    database.RECOVERY_DONE = False
+    monkeypatch.setattr(access, "list_users", lambda: [owner])
+    monkeypatch.setattr(access, "can_access_tool", lambda _tool_id, _user: True)
+    monkeypatch.setattr(public, "get_optional_user", lambda _request: None)
+    service.create_site({"title": "Light Lab", "slug": "light-lab", "theme": "light"}, owner)
+    service.add_password("Guests", "secret", owner)
+
+    gate = TestClient(_app()).get("/service-nav/light-lab")
+
+    assert gate.status_code == 401
+    assert 'sn-gate-page sn-dashboard-body sn-theme-light' in gate.text
+    assert "--sn-user-accent:#4f7cff" in gate.text

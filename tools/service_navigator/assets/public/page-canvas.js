@@ -209,7 +209,7 @@ function resizeSizeFromPointer(grid, item, event) {
 }
 
 function iconUrl(icon) {
-  if (icon.iconSource === "custom") return icon.iconUrl || "";
+  if (icon.iconUrl) return icon.iconUrl;
   if (icon.iconSource === "favicon")
     return (data.services || []).find((service) => service.id === icon.faviconServiceId)
       ?.faviconUrl || "";
@@ -224,6 +224,8 @@ function hydrateItem(item, icon) {
     iconSource: icon.iconSource,
     iconText: icon.iconText,
     iconColor: icon.iconColor,
+    destinationType: icon.destinationType || "service",
+    externalUrl: icon.externalUrl || "",
     serviceType: icon.services?.[0]?.serviceType || "port",
     services: icon.services || [],
   };

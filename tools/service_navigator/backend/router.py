@@ -88,6 +88,8 @@ class NavigationIconPayload(BaseModel):
     iconColor: str = "#4f7cff"
     serviceIds: list[str] = []
     detectedServiceId: str = ""
+    destinationType: str = "service"
+    externalUrl: str = ""
 
 
 class NavigationLayoutPayload(BaseModel):

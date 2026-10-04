@@ -96,8 +96,12 @@ function navigationCard(item) {
     const fallback = document.createElement("span");
     fallback.className = "sn-nav-fallback";
     fallback.textContent =
-      item.iconSource === "text" ? item.iconText || item.name.slice(0, 1) : "◌";
-    fallback.style.color = item.iconSource === "text" ? item.iconColor || "" : "";
+      item.iconSource === "text" || item.destinationType === "external"
+        ? item.iconText || item.name.slice(0, 1)
+        : "◌";
+    fallback.style.color = item.iconSource === "text" || item.destinationType === "external"
+      ? item.iconColor || ""
+      : "";
     icon.append(fallback);
   }
   card.append(icon);
@@ -112,13 +116,15 @@ function navigationCard(item) {
     body.className = "sn-nav-card-body";
     body.innerHTML = "<strong></strong><small></small>";
     body.querySelector("strong").textContent = item.name;
-    body.querySelector("small").textContent =
-      item.services.length > 1
+    body.querySelector("small").textContent = item.destinationType === "external"
+      ? "外部链接"
+      : item.services.length > 1
         ? `${item.services.length} 个服务`
         : `${primary.protocol || "tcp"}/${primary.port || "—"} · ${item.serviceType === "http" ? "网页" : "端口"} 服务`;
     const status = document.createElement("em");
-    status.textContent =
-      primary.healthMonitored && primary.healthStatus === "healthy"
+    status.textContent = item.destinationType === "external"
+      ? "打开链接"
+      : primary.healthMonitored && primary.healthStatus === "healthy"
         ? "健康"
         : primary.healthMonitored && primary.healthStatus === "unhealthy"
           ? "异常"

@@ -297,9 +297,9 @@ function showInspector(card, page, item) {
 function renderAddPanel(page) {
   const panel = document.createElement("section");
   panel.className = "sn-canvas-add-panel";
-  panel.innerHTML = "<strong>添加图标</strong><small>从全局图标库选择一个图标加入当前页面；同一图标可重复添加。</small><div></div>";
+  panel.innerHTML = "<strong>添加图标</strong><div></div>";
   const list = panel.querySelector("div");
-  for (const icon of data.icons || []) {
+  const addIconButton = (icon, container) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "sn-canvas-add-icon";
@@ -320,7 +320,37 @@ function renderAddPanel(page) {
         alert(error.message || "添加图标失败");
       }
     });
-    list.append(button);
+    container.append(button);
+  };
+  const custom = (data.icons || []).filter((icon) => !icon.detectedServiceId);
+  if (custom.length) {
+    const group = document.createElement("section");
+    group.className = "sn-canvas-add-target";
+    group.innerHTML = "<strong>自定义图标</strong><div></div>";
+    custom.forEach((icon) => addIconButton(icon, group.querySelector("div")));
+    list.append(group);
+  }
+  const targetById = new Map((data.targetPages || []).map((target) => [target.targetId, target]));
+  const grouped = new Map();
+  for (const icon of (data.icons || []).filter((icon) => icon.detectedServiceId)) {
+    const targetId = icon.services?.[0]?.targetId || "unassigned";
+    if (!grouped.has(targetId)) grouped.set(targetId, []);
+    grouped.get(targetId).push(icon);
+  }
+  const orderedIds = [
+    ...(data.targetPages || []).map((target) => target.targetId).filter((id) => grouped.has(id)),
+    ...[...grouped.keys()].filter((id) => !targetById.has(id)),
+  ];
+  for (const targetId of orderedIds) {
+    const target = targetById.get(targetId);
+    const icons = grouped.get(targetId);
+    const group = document.createElement("section");
+    group.className = "sn-canvas-add-target";
+    group.innerHTML = "<strong></strong><small></small><div></div>";
+    group.querySelector("strong").textContent = target?.name || icons[0].services?.[0]?.targetLabel || "未命名扫描目标";
+    group.querySelector("small").textContent = target?.address || icons[0].services?.[0]?.targetAddress || "";
+    icons.forEach((icon) => addIconButton(icon, group.querySelector("div")));
+    list.append(group);
   }
   document.body.append(panel);
 }

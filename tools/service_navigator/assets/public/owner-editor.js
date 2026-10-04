@@ -8,6 +8,7 @@ export function openOwnerEditor() {
   const appearance = data.appearance || {
     theme: "auto",
     accentColor: "#4f7cff",
+    cardOpacity: 84,
   };
   const presets = [
     "#4f7cff",
@@ -20,12 +21,16 @@ export function openOwnerEditor() {
     "#ea580c",
   ];
   showModal(
-    `<h2>导航外观</h2><p class="sn-modal-note">页面和图标请在左侧栏的编辑模式中管理。</p><section class="sn-editor-section sn-appearance-section"><h3>外观</h3><label class="sn-editor-field">主题<select data-site-theme><option value="auto">跟随系统</option><option value="light">亮色</option><option value="dark">暗黑</option></select></label><div class="sn-editor-field"><span>主题色</span><div class="sn-accent-picker"><div data-accent-presets></div><label><input data-accent-color type="color" aria-label="自定义主题色"><input data-accent-hex maxlength="7" placeholder="#4f7cff" aria-label="主题色十六进制值"></label></div></div><button class="sn-editor-save" data-save-appearance>保存外观</button></section><section class="sn-editor-section"><h3>背景</h3><div class="sn-editor-actions"><button data-background="default">默认背景</button><button data-background="bing">每日 Bing 壁纸</button><label>上传背景<input data-background-upload type="file" accept=".png,.jpg,.jpeg,.webp"></label></div></section>`,
+    `<h2>导航外观</h2><p class="sn-modal-note">统一设置导航的色彩、背景与卡片质感。</p><section class="sn-editor-section sn-appearance-section"><h3>外观</h3><div class="sn-appearance-grid"><label class="sn-editor-field">主题<select data-site-theme><option value="auto">跟随系统</option><option value="light">亮色</option><option value="dark">暗黑</option></select></label><label class="sn-editor-field">卡片透明度<span class="sn-range-field"><input data-card-opacity type="range" min="20" max="100" step="1"><output data-card-opacity-value></output></span></label></div><div class="sn-editor-field"><span>主题色</span><div class="sn-accent-picker"><div data-accent-presets></div><label><input data-accent-color type="color" aria-label="自定义主题色"><input data-accent-hex maxlength="7" placeholder="#4f7cff" aria-label="主题色十六进制值"></label></div></div></section><section class="sn-editor-section sn-background-section"><h3>背景</h3><label class="sn-editor-field">背景来源<select data-background-source><option value="default">默认背景</option><option value="bing">每日 Bing 壁纸（每天自动更新）</option><option value="custom">上传图片</option></select></label><label class="sn-editor-field sn-background-upload" data-background-upload-row hidden>选择图片<input data-background-upload type="file" accept=".png,.jpg,.jpeg,.webp"></label></section><div class="sn-editor-footer"><button class="sn-editor-save" data-save-appearance>保存外观</button></div>`,
   );
   const themeInput = modalContent.querySelector("[data-site-theme]");
   const colorInput = modalContent.querySelector("[data-accent-color]");
   const hexInput = modalContent.querySelector("[data-accent-hex]");
   const presetBox = modalContent.querySelector("[data-accent-presets]");
+  const opacityInput = modalContent.querySelector("[data-card-opacity]");
+  const opacityValue = modalContent.querySelector("[data-card-opacity-value]");
+  const backgroundSource = modalContent.querySelector("[data-background-source]");
+  const uploadRow = modalContent.querySelector("[data-background-upload-row]");
   themeInput.value = ["auto", "light", "dark"].includes(appearance.theme)
     ? appearance.theme
     : "auto";
@@ -33,6 +38,14 @@ export function openOwnerEditor() {
     ? appearance.accentColor
     : "#4f7cff";
   hexInput.value = colorInput.value;
+  opacityInput.value = String(Math.min(100, Math.max(20, Number(appearance.cardOpacity) || 84)));
+  const showOpacity = () => { opacityValue.value = `${opacityInput.value}%`; opacityValue.textContent = `${opacityInput.value}%`; };
+  showOpacity();
+  opacityInput.addEventListener("input", showOpacity);
+  backgroundSource.value = ["default", "bing", "custom"].includes(appearance.backgroundSource) ? appearance.backgroundSource : "default";
+  const toggleUpload = () => { uploadRow.hidden = backgroundSource.value !== "custom"; };
+  toggleUpload();
+  backgroundSource.addEventListener("change", toggleUpload);
   function selectAccent(value) {
     if (!/^#[0-9a-f]{6}$/i.test(value)) return;
     colorInput.value = value;
@@ -69,32 +82,23 @@ export function openOwnerEditor() {
         await ownerApi("/site", "PUT", {
           theme: themeInput.value,
           accentColor: colorInput.value,
+          cardOpacity: Number(opacityInput.value),
         });
+        const file = modalContent.querySelector("[data-background-upload]").files?.[0];
+        if (backgroundSource.value === "custom" && file) {
+          const form = new FormData();
+          form.append("file", file);
+          const response = await fetch(
+            "/api/tools/service-navigator/background/upload",
+            { method: "POST", credentials: "include", body: form },
+          );
+          if (!response.ok) throw new Error("背景上传失败");
+        } else {
+          await ownerApi("/background", "PUT", { source: backgroundSource.value });
+        }
         location.reload();
       } catch (error) {
         alert(error.message || "外观保存失败");
       }
-    });
-  modalContent.querySelectorAll("[data-background]").forEach((button) =>
-    button.addEventListener("click", async () => {
-      await ownerApi("/background", "PUT", {
-        source: button.dataset.background,
-      });
-      location.reload();
-    }),
-  );
-  modalContent
-    .querySelector("[data-background-upload]")
-    .addEventListener("change", async (event) => {
-      const file = event.target.files?.[0];
-      if (!file) return;
-      const form = new FormData();
-      form.append("file", file);
-      const response = await fetch(
-        "/api/tools/service-navigator/background/upload",
-        { method: "POST", credentials: "include", body: form },
-      );
-      if (!response.ok) alert("背景上传失败");
-      else location.reload();
     });
 }

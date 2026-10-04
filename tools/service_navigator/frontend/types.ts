@@ -1,6 +1,6 @@
 export const API = "/api/tools/service-navigator";
 
-export type View = "overview" | "targets" | "services" | "health" | "scans";
+export type View = "overview" | "targets" | "settings" | "access" | "scans";
 
 export type Target = {
   id: string;
@@ -16,6 +16,7 @@ export type Service = {
   protocol: string;
   state: string;
   serviceType: "http" | "port";
+  serviceTemplate: "generic" | "ssh" | "sftp" | "rdp" | "vnc" | "ftp" | "smb";
   serviceName: string;
   product: string;
   version: string;
@@ -26,7 +27,7 @@ export type Service = {
   displayName: string;
   description: string;
   navigationUrl: string;
-  connectionCommand: string;
+  commandDescription: string;
   faviconUrl: string;
   healthEnabled: boolean;
   healthUrl: string;
@@ -49,10 +50,23 @@ export type Run = {
 };
 
 export type Site = {
+  id: string;
   title: string;
   slug: string;
   description: string;
   visibility: "public" | "private";
+};
+
+export type AccessSettings = {
+  visibility: "public" | "private";
+  users: { userId: string; username: string; displayName: string }[];
+  passwords: {
+    id: string;
+    label: string;
+    enabled: boolean;
+    createdAt: string;
+    updatedAt: string;
+  }[];
 };
 
 export type Detail = {

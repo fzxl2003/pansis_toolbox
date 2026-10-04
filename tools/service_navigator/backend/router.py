@@ -16,6 +16,7 @@ class SitePayload(BaseModel):
     description: str = ""
     theme: str = "auto"
     accentColor: str = "#4f7cff"
+    cardOpacity: int = 84
 
 
 class TargetPayload(BaseModel):
@@ -30,7 +31,9 @@ class ServicePayload(BaseModel):
     displayName: str = ""
     description: str = ""
     navigationUrl: str = ""
-    connectionCommand: str = ""
+    commandDescription: str = ""
+    connectionCommand: str = ""  # Backward-compatible input alias.
+    serviceTemplate: str = "generic"
     healthEnabled: bool = True
     healthUrl: str = ""
 
@@ -215,11 +218,6 @@ async def upload_navigation_icon(request: Request, icon_id: str, file: UploadFil
 @router.delete("/navigation/icons/{icon_id}/icon")
 def delete_navigation_icon_file(request: Request, icon_id: str) -> dict:
     return {"icon": service.clear_nav_custom_icon(icon_id, require_user(request))}
-
-
-@router.post("/navigation/icons/{icon_id}/revoke-default")
-def revoke_navigation_default(request: Request, icon_id: str) -> dict:
-    return {"icon": service.revoke_nav_default(icon_id, require_user(request))}
 
 
 @router.post("/navigation/pages", status_code=201)

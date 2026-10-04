@@ -6,17 +6,19 @@ export function Modal({
   title,
   onClose,
   children,
+  className = "",
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  className?: string;
 }) {
   return (
     <div
       className="sn-modal-backdrop"
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
-      <section className="sn-modal">
+      <section className={`sn-modal ${className}`}>
         <header>
           <h2>{title}</h2>
           <button className="sn-icon-button" onClick={onClose}>

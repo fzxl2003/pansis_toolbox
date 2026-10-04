@@ -101,7 +101,12 @@ function navigationCard(item) {
     icon.append(fallback);
   }
   card.append(icon);
-  if (item.size !== "small") {
+  if (item.size === "small") {
+    const label = document.createElement("span");
+    label.className = "sn-nav-small-label";
+    label.textContent = item.name;
+    card.append(label);
+  } else {
     const primary = item.services[0] || {};
     const body = document.createElement("span");
     body.className = "sn-nav-card-body";
@@ -149,7 +154,6 @@ function serviceCard(item) {
       id: `service-${item.id}`,
       name: serviceName(item),
       serviceType: item.serviceType,
-      preferenceRevision: 1,
       services: [item],
     }),
   );

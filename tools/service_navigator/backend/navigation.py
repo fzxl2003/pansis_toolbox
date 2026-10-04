@@ -143,6 +143,8 @@ def delete_nav_icon(icon_id: str, user: User) -> None:
     site = _owner_site(user)
     with conn() as database:
         old = _owned_icon(database, site["id"], icon_id)
+        if old["detected_service_id"]:
+            raise ToolboxError("DETECTED_NAV_ICON_LOCKED", "已探测服务图标不能删除", status_code=400, tool_id=TOOL_ID)
         database.execute("DELETE FROM service_navigator_nav_icons WHERE id=?", (icon_id,))
         database.commit()
     _remove_navigation_icon(old["icon_filename"])
@@ -184,14 +186,6 @@ def delete_nav_item(item_id: str, user: User) -> None:
         _owned_item(database, site["id"], item_id)
         database.execute("DELETE FROM service_navigator_nav_items WHERE id=?", (item_id,))
         database.commit()
-
-def revoke_nav_default(icon_id: str, user: User) -> dict[str, Any]:
-    site = _owner_site(user)
-    with conn() as database:
-        _owned_icon(database, site["id"], icon_id)
-        database.execute("UPDATE service_navigator_nav_icons SET preference_revision=preference_revision+1,updated_at=? WHERE id=?", (now_iso(), icon_id))
-        database.commit()
-    return _navigation_icon_for_user(icon_id, user)
 
 def update_nav_custom_icon(icon_id: str, filename: str, content: bytes, user: User) -> dict[str, Any]:
     suffix = Path(filename).suffix.lower()
@@ -450,4 +444,4 @@ def _cleanup_empty_navigation_items(database: sqlite3.Connection, site_id: str) 
     """Placement and icon cleanup is explicit; deleting services keeps library icons."""
     return []
 
-__all__ = ['_clean_nav_name', '_cleanup_empty_navigation_items', '_first_available_layout', '_library_source', '_nav_size', '_navigation_detail', '_navigation_icon_for_user', '_navigation_item_for_user', '_owned_icon', '_owned_item', '_owned_page', '_remove_background', '_remove_navigation_icon', '_validate_item_services', 'clear_nav_custom_icon', 'create_nav_icon', 'create_nav_item', 'create_nav_page', 'delete_nav_icon', 'delete_nav_item', 'delete_nav_page', 'get_navigation', 'list_nav_icons', 'reorder_nav_pages', 'revoke_nav_default', 'save_nav_canvas', 'save_nav_layout', 'set_all_services_visible', 'update_background_source', 'update_custom_background', 'update_nav_custom_icon', 'update_nav_icon', 'update_nav_item', 'update_nav_page']
+__all__ = ['_clean_nav_name', '_cleanup_empty_navigation_items', '_first_available_layout', '_library_source', '_nav_size', '_navigation_detail', '_navigation_icon_for_user', '_navigation_item_for_user', '_owned_icon', '_owned_item', '_owned_page', '_remove_background', '_remove_navigation_icon', '_validate_item_services', 'clear_nav_custom_icon', 'create_nav_icon', 'create_nav_item', 'create_nav_page', 'delete_nav_icon', 'delete_nav_item', 'delete_nav_page', 'get_navigation', 'list_nav_icons', 'reorder_nav_pages', 'save_nav_canvas', 'save_nav_layout', 'set_all_services_visible', 'update_background_source', 'update_custom_background', 'update_nav_custom_icon', 'update_nav_icon', 'update_nav_item', 'update_nav_page']

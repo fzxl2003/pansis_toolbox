@@ -74,6 +74,8 @@ HEALTH_ACTIVE_SITES: set[str] = set()
 HEALTH_ACTIVE_LOCK = threading.Lock()
 HEALTH_COMPAT_DATABASES: set[str] = set()
 HEALTH_COMPAT_LOCK = threading.Lock()
+SERVICE_TEMPLATE_COMPAT_DATABASES: set[str] = set()
+SERVICE_TEMPLATE_COMPAT_LOCK = threading.Lock()
 PORT_SERVICE_HINTS = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "domain", 110: "pop3",
     111: "rpcbind", 119: "nntp", 135: "msrpc", 139: "netbios-ssn", 143: "imap",
@@ -94,6 +96,43 @@ COMMAND_TEMPLATES = {
     "redis": "redis-cli -h {host} -p {port}",
     "mongodb": "mongosh mongodb://{host}:{port}",
     "ftp": "ftp {host} {port}",
+}
+PORT_SERVICE_TEMPLATES = {
+    "generic": {
+        "label": "通用端口服务",
+        "description": "通过指定地址和端口访问该服务。",
+        "command": "{host}:{port}",
+    },
+    "ssh": {
+        "label": "SSH",
+        "description": "通过 SSH 安全远程登录服务器。",
+        "command": "ssh -p {port} <user>@{host}",
+    },
+    "sftp": {
+        "label": "SFTP",
+        "description": "通过 SFTP 安全传输文件。",
+        "command": "sftp -P {port} <user>@{host}",
+    },
+    "rdp": {
+        "label": "远程桌面（RDP）",
+        "description": "通过远程桌面客户端连接此主机。",
+        "command": "xfreerdp /v:{host}:{port} /u:<user>",
+    },
+    "vnc": {
+        "label": "VNC",
+        "description": "通过 VNC 客户端查看和控制远程桌面。",
+        "command": "vncviewer {host}:{port}",
+    },
+    "ftp": {
+        "label": "FTP",
+        "description": "通过 FTP 客户端传输文件。",
+        "command": "ftp {host} {port}",
+    },
+    "smb": {
+        "label": "SMB 文件共享",
+        "description": "通过 SMB 客户端访问共享文件。",
+        "command": "smbclient //{host}/<share> -p {port} -U <user>",
+    },
 }
 NAV_BREAKPOINTS = (16, 12, 8, 4)
 NAV_SIZES: dict[str, tuple[int, int]] = {
@@ -156,6 +195,7 @@ def init_database(database: sqlite3.Connection) -> None:
           slug TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
           visibility TEXT NOT NULL DEFAULT 'private', background_source TEXT NOT NULL DEFAULT 'default',
           theme TEXT NOT NULL DEFAULT 'auto', accent_color TEXT NOT NULL DEFAULT '#4f7cff',
+          card_opacity INTEGER NOT NULL DEFAULT 84,
           background_filename TEXT NOT NULL DEFAULT '', show_all_services INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
@@ -173,6 +213,7 @@ def init_database(database: sqlite3.Connection) -> None:
           favicon_filename TEXT NOT NULL DEFAULT '', detected_url TEXT NOT NULL DEFAULT '',
           display_name TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
           navigation_url TEXT NOT NULL DEFAULT '', connection_command TEXT NOT NULL DEFAULT '',
+          command_description TEXT NOT NULL DEFAULT '', service_template TEXT NOT NULL DEFAULT 'generic',
           service_type TEXT NOT NULL DEFAULT 'port',
           visible INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0,
           health_enabled INTEGER NOT NULL DEFAULT 1, health_url TEXT NOT NULL DEFAULT '',
@@ -281,6 +322,8 @@ def init_database(database: sqlite3.Connection) -> None:
     )
     _ensure_column(database, "service_navigator_services", "health_enabled", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(database, "service_navigator_services", "service_type", "TEXT NOT NULL DEFAULT 'port'")
+    _ensure_column(database, "service_navigator_services", "command_description", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(database, "service_navigator_services", "service_template", "TEXT NOT NULL DEFAULT 'generic'")
     _ensure_column(database, "service_navigator_services", "health_url", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(database, "service_navigator_services", "health_status", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(database, "service_navigator_services", "last_health_checked_at", "TEXT")
@@ -292,6 +335,7 @@ def init_database(database: sqlite3.Connection) -> None:
     _ensure_column(database, "service_navigator_sites", "show_all_services", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(database, "service_navigator_sites", "theme", "TEXT NOT NULL DEFAULT 'auto'")
     _ensure_column(database, "service_navigator_sites", "accent_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
+    _ensure_column(database, "service_navigator_sites", "card_opacity", "INTEGER NOT NULL DEFAULT 84")
     _ensure_column(database, "service_navigator_nav_items", "icon_text", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(database, "service_navigator_nav_items", "icon_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
     _ensure_column(database, "service_navigator_nav_items", "icon_id", "TEXT")
@@ -318,6 +362,15 @@ def init_database(database: sqlite3.Connection) -> None:
         database.execute("""UPDATE service_navigator_services SET service_type='http'
             WHERE service_type='port' AND (lower(service_name) LIKE '%http%' OR port IN
             (80,81,443,444,591,593,8000,8008,8080,8081,8088,8443,8888,9000,9090))""")
+    with SERVICE_TEMPLATE_COMPAT_LOCK:
+        needs_template_compat = database_key not in SERVICE_TEMPLATE_COMPAT_DATABASES
+        if needs_template_compat:
+            SERVICE_TEMPLATE_COMPAT_DATABASES.add(database_key)
+    if needs_template_compat:
+        database.execute("""UPDATE service_navigator_services SET command_description=connection_command
+            WHERE command_description='' AND connection_command<>''""")
+        database.execute("""UPDATE service_navigator_services SET service_template='generic'
+            WHERE service_template NOT IN ('generic','ssh','sftp','rdp','vnc','ftp','smb')""")
     _migrate_navigation_icons(database)
     with RECOVERY_LOCK:
         if not RECOVERY_DONE:
@@ -372,6 +425,7 @@ def _site_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "visibility": item["visibility"], "backgroundSource": item.get("background_source", "default"),
         "backgroundFilename": item.get("background_filename", ""), "showAllServices": bool(item.get("show_all_services", 1)),
         "theme": _normalise_site_theme(item.get("theme", "auto")), "accentColor": _normalise_accent_color(item.get("accent_color", "#4f7cff")),
+        "cardOpacity": _normalise_card_opacity(item.get("card_opacity", 84)),
         "createdAt": item["created_at"], "updatedAt": item["updated_at"],
     }
 
@@ -387,8 +441,9 @@ def _service_public(row: sqlite3.Row | dict[str, Any], *, include_fingerprint: b
         "id": item["id"], "targetId": item["target_id"], "protocol": item["protocol"], "port": int(item["port"]),
         "state": item["state"], "serviceName": item["service_name"], "httpTitle": item["http_title"],
         "detectedUrl": item["detected_url"], "displayName": item["display_name"],
-        "description": item["description"], "navigationUrl": item["navigation_url"], "connectionCommand": item["connection_command"],
-        "serviceType": item["service_type"],
+        "description": item["description"], "navigationUrl": item["navigation_url"],
+        "commandDescription": item.get("command_description") or item["connection_command"],
+        "serviceTemplate": item.get("service_template") or "generic", "serviceType": item["service_type"],
         "faviconUrl": "",
         "healthEnabled": bool(item["health_enabled"]), "healthUrl": item["health_url"],
         "healthStatus": item["health_status"], "lastHealthCheckedAt": item["last_health_checked_at"],
@@ -462,6 +517,14 @@ def _normalise_accent_color(value: Any) -> str:
     return color if re.fullmatch(r"#[0-9a-f]{6}", color) else "#4f7cff"
 
 
+def _normalise_card_opacity(value: Any) -> int:
+    try:
+        opacity = int(value)
+    except (TypeError, ValueError):
+        return 84
+    return min(100, max(20, opacity))
+
+
 def _compact_port_ranges(ports: set[int]) -> str:
     """Persist consecutive custom ports as ranges instead of a huge CSV."""
     ordered = sorted(ports)
@@ -484,6 +547,7 @@ __all__ = [
     "BACKGROUND_LIMIT",
     "BACKGROUND_SUFFIXES",
     "COMMAND_TEMPLATES",
+    "PORT_SERVICE_TEMPLATES",
     "COMMON_TCP_PORTS",
     "FAVICON_LIMIT",
     "HEALTH_ACTIVE_LOCK",
@@ -531,6 +595,7 @@ __all__ = [
     "_ensure_column",
     "_migrate_navigation_icons",
     "_normalise_accent_color",
+    "_normalise_card_opacity",
     "_normalise_site_theme",
     "_row",
     "_run_public",

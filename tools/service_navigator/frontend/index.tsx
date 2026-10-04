@@ -4,12 +4,10 @@ import {
   Activity,
   Globe2,
   HeartPulse,
-  ListFilter,
   Plus,
   Radar,
   RefreshCw,
   Server,
-  Settings2,
 } from "lucide-react";
 import {
   ApiError,
@@ -28,9 +26,9 @@ import {
 } from "./types";
 import { Alert, Metric, Panel, RunRow } from "./components/shared";
 import { HealthSettings } from "./components/Health";
-import { ServicesByTarget, ServiceModal } from "./components/Services";
-import { TargetModal, TargetTable } from "./components/Targets";
-import { SiteModal } from "./components/Site";
+import { TargetPool, ServiceModal } from "./components/Services";
+import { TargetModal } from "./components/Targets";
+import { AccessManager, SiteModal, SiteSettingsPanel } from "./components/Site";
 
 export default function ServiceNavigatorTool() {
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -123,7 +121,6 @@ export default function ServiceNavigatorTool() {
     try {
       if (detail) await apiPut(`${API}/site`, siteForm);
       else await apiPost(`${API}/site`, siteForm);
-      setSiteOpen(false);
       await load(true);
     } catch (reason) {
       showError(reason);
@@ -169,9 +166,9 @@ export default function ServiceNavigatorTool() {
     );
   const tabs: { id: View; label: string; icon: ReactNode }[] = [
     { id: "overview", label: "概览", icon: <Radar size={16} /> },
-    { id: "targets", label: "扫描目标", icon: <Server size={16} /> },
-    { id: "services", label: "全部服务", icon: <ListFilter size={16} /> },
-    { id: "health", label: "健康设置", icon: <HeartPulse size={16} /> },
+    { id: "targets", label: "目标与服务", icon: <Server size={16} /> },
+    { id: "settings", label: "站点与健康设置", icon: <HeartPulse size={16} /> },
+    { id: "access", label: "访问控制", icon: <Globe2 size={16} /> },
     { id: "scans", label: "扫描记录", icon: <RefreshCw size={16} /> },
   ];
   return (
@@ -194,21 +191,6 @@ export default function ServiceNavigatorTool() {
             <Globe2 size={16} />
             查看访客页
           </a>
-          <button
-            className="secondary-button"
-            onClick={() => setSiteOpen(true)}
-          >
-            <Settings2 size={16} />
-            站点设置
-          </button>
-          <button
-            className="primary-button"
-            disabled={!detail.targets.length || !!activeRun}
-            onClick={() => void scan()}
-          >
-            <Activity size={16} />
-            {activeRun ? "扫描中" : "扫描全部"}
-          </button>
         </div>
       </header>
       {error && <Alert text={error} error />}
@@ -236,12 +218,12 @@ export default function ServiceNavigatorTool() {
             <Metric
               label="在线服务"
               value={stats.online}
-              onClick={() => setView("services")}
+              onClick={() => setView("targets")}
             />
             <Metric
               label="全部服务"
               value={stats.count}
-              onClick={() => setView("services")}
+              onClick={() => setView("targets")}
             />
           </div>
           <section className="sn-panel">
@@ -262,53 +244,43 @@ export default function ServiceNavigatorTool() {
       {view === "targets" && (
         <section className="sn-panel">
           <Panel
-            title="扫描目标"
-            action={
-              <button
-                className="primary-button"
-                onClick={() => {
-                  setTargetForm(blankTarget);
-                  setTarget(null);
-                }}
-              >
-                <Plus size={15} />
-                添加目标
-              </button>
-            }
+            title="目标与服务"
+            subtitle="每个扫描目标下集中管理其发现的服务。"
+            action={<div className="sn-actions">
+              <button className="secondary-button" disabled={!detail.targets.length || !!activeRun} onClick={() => void scan()}><Activity size={16} />{activeRun ? "扫描中" : "扫描全部"}</button>
+              <button className="primary-button" onClick={() => { setTargetForm(blankTarget); setTarget(null); }}><Plus size={15} />添加目标</button>
+            </div>}
           />
-          <TargetTable
+          <TargetPool
             targets={detail.targets}
+            services={detail.services}
             active={activeRun}
             onScan={scan}
-            onEdit={(item) => {
+            onEditTarget={(item) => {
               setTargetForm(item);
               setTarget(item);
             }}
-            onDelete={(item) => {
+            onDeleteTarget={(item) => {
               if (confirm(`删除目标「${item.label}」？`))
                 void apiDelete(`${API}/targets/${item.id}`)
                   .then(() => load(true))
                   .catch(showError);
             }}
+            onEditService={setService}
           />
         </section>
       )}
-      {view === "services" && (
+      {view === "settings" && (
+        <section className="sn-stack">
+          <SiteSettingsPanel form={siteForm} setForm={setSiteForm} onSubmit={saveSite} />
+          <HealthSettings services={detail.services} onChanged={() => void load(true)} onError={showError} />
+        </section>
+      )}
+      {view === "access" && (
         <section className="sn-panel">
-          <Panel title="全部服务" />
-          <ServicesByTarget
-            targets={detail.targets}
-            services={detail.services}
-            onEdit={setService}
-          />
+          <Panel title="访问控制" subtitle="管理访客访问范围、受邀用户和访问密码。" />
+          <AccessManager onChanged={() => void load(true)} />
         </section>
-      )}
-      {view === "health" && (
-        <HealthSettings
-          services={detail.services}
-          onChanged={() => void load(true)}
-          onError={showError}
-        />
       )}
       {view === "scans" && (
         <section className="sn-panel">
@@ -330,17 +302,10 @@ export default function ServiceNavigatorTool() {
       {service && (
         <ServiceModal
           service={service}
+          targets={detail.targets}
           setService={setService}
           onClose={() => setService(null)}
           onSubmit={saveService}
-        />
-      )}
-      {siteOpen && (
-        <SiteModal
-          form={siteForm}
-          setForm={setSiteForm}
-          onClose={() => setSiteOpen(false)}
-          onSubmit={saveSite}
         />
       )}
     </div>

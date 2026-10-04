@@ -35,6 +35,7 @@ def test_private_public_page_hides_fingerprint_and_exposes_all_services(monkeypa
     assert page.status_code == 200
     assert "OpenSSH" not in page.text
     assert '"serviceType": "port"' in page.text
+    assert '"commandDescription": "ssh -p 22 <user>@10.0.0.8"' in page.text
     assert "全部服务" not in page.text
     assert 'data-page="target:' in page.text
     assert "SERVICE NAVIGATOR" not in page.text

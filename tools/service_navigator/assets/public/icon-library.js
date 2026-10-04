@@ -39,33 +39,32 @@ export function openGlobalIconLibrary() {
   const custom = (data.icons || []).filter((icon) => !icon.detectedServiceId);
   const detected = (data.icons || []).filter((icon) => icon.detectedServiceId);
   showModal(
-    `<h2>管理图标</h2><p class="sn-modal-note">这里维护全局图标库。各页面只添加、摆放和移除图标；编辑一次图标，所有引用位置同步更新。</p><div class="sn-library-actions"><button class="sn-editor-save" data-add-icon>添加自定义图标</button></div><section class="sn-editor-section"><h3>自定义图标</h3><div class="sn-icon-library" data-custom-icons></div></section><section class="sn-editor-section"><h3>已探测服务图标</h3><div class="sn-icon-library" data-detected-icons></div></section>`,
+    `<h2>管理图标</h2><div class="sn-library-actions"><button class="sn-editor-save" data-add-icon>添加自定义图标</button></div><section class="sn-editor-section"><h3>自定义图标</h3><div class="sn-icon-library" data-custom-icons></div></section><section class="sn-editor-section"><h3>已探测服务图标</h3><div class="sn-icon-library" data-detected-icons></div></section>`,
   );
-  const renderGroup = (box, icons) => {
+  const renderGroup = (box, icons, groupByTarget = false) => {
     box.replaceChildren();
     if (!icons.length) {
       box.innerHTML = '<p class="sn-empty">暂无图标</p>';
       return;
     }
-    for (const icon of icons) {
+    const renderIcon = (icon, container) => {
       const row = document.createElement("article");
       row.className = "sn-library-icon";
       row.append(iconPreviewNode(icon));
       const body = document.createElement("div");
-      body.innerHTML = "<strong></strong><small></small>";
+      body.innerHTML = "<strong></strong>";
       body.querySelector("strong").textContent = icon.name;
-      body.querySelector("small").textContent =
-        `${icon.services.length} 个服务 · ${icon.iconSource === "custom" ? "上传图片" : icon.iconSource === "favicon" ? "favicon" : "文字"}`;
       row.append(body);
       const actions = document.createElement("div");
-      actions.innerHTML =
-        '<button>编辑</button><button class="danger">删除</button>';
-      actions
-        .querySelectorAll("button")[0]
-        .addEventListener("click", () => openGlobalIconForm(icon));
-      actions
-        .querySelectorAll("button")[1]
-        .addEventListener("click", async () => {
+      const edit = document.createElement("button");
+      edit.textContent = "编辑";
+      edit.addEventListener("click", () => openGlobalIconForm(icon));
+      actions.append(edit);
+      if (!icon.detectedServiceId) {
+        const remove = document.createElement("button");
+        remove.className = "danger";
+        remove.textContent = "删除";
+        remove.addEventListener("click", async () => {
           if (
             !confirm(
               `删除全局图标「${icon.name}」？所有页面上的对应摆放也会一起删除。`,
@@ -75,32 +74,64 @@ export function openGlobalIconLibrary() {
           await ownerApi(`/navigation/icons/${icon.id}`, "DELETE");
           location.reload();
         });
+        actions.append(remove);
+      }
       row.append(actions);
-      box.append(row);
+      container.append(row);
+    };
+    if (!groupByTarget) {
+      icons.forEach((icon) => renderIcon(icon, box));
+      return;
+    }
+    const targetById = new Map((data.targetPages || []).map((target) => [target.targetId, target]));
+    const groups = new Map();
+    for (const icon of icons) {
+      const targetId = icon.services?.[0]?.targetId || "unassigned";
+      if (!groups.has(targetId)) groups.set(targetId, []);
+      groups.get(targetId).push(icon);
+    }
+    const orderedIds = [
+      ...(data.targetPages || []).map((target) => target.targetId).filter((id) => groups.has(id)),
+      ...[...groups.keys()].filter((id) => !targetById.has(id)),
+    ];
+    for (const targetId of orderedIds) {
+      const target = targetById.get(targetId);
+      const group = document.createElement("section");
+      group.className = "sn-icon-library-target";
+      const heading = document.createElement("header");
+      heading.innerHTML = "<strong></strong><small></small>";
+      heading.querySelector("strong").textContent = target?.name || groups.get(targetId)[0].services?.[0]?.targetLabel || "未命名扫描目标";
+      heading.querySelector("small").textContent = target?.address || groups.get(targetId)[0].services?.[0]?.targetAddress || "";
+      const entries = document.createElement("div");
+      entries.className = "sn-icon-library-target-entries";
+      groups.get(targetId).forEach((icon) => renderIcon(icon, entries));
+      group.append(heading, entries);
+      box.append(group);
     }
   };
   renderGroup(modalContent.querySelector("[data-custom-icons]"), custom);
-  renderGroup(modalContent.querySelector("[data-detected-icons]"), detected);
+  renderGroup(modalContent.querySelector("[data-detected-icons]"), detected, true);
   modalContent
     .querySelector("[data-add-icon]")
     .addEventListener("click", () => openGlobalIconForm(null));
 }
 
-export function openGlobalIconForm(icon, restoreFile = false, onSaved = null) {
+export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, draft = null) {
   if (!restoreFile) iconEdit.file = null;
   const detected = Boolean(icon?.detectedServiceId);
-  const current = icon || {
+  const current = { ...(icon || {
     name: "",
     iconSource: "text",
     iconText: "A",
     iconColor: "#4f7cff",
     serviceIds: [],
-  };
+  }), ...(draft || {}) };
   const association = detected
     ? '<section class="sn-icon-services sn-locked-service-field"><span>关联服务</span><div data-icon-services></div></section>'
     : '<label class="sn-icon-services">关联服务<div data-icon-services></div></label>';
   showModal(
     `<h2>${detected ? "编辑已探测服务图标" : icon ? "编辑自定义图标" : "添加自定义图标"}</h2><form class="sn-icon-form" data-icon-form><label>名称<input name="name" required></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option></select></label>${association}<div data-source-fields></div><button class="sn-icon-preview" type="button" data-icon-preview><span data-icon-preview-image></span><span>图标预览</span><small>点击查看各尺寸效果</small></button><div><button class="sn-editor-save" type="submit">保存</button></div></form>`,
+    "icon-form",
   );
   const form = modalContent.querySelector("[data-icon-form]");
   form.name.value = current.name;
@@ -113,17 +144,46 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null) {
       (entry) => entry.id === current.detectedServiceId,
     );
     servicesBox.innerHTML = `<article class="sn-locked-service"><strong>${escapeHtml(serviceName(service || {}))}</strong><small>${service?.serviceType === "http" ? "HTTP 服务" : "端口服务"} · TCP/${service?.port || "—"}</small><small>${escapeHtml(service?.targetLabel || "未命名扫描目标")}${service?.targetAddress ? ` · ${escapeHtml(service.targetAddress)}` : ""}</small></article>`;
-  } else
-    for (const service of data.services || []) {
-      const label = document.createElement("label");
-      label.innerHTML = '<input type="checkbox"><span></span>';
-      const input = label.querySelector("input");
-      input.value = service.id;
-      input.checked = current.serviceIds.includes(service.id);
-      label.querySelector("span").textContent =
-        `${service.serviceType === "http" ? "HTTP" : "端口"} · ${serviceName(service)} · ${service.port}`;
-      servicesBox.append(label);
+  } else {
+    const services = data.services || [];
+    const targets = data.targetPages || [];
+    const targetById = new Map(targets.map((target) => [target.targetId, target]));
+    const grouped = new Map();
+    for (const service of services) {
+      const target = targetById.get(service.targetId);
+      const key = service.targetId || "unassigned";
+      if (!grouped.has(key)) grouped.set(key, { target, services: [] });
+      grouped.get(key).services.push(service);
     }
+    const orderedGroups = [
+      ...targets.filter((target) => grouped.has(target.targetId)).map((target) => grouped.get(target.targetId)),
+      ...[...grouped.entries()].filter(([id]) => !targetById.has(id)).map(([, group]) => group),
+    ];
+    for (const group of orderedGroups) {
+      const section = document.createElement("section");
+      section.className = "sn-icon-service-target";
+      const heading = document.createElement("header");
+      const title = document.createElement("strong");
+      title.textContent = group.target?.name || group.services[0]?.targetLabel || "未命名扫描目标";
+      const address = document.createElement("small");
+      address.textContent = group.target?.address || group.services[0]?.targetAddress || "";
+      heading.append(title, address);
+      const list = document.createElement("div");
+      list.className = "sn-icon-service-list";
+      for (const service of group.services) {
+        const label = document.createElement("label");
+        label.innerHTML = '<input type="checkbox"><span></span>';
+        const input = label.querySelector("input");
+        input.value = service.id;
+        input.checked = current.serviceIds.includes(service.id);
+        label.querySelector("span").textContent =
+          `${service.serviceType === "http" ? "HTTP" : "端口"} · ${serviceName(service)} · ${service.port}`;
+        list.append(label);
+      }
+      section.append(heading, list);
+      servicesBox.append(section);
+    }
+  }
   const linkedServices = (data.services || []).filter((entry) =>
     detected
       ? entry.id === current.detectedServiceId
@@ -245,6 +305,11 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null) {
           iconText: form.querySelector('[name="text"]')?.value || "",
           iconColor: form.querySelector('[name="color"]')?.value || "",
           faviconServiceId: form.querySelector('[name="favicon"]')?.value || "",
+          serviceIds: detected
+            ? [current.detectedServiceId]
+            : [...form.querySelectorAll("[data-icon-services] input:checked")].map(
+                (input) => input.value,
+              ),
           iconUrl: previewUrl(),
         },
         icon,
@@ -325,5 +390,5 @@ function openGlobalIconSizePreview(draft, icon, restoreFile = false, onSaved = n
   }
   modalContent
     .querySelector("[data-return-icon-form]")
-    .addEventListener("click", () => openGlobalIconForm(icon, restoreFile, onSaved));
+    .addEventListener("click", () => openGlobalIconForm(icon, true, onSaved, draft));
 }

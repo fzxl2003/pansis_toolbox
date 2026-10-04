@@ -1,17 +1,25 @@
 import { type FormEvent, useState } from "react";
-import { HeartPulse, Pencil } from "lucide-react";
+import { HeartPulse, Pencil, Radar, Trash2 } from "lucide-react";
 import { apiGet, apiPost } from "../../../../frontend/src/api/client";
-import { API, type Service, type Target } from "../types";
-import { Field, Modal } from "./shared";
+import { API, type Run, type Service, type Target } from "../types";
+import { Field, Modal, Progress } from "./shared";
 
-export function ServicesByTarget({
+export function TargetPool({
   targets,
   services,
-  onEdit,
+  active,
+  onScan,
+  onEditTarget,
+  onDeleteTarget,
+  onEditService,
 }: {
   targets: Target[];
   services: Service[];
-  onEdit: (item: Service) => void;
+  active?: Run;
+  onScan: (id?: string) => void;
+  onEditTarget: (item: Target) => void;
+  onDeleteTarget: (item: Target) => void;
+  onEditService: (item: Service) => void;
 }) {
   const [health, setHealth] = useState<Service | null>(null);
   const [snapshots, setSnapshots] = useState<
@@ -37,12 +45,23 @@ export function ServicesByTarget({
   };
   return (
     <>
-      {targets.map((target) => (
+      {!targets.length && <p className="sn-empty">尚未添加扫描目标。</p>}
+      {targets.map((target) => {
+        const targetServices = services.filter((item) => item.targetId === target.id);
+        return (
         <section key={target.id} className="sn-target-service-group">
-          <h3>
-            {target.label}
-            <small>{target.address}</small>
-          </h3>
+          <header className="sn-target-service-heading">
+            <div>
+              <h3>{target.label}<small>{target.address}</small></h3>
+              <p>{targetServices.length} 个已发现服务{target.customPorts ? ` · 额外端口：${target.customPorts}` : ""}</p>
+              {active?.targetId === target.id && <Progress run={active} />}
+            </div>
+            <div className="sn-target-service-actions">
+              <button className="sn-icon-button" disabled={!!active} onClick={() => onScan(target.id)} title="扫描此目标" aria-label={`扫描 ${target.label}`}><Radar size={15} /></button>
+              <button className="sn-icon-button" onClick={() => onEditTarget(target)} title="编辑目标" aria-label={`编辑 ${target.label}`}><Pencil size={14} /></button>
+              <button className="sn-icon-button danger" onClick={() => onDeleteTarget(target)} title="删除目标" aria-label={`删除 ${target.label}`}><Trash2 size={14} /></button>
+            </div>
+          </header>
           <table className="sn-table">
             <thead>
               <tr>
@@ -53,9 +72,7 @@ export function ServicesByTarget({
               </tr>
             </thead>
             <tbody>
-              {services
-                .filter((item) => item.targetId === target.id)
-                .map((item) => (
+              {targetServices.length ? targetServices.map((item) => (
                   <tr key={item.id}>
                     <td>
                       <strong>
@@ -95,18 +112,19 @@ export function ServicesByTarget({
                       )}
                       <button
                         className="sn-btn-link"
-                        onClick={() => onEdit(item)}
+                        onClick={() => onEditService(item)}
                       >
                         <Pencil size={14} />
                         整理
                       </button>
                     </td>
                   </tr>
-                ))}
+                )) : <tr><td className="sn-target-service-empty" colSpan={4}>尚未发现服务，扫描该目标后会显示在这里。</td></tr>}
             </tbody>
           </table>
         </section>
-      ))}
+        );
+      })}
       {health && (
         <Modal
           title={`${health.displayName || health.serviceName} · 健康度`}
@@ -167,16 +185,28 @@ export function ServicesByTarget({
 
 export function ServiceModal({
   service,
+  targets,
   setService,
   onClose,
   onSubmit,
 }: {
   service: Service;
+  targets: Target[];
   setService: (value: Service) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent) => void;
 }) {
   const http = service.serviceType === "http";
+  const target = targets.find((item) => item.id === service.targetId);
+  const templates = {
+    generic: { label: "通用端口服务", description: "通过指定地址和端口访问该服务。", command: `${target?.address || "<host>"}:${service.port}` },
+    ssh: { label: "SSH", description: "通过 SSH 安全远程登录服务器。", command: `ssh -p ${service.port} <user>@${target?.address || "<host>"}` },
+    sftp: { label: "SFTP", description: "通过 SFTP 安全传输文件。", command: `sftp -P ${service.port} <user>@${target?.address || "<host>"}` },
+    rdp: { label: "远程桌面（RDP）", description: "通过远程桌面客户端连接此主机。", command: `xfreerdp /v:${target?.address || "<host>"}:${service.port} /u:<user>` },
+    vnc: { label: "VNC", description: "通过 VNC 客户端查看和控制远程桌面。", command: `vncviewer ${target?.address || "<host>"}:${service.port}` },
+    ftp: { label: "FTP", description: "通过 FTP 客户端传输文件。", command: `ftp ${target?.address || "<host>"} ${service.port}` },
+    smb: { label: "SMB 文件共享", description: "通过 SMB 客户端访问共享文件。", command: `smbclient //${target?.address || "<host>"}/<share> -p ${service.port} -U <user>` },
+  } as const;
   return (
     <Modal title="整理服务" onClose={onClose}>
       <form className="sn-form-grid" onSubmit={onSubmit}>
@@ -240,17 +270,28 @@ export function ServiceModal({
             </div>
           </>
         ) : (
-          <Field label="连接命令" full>
-            <input
-              value={service.connectionCommand}
-              onChange={(event) =>
-                setService({
-                  ...service,
-                  connectionCommand: event.target.value,
-                })
-              }
-            />
-          </Field>
+          <>
+            <Field label="连接模板">
+              <select
+                value={service.serviceTemplate}
+                onChange={(event) => {
+                  const serviceTemplate = event.target.value as Service["serviceTemplate"];
+                  const preset = templates[serviceTemplate];
+                  setService({ ...service, serviceTemplate, description: preset.description, commandDescription: preset.command });
+                }}
+              >
+                {Object.entries(templates).map(([id, preset]) => <option key={id} value={id}>{preset.label}</option>)}
+              </select>
+            </Field>
+            <Field label="命令说明" full>
+              <textarea
+                value={service.commandDescription}
+                onChange={(event) =>
+                  setService({ ...service, commandDescription: event.target.value })
+                }
+              />
+            </Field>
+          </>
         )}
         <Field label="描述" full>
           <textarea

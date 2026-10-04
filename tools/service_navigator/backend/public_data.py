@@ -21,7 +21,12 @@ def public_services(site: dict[str, Any]) -> list[dict[str, Any]]:
         item["healthMonitored"] = bool(row["health_enabled"])
         for private_key in ("healthEnabled", "healthUrl", "lastHealthCheckedAt", "lastHealthStatusCode", "lastHealthLatencyMs", "lastHealthError"):
             item.pop(private_key, None)
-        item.update({"targetLabel": row["target_label"], "targetAddress": row["target_address"], "name": row["display_name"] or row["http_title"] or row["service_name"], "url": (row["navigation_url"] or row["detected_url"]) if row["service_type"] == "http" else "", "command": row["connection_command"] or default_command(row["service_name"], row["target_address"], int(row["port"]))})
+        item.update({
+            "targetLabel": row["target_label"], "targetAddress": row["target_address"],
+            "name": row["display_name"] or row["http_title"] or row["service_name"],
+            "url": (row["navigation_url"] or row["detected_url"]) if row["service_type"] == "http" else "",
+            "commandDescription": row["command_description"] or row["connection_command"] or default_command(row["service_name"], row["target_address"], int(row["port"])),
+        })
         output.append(item)
     return output
 
@@ -79,7 +84,7 @@ def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> d
             items.append({
                 "id": item["id"], "iconId": item["iconId"], "name": item["name"], "size": item["size"], "iconUrl": icon_url,
                 "iconSource": source, "iconText": item.get("iconText", ""), "iconColor": item.get("iconColor", "#4f7cff"),
-                "preferenceRevision": item["preferenceRevision"], "serviceType": next(iter(service_types)),
+                "serviceType": next(iter(service_types)),
                 "layouts": responsive_layouts.get(item["id"], {}), "services": linked,
             })
         pages.append({"id": page["id"], "name": page["name"], "visible": page.get("visible", True), "items": items})

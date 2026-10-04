@@ -26,6 +26,7 @@ def create_site(payload: dict[str, Any], user: User) -> dict[str, Any]:
     description = str(payload.get("description") or "").strip()[:500]
     theme = _normalise_site_theme(payload.get("theme", "auto"))
     accent_color = _normalise_accent_color(payload.get("accentColor", "#4f7cff"))
+    card_opacity = _normalise_card_opacity(payload.get("cardOpacity", 84))
     now = now_iso()
     with conn() as database:
         if database.execute("SELECT 1 FROM service_navigator_sites WHERE owner_user_id=?", (user.id,)).fetchone():
@@ -33,8 +34,8 @@ def create_site(payload: dict[str, Any], user: User) -> dict[str, Any]:
         try:
             site_id = uuid4().hex
             database.execute("""INSERT INTO service_navigator_sites
-                (id,owner_user_id,title,slug,description,visibility,theme,accent_color,created_at,updated_at)
-                VALUES(?,?,?,?,?,'private',?,?,?,?)""", (site_id, user.id, title, slug, description, theme, accent_color, now, now))
+                (id,owner_user_id,title,slug,description,visibility,theme,accent_color,card_opacity,created_at,updated_at)
+                VALUES(?,?,?,?,?,'private',?,?,?,?,?)""", (site_id, user.id, title, slug, description, theme, accent_color, card_opacity, now, now))
             database.execute("INSERT INTO service_navigator_health_settings(site_id,updated_at) VALUES(?,?)", (site_id, now))
             database.commit()
         except sqlite3.IntegrityError as exc:
@@ -50,9 +51,10 @@ def update_site(payload: dict[str, Any], user: User) -> dict[str, Any]:
     description = str(payload.get("description", site["description"]) or "").strip()[:500]
     theme = _normalise_site_theme(payload.get("theme", site.get("theme", "auto")))
     accent_color = _normalise_accent_color(payload.get("accentColor", site.get("accent_color", "#4f7cff")))
+    card_opacity = _normalise_card_opacity(payload.get("cardOpacity", site.get("card_opacity", 84)))
     with conn() as database:
         try:
-            database.execute("UPDATE service_navigator_sites SET title=?,slug=?,description=?,theme=?,accent_color=?,updated_at=? WHERE id=?", (title, slug, description, theme, accent_color, now_iso(), site["id"]))
+            database.execute("UPDATE service_navigator_sites SET title=?,slug=?,description=?,theme=?,accent_color=?,card_opacity=?,updated_at=? WHERE id=?", (title, slug, description, theme, accent_color, card_opacity, now_iso(), site["id"]))
             database.commit()
         except sqlite3.IntegrityError as exc:
             raise ToolboxError("SLUG_EXISTS", "该站点地址已被占用", status_code=409, tool_id=TOOL_ID) from exc

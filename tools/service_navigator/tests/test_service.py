@@ -64,14 +64,16 @@ def test_fixed_target_pages_support_ordering(isolated_storage, owner: User) -> N
     assert duplicate.value.code == "INVALID_TARGET_ORDER"
 
 
-def test_site_appearance_persists_only_valid_theme_and_accent(isolated_storage, owner: User) -> None:
+def test_site_appearance_persists_only_valid_theme_accent_and_card_opacity(isolated_storage, owner: User) -> None:
     service.create_site({"title": "Lab", "slug": "lab-services"}, owner)
-    updated = service.update_site({"theme": "light", "accentColor": " #7C3AED "}, owner)
+    updated = service.update_site({"theme": "light", "accentColor": " #7C3AED ", "cardOpacity": 62}, owner)
     assert updated["site"]["theme"] == "light"
     assert updated["site"]["accentColor"] == "#7c3aed"
-    reset = service.update_site({"theme": "sepia", "accentColor": "purple"}, owner)
+    assert updated["site"]["cardOpacity"] == 62
+    reset = service.update_site({"theme": "sepia", "accentColor": "purple", "cardOpacity": 999}, owner)
     assert reset["site"]["theme"] == "auto"
     assert reset["site"]["accentColor"] == "#4f7cff"
+    assert reset["site"]["cardOpacity"] == 100
 
 
 def test_python_fingerprints_and_rescan_preserves_overrides(isolated_storage, owner: User) -> None:
@@ -87,15 +89,41 @@ def test_python_fingerprints_and_rescan_preserves_overrides(isolated_storage, ow
     detail = service.get_site(owner)
     assert detail is not None
     ssh = detail["services"][0]
-    assert ssh["connectionCommand"] == "ssh -p 22 <user>@10.0.0.8"
+    assert ssh["commandDescription"] == "ssh -p 22 <user>@10.0.0.8"
+    assert ssh["serviceTemplate"] == "generic"
     service.update_service(ssh["id"], {"displayName": "Gateway", "connectionCommand": "ssh lab"}, owner)
     service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "product": "OpenSSH", "version": "9.1", "extraInfo": "", "tunnel": "", "resolvedAddresses": ["10.0.0.9"], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
     updated = service.get_site(owner)["services"][0]
     assert updated["displayName"] == "Gateway"
-    assert updated["connectionCommand"] == "ssh lab"
+    assert updated["commandDescription"] == "ssh lab"
     assert updated["resolvedAddresses"] == ["10.0.0.9"]
     service._persist_target_scan({"id": target["id"], "address": target["address"]}, [])
     assert service.get_site(owner)["services"][0]["state"] == "offline"
+
+
+def test_port_service_templates_overwrite_details_and_reject_unknown(isolated_storage, owner: User) -> None:
+    _site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 3389, "protocol": "tcp", "serviceName": "ms-wbt-server", "product": "", "version": "", "extraInfo": "", "resolvedAddresses": [], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
+    item = service.get_site(owner)["services"][0]
+    updated = service.update_service(item["id"], {"serviceType": "port", "serviceTemplate": "rdp", "description": "ignored", "commandDescription": "ignored"}, owner)
+    assert updated["serviceTemplate"] == "rdp"
+    assert updated["description"] == "通过远程桌面客户端连接此主机。"
+    assert updated["commandDescription"] == "xfreerdp /v:10.0.0.8:3389 /u:<user>"
+    with pytest.raises(ToolboxError) as error:
+        service.update_service(item["id"], {"serviceTemplate": "telnet"}, owner)
+    assert error.value.code == "INVALID_SERVICE_TEMPLATE"
+
+
+def test_legacy_connection_command_migrates_to_command_description(isolated_storage, owner: User) -> None:
+    _site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "product": "", "version": "", "extraInfo": "", "resolvedAddresses": [], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
+    service_id = service.get_site(owner)["services"][0]["id"]
+    with service.conn() as database_connection:
+        database_connection.execute("UPDATE service_navigator_services SET command_description='',connection_command='legacy ssh command' WHERE id=?", (service_id,))
+        database_connection.commit()
+    database.SERVICE_TEMPLATE_COMPAT_DATABASES.discard(str(database.db_path()))
+    migrated = service.get_site(owner)["services"][0]
+    assert migrated["commandDescription"] == "legacy ssh command"
 
 
 def test_python_scan_aggregates_addresses_and_custom_ports(monkeypatch, isolated_storage, owner: User) -> None:

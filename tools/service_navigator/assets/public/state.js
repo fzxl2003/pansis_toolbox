@@ -7,7 +7,27 @@ export const modal = document.querySelector("[data-action-modal]");
 export const modalContent = document.querySelector("[data-modal-content]");
 export const sidebar = document.querySelector(".sn-sidebar");
 export const dashboard = document.querySelector(".sn-dashboard");
+export function readNavigationCookie(name) {
+  const prefix = `${name}=`;
+  const value = document.cookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith(prefix))
+    ?.slice(prefix.length);
+  try {
+    return value ? decodeURIComponent(value) : "";
+  } catch {
+    return "";
+  }
+}
+const savedPage = readNavigationCookie("sn-current-page");
+const availablePages = [
+  ...(data.targetPages || []).filter((page) => page.visible).map((page) => page.id),
+  ...(data.pages || []).filter((page) => page.visible).map((page) => page.id),
+  "all",
+];
 export let currentPage =
+  (availablePages.includes(savedPage) && savedPage) ||
   data.targetPages?.find((page) => page.visible)?.id ||
   data.pages?.[0]?.id ||
   "all";

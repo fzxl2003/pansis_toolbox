@@ -59,36 +59,34 @@ export async function openItem(item) {
     window.open(candidates[0].url, "_blank", "noopener");
     return;
   }
-  const statuses = await Promise.all(
-    candidates.map(async (candidate) => ({
-      ...candidate,
-      status: await probe(candidate),
-    })),
-  );
-  openHttpModal(item, statuses);
+  const rows = openHttpModal(item, candidates);
+  await Promise.all(rows.map(async ({ candidate, status }) => {
+    const result = await probe(candidate);
+    // A closed or replaced dialog must never be changed by a late probe.
+    if (!status.isConnected) return;
+    status.className = result;
+    status.textContent = result === "reachable" ? "可达" : result === "failed" ? "不可达" : "无法检测";
+  }));
 }
 function openHttpModal(item, candidates) {
   showModal(
     `<h2>${escapeHtml(item.name)}</h2><div class="sn-candidate-list"></div>`,
   );
   const list = modalContent.querySelector(".sn-candidate-list");
+  const rows = [];
   for (const candidate of candidates) {
     const row = document.createElement("div");
     row.className = "sn-candidate";
-    const status =
-      candidate.status === "reachable"
-        ? "可达"
-        : candidate.status === "failed"
-          ? "不可达"
-          : "无法检测";
-    row.innerHTML = `<div><strong></strong><small></small><em class="${candidate.status}">${status}</em></div><button type="button">打开</button>`;
+    row.innerHTML = '<div><strong></strong><small></small><em class="detecting" role="status">检测中…</em></div><button type="button">打开</button>';
     row.querySelector("strong").textContent = candidate.name;
     row.querySelector("small").textContent = candidate.url;
     row
       .querySelector("button")
       .addEventListener("click", () => chooseHttp(candidate));
     list.append(row);
+    rows.push({ candidate, status: row.querySelector("em") });
   }
+  return rows;
 }
 function chooseHttp(candidate) {
   window.open(candidate.url, "_blank", "noopener");

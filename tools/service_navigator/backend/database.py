@@ -338,6 +338,8 @@ def init_database(database: sqlite3.Connection) -> None:
     _ensure_column(database, "service_navigator_sites", "background_filename", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(database, "service_navigator_sites", "show_all_services", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(database, "service_navigator_sites", "theme", "TEXT NOT NULL DEFAULT 'auto'")
+    _ensure_column(database, "service_navigator_sites", "accent_color_mode", "TEXT NOT NULL DEFAULT 'custom'")
+    _ensure_column(database, "service_navigator_nav_icons", "icon_color_mode", "TEXT NOT NULL DEFAULT 'custom'")
     _ensure_column(database, "service_navigator_sites", "accent_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
     _ensure_column(database, "service_navigator_sites", "card_opacity", "INTEGER NOT NULL DEFAULT 84")
     _ensure_column(database, "service_navigator_sites", "card_blur", "INTEGER NOT NULL DEFAULT 1")
@@ -411,15 +413,15 @@ def _migrate_navigation_icons(database: sqlite3.Connection) -> None:
         database.execute("UPDATE service_navigator_nav_items SET icon_id=?,updated_at=? WHERE id=?", (icon_id, now, row["id"]))
     for service in database.execute("""SELECT s.*,t.site_id FROM service_navigator_services s
             JOIN service_navigator_targets t ON t.id=s.target_id""").fetchall():
-        if database.execute("SELECT 1 FROM service_navigator_nav_icon_services WHERE service_id=? LIMIT 1", (service["id"],)).fetchone():
+        if database.execute("SELECT 1 FROM service_navigator_nav_icons WHERE detected_service_id=? LIMIT 1", (service["id"],)).fetchone():
             continue
         name = service["display_name"] or service["http_title"] or service["service_name"] or f"TCP/{service['port']}"
         source = "favicon" if service["favicon_filename"] else "text"
         icon_id, now = uuid4().hex, now_iso()
         database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,
-            icon_text,icon_color,favicon_service_id,detected_service_id,preference_revision,sort_order,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, service["site_id"], name, source, "",
-            name[:1], "#4f7cff", service["id"] if source == "favicon" else None, service["id"], 1, 0, now, now))
+            icon_text,icon_color,icon_color_mode,favicon_service_id,detected_service_id,preference_revision,sort_order,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, service["site_id"], name, source, "",
+            name[:1], "#4f7cff", "theme", service["id"] if source == "favicon" else None, service["id"], 1, 0, now, now))
         database.execute("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", (icon_id, service["id"]))
 
 
@@ -434,6 +436,7 @@ def _site_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "visibility": item["visibility"], "backgroundSource": item.get("background_source", "default"),
         "backgroundFilename": item.get("background_filename", ""), "showAllServices": bool(item.get("show_all_services", 1)),
         "theme": _normalise_site_theme(item.get("theme", "auto")), "accentColor": _normalise_accent_color(item.get("accent_color", "#4f7cff")),
+        "accentColorMode": "background" if item.get("accent_color_mode") == "background" else "custom",
         "cardOpacity": _normalise_card_opacity(item.get("card_opacity", 84)),
         "cardBlur": bool(item.get("card_blur", 1)),
         "backgroundOverlayOpacity": _normalise_background_overlay_opacity(item.get("background_overlay_opacity", 50)),
@@ -520,7 +523,7 @@ def normalize_ports(value: str) -> str:
 
 def _normalise_site_theme(value: Any) -> str:
     theme = str(value or "auto").lower()
-    return theme if theme in {"auto", "light", "dark"} else "auto"
+    return theme if theme in {"auto", "light", "dark", "background"} else "auto"
 
 
 def _normalise_accent_color(value: Any) -> str:

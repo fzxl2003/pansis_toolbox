@@ -55,6 +55,13 @@ export type Site = {
   slug: string;
   description: string;
   visibility: "public" | "private";
+  theme: "auto" | "light" | "dark" | "background";
+  accentColor: string;
+  accentColorMode: "custom" | "background";
+  cardOpacity: number;
+  cardBlur: boolean;
+  backgroundOverlayOpacity: number;
+  backgroundSource: "default" | "bing" | "custom";
 };
 
 export type AccessSettings = {

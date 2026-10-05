@@ -1,3 +1,5 @@
+import { syncEditingControls } from "./editing-controls.js";
+import { setPageEditing } from "./page-editing.js";
 import { breakpoint, content, currentPage, data } from "./state.js";
 import { render } from "./render.js";
 import { ownerApi } from "./owner-api.js";
@@ -44,8 +46,10 @@ export function startPageCanvasEditing() {
     alert("请在桌面宽度下编辑页面布局；窄屏会自动适配。");
     return;
   }
+  setPageEditing(false);
   editingPageId = page.id;
   document.body.classList.add("sn-page-canvas-editing");
+  syncEditingControls();
   refreshCanvasEditButton();
   renderCanvasEditor();
 }
@@ -57,6 +61,7 @@ export function stopPageCanvasEditing() {
   draggedPointerOffset = { x: 0, y: 0 };
   resizeState = null;
   document.body.classList.remove("sn-page-canvas-editing");
+  syncEditingControls();
   removeEditorChrome();
   refreshCanvasEditButton();
   render();
@@ -224,6 +229,7 @@ function hydrateItem(item, icon) {
     iconSource: icon.iconSource,
     iconText: icon.iconText,
     iconColor: icon.iconColor,
+    iconColorMode: icon.iconColorMode,
     destinationType: icon.destinationType || "service",
     externalUrl: icon.externalUrl || "",
     serviceType: icon.services?.[0]?.serviceType || "port",
@@ -361,12 +367,11 @@ function renderToolbar(page) {
   const toolbar = document.createElement("section");
   toolbar.className = "sn-canvas-toolbar";
   toolbar.innerHTML =
-    '<button type="button" data-canvas-add>＋ 添加图标</button><div class="sn-canvas-trash" data-canvas-trash>⌫ 拖到这里移除</div><button type="button" class="primary" data-canvas-done>完成编辑</button>';
+    '<button type="button" data-canvas-add>＋ 添加图标</button><div class="sn-canvas-trash" data-canvas-trash>⌫ 拖到这里移除</div>';
   toolbar.querySelector("[data-canvas-add]").addEventListener("click", () => {
     document.querySelector(".sn-canvas-add-panel")?.remove();
     renderAddPanel(page);
   });
-  toolbar.querySelector("[data-canvas-done]").addEventListener("click", stopPageCanvasEditing);
   const trash = toolbar.querySelector("[data-canvas-trash]");
   trash.addEventListener("dragover", (event) => {
     event.preventDefault();

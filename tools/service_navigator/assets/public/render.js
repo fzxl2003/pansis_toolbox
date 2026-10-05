@@ -1,3 +1,4 @@
+import { iconPreviewNode } from "./icon-library.js";
 import { breakpoint, content, currentPage, data, sizeSpan } from "./state.js";
 import { healthLabel, serviceName } from "./utils.js";
 import { openItem } from "./service-interactions.js";
@@ -85,25 +86,7 @@ function navigationCard(item) {
   card.dataset.itemId = item.id;
   card.title = item.name;
   card.setAttribute("aria-label", item.name);
-  const icon = document.createElement("span");
-  icon.className = "sn-nav-icon-image";
-  if (item.iconUrl) {
-    const image = document.createElement("img");
-    image.src = item.iconUrl;
-    image.alt = "";
-    icon.append(image);
-  } else {
-    const fallback = document.createElement("span");
-    fallback.className = "sn-nav-fallback";
-    fallback.textContent =
-      item.iconSource === "text" || item.destinationType === "external"
-        ? item.iconText || item.name.slice(0, 1)
-        : "◌";
-    fallback.style.color = item.iconSource === "text" || item.destinationType === "external"
-      ? item.iconColor || ""
-      : "";
-    icon.append(fallback);
-  }
+  const icon = iconPreviewNode(item);
   card.append(icon);
   if (item.size === "small") {
     const label = document.createElement("span");
@@ -143,13 +126,12 @@ function serviceCard(item) {
   card.className = "sn-all-service";
   card.innerHTML =
     '<span class="sn-all-icon"></span><span><strong></strong><small></small></span><em></em>';
-  const icon = card.querySelector(".sn-all-icon");
-  if (item.faviconUrl) {
-    const img = document.createElement("img");
-    img.src = item.faviconUrl;
-    img.alt = "";
-    icon.append(img);
-  } else icon.textContent = item.serviceType === "http" ? "◌" : "⌁";
+  const icon = iconPreviewNode(item.navigationIcon || {
+    name: serviceName(item), iconText: serviceName(item).slice(0, 1),
+    iconColorMode: "theme", iconSource: item.faviconUrl ? "favicon" : "text", iconUrl: item.faviconUrl || "",
+  });
+  icon.className = "sn-all-icon";
+  card.querySelector(".sn-all-icon").replaceWith(icon);
   card.querySelector("strong").textContent = serviceName(item);
   card.querySelector("small").textContent =
     `${item.protocol || "tcp"}/${item.port} · ${item.serviceType === "http" ? "网页" : "端口"} 服务`;

@@ -354,3 +354,151 @@ def test_external_navigation_icon_fetches_favicon_and_cleans_replaced_files(isol
     with pytest.raises(ToolboxError) as error:
         service.create_nav_icon({"name": "缺少链接", "destinationType": "external", "externalUrl": ""}, owner)
     assert error.value.code == "INVALID_NAVIGATION_URL"
+
+
+def test_background_and_icon_color_modes_preserve_manual_colors(isolated_storage, owner: User) -> None:
+    from tools.service_navigator.backend.router import SitePayload, NavigationIconPayload
+
+    service.create_site({"title": "Colors", "slug": "colors", "theme": "background", "accentColorMode": "background", "accentColor": "#123456"}, owner)
+    # Router must distinguish omitted settings from explicit defaults.
+    site = service.update_site(SitePayload(title="Renamed").model_dump(exclude_unset=True), owner)["site"]
+    assert (site["theme"], site["accentColorMode"], site["accentColor"]) == ("background", "background", "#123456")
+    icon = service.create_nav_icon({"name": "External", "destinationType": "external", "externalUrl": "https://example.com", "iconSource": "text", "iconText": "E", "iconColor": "#abcdef", "iconColorMode": "theme"}, owner)
+    updated = service.update_nav_icon(icon["id"], NavigationIconPayload(name="Changed").model_dump(exclude_unset=True), owner)
+    assert updated["iconColorMode"] == "theme"
+    assert updated["iconColor"] == "#abcdef"
+    page = service.create_nav_page({"name": "Home"}, owner)
+    service.create_nav_item({"pageId": page["id"], "iconId": icon["id"], "size": "medium"}, owner)
+    public_icon = service.public_navigation(service._owner_site(owner))["pages"][0]["items"][0]
+    assert public_icon["iconColorMode"] == "theme"
+    assert public_icon["iconColor"] == "#abcdef"
+    service.update_site({"accentColorMode": "custom"}, owner)
+    assert service.get_site(owner)["site"]["accentColor"] == "#123456"
+    service.update_nav_icon(icon["id"], {"iconColorMode": "custom"}, owner)
+    assert service.list_nav_icons(owner)[0]["iconColor"] == "#abcdef"
+
+
+def test_legacy_color_modes_are_added_idempotently(isolated_storage, owner: User) -> None:
+    service.create_site({"title": "Legacy", "slug": "legacy"}, owner)
+    icon = service.create_nav_icon({"name": "Legacy", "destinationType": "external", "externalUrl": "https://example.com", "iconSource": "text", "iconColor": "#123456"}, owner)
+    with service.conn() as connection:
+        connection.execute("ALTER TABLE service_navigator_sites DROP COLUMN accent_color_mode")
+        connection.execute("ALTER TABLE service_navigator_nav_icons DROP COLUMN icon_color_mode")
+        connection.commit()
+        database.init_database(connection)
+        database.init_database(connection)
+    assert service.get_site(owner)["site"]["accentColorMode"] == "custom"
+    saved = service.list_nav_icons(owner)[0]
+    assert saved["id"] == icon["id"]
+    assert saved["iconColorMode"] == "custom"
+    assert saved["iconColor"] == "#123456"
+
+
+def test_detected_service_icon_color_mode_reaches_public_placement(isolated_storage, owner: User) -> None:
+    site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
+    icon = service.list_nav_icons(owner)[0]
+    assert icon["detectedServiceId"]
+    service.update_nav_icon(icon["id"], {"iconSource": "text", "iconText": "S", "iconColorMode": "theme"}, owner)
+    page = service.create_nav_page({"name": "Detected"}, owner)
+    service.create_nav_item({"pageId": page["id"], "iconId": icon["id"], "size": "wide"}, owner)
+    item = service.public_navigation(site)["pages"][0]["items"][0]
+    assert item["iconColorMode"] == "theme"
+    assert item["services"][0]["id"] == icon["detectedServiceId"]
+
+
+def test_untouched_detected_icons_prefer_latest_favicon_and_theme_text(isolated_storage, owner: User) -> None:
+    site, target = _site_and_target(owner)
+    def scan(favicon=""):
+        service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 8080, "protocol": "tcp", "serviceName": "http", "httpTitle": "Web", "detectedUrl": "http://10.0.0.8:8080", "faviconFilename": favicon}])
+
+    scan()
+    icon = service.list_nav_icons(owner)[0]
+    assert icon["iconSource"] == "text"
+    assert icon["iconText"]
+    assert icon["iconColorMode"] == "theme"
+    assert icon["preferenceRevision"] == 1
+    page = service.create_nav_page({"name": "Home"}, owner)
+    service.create_nav_item({"pageId": page["id"], "iconId": icon["id"], "size": "medium"}, owner)
+    # Existing untouched records also receive the new default without modifying them.
+    with service.conn() as connection:
+        connection.execute("UPDATE service_navigator_nav_icons SET icon_color_mode='custom' WHERE id=?", (icon["id"],))
+        connection.commit()
+    assert service.list_nav_icons(owner)[0]["iconColorMode"] == "theme"
+    scan("favicon.png")
+    updated = service.list_nav_icons(owner)[0]
+    assert updated["iconSource"] == "favicon"
+    assert updated["faviconServiceId"] == icon["detectedServiceId"]
+    public_item = service.public_navigation(site)["pages"][0]["items"][0]
+    assert public_item["iconUrl"] == f"/service-nav/icon/{icon['detectedServiceId']}"
+    # Empty favicons fall back to text, including previously favicon-based icons.
+    with service.conn() as connection:
+        connection.execute("UPDATE service_navigator_services SET favicon_filename='' WHERE id=?", (icon["detectedServiceId"],))
+        connection.commit()
+    public_item = service.public_navigation(site)["pages"][0]["items"][0]
+    assert public_item["iconSource"] == "text"
+    assert public_item["iconColorMode"] == "theme"
+    assert public_item["iconUrl"] == ""
+    # Saving only a name preserves effective defaults, then locks user choices.
+    saved = service.update_nav_icon(icon["id"], {"name": "Renamed"}, owner)
+    assert saved["iconColorMode"] == "theme"
+    service.update_nav_icon(icon["id"], {"iconSource": "text", "iconColorMode": "custom", "iconColor": "#123456"}, owner)
+    scan("another.png")
+    edited = service.list_nav_icons(owner)[0]
+    assert edited["iconSource"] == "text"
+    assert edited["iconColorMode"] == "custom"
+    assert edited["iconColor"] == "#123456"
+
+
+def test_uploaded_or_cleared_detected_icon_counts_as_edited(isolated_storage, owner: User) -> None:
+    _site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "httpTitle": "", "detectedUrl": "", "faviconFilename": "favicon.png"}])
+    icon = service.list_nav_icons(owner)[0]
+    uploaded = service.update_nav_custom_icon(icon["id"], "icon.png", b"test-image", owner)
+    assert uploaded["iconSource"] == "custom"
+    assert uploaded["preferenceRevision"] > 1
+    cleared = service.clear_nav_custom_icon(icon["id"], owner)
+    assert cleared["iconSource"] == "text"
+    assert cleared["preferenceRevision"] > uploaded["preferenceRevision"]
+
+
+def test_fixed_service_cards_share_detected_icon_settings(isolated_storage, owner: User) -> None:
+    site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "httpTitle": "", "detectedUrl": "", "faviconFilename": "favicon.png"}])
+    icon = service.list_nav_icons(owner)[0]
+    service_id = icon["detectedServiceId"]
+    def fixed_icon():
+        output = service.public_navigation(site)
+        assert "icons" not in output
+        assert output["services"][0]["id"] == service_id
+        assert output["services"][0]["port"] == 22
+        return output["services"][0]["navigationIcon"]
+
+    assert fixed_icon()["iconUrl"] == f"/service-nav/icon/{service_id}"
+    service.update_nav_icon(icon["id"], {"name": "Style only", "iconSource": "text", "iconText": "SSH", "iconColorMode": "custom", "iconColor": "#123456"}, owner)
+    appearance = fixed_icon()
+    assert appearance["iconUrl"] == ""
+    assert appearance["iconText"] == "SSH"
+    assert appearance["iconColor"] == "#123456"
+    assert appearance["iconColorMode"] == "custom"
+    assert set(appearance) == {"id", "name", "iconSource", "iconText", "iconColor", "iconColorMode", "iconUrl"}
+    service.update_nav_icon(icon["id"], {"iconColorMode": "theme"}, owner)
+    assert fixed_icon()["iconColorMode"] == "theme"
+    uploaded = service.update_nav_custom_icon(icon["id"], "icon.png", b"test-image", owner)
+    assert fixed_icon()["iconSource"] == "custom"
+    assert fixed_icon()["iconUrl"] == uploaded["iconUrl"]
+    assert fixed_icon()["iconUrl"] == f"/service-nav/navigation-icon/{icon['id']}"
+
+
+def test_linked_custom_icons_do_not_replace_the_detected_icon(isolated_storage, owner: User) -> None:
+    _site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{"port": 22, "protocol": "tcp", "serviceName": "ssh", "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}])
+    detected = service.list_nav_icons(owner)[0]
+    custom = service.create_nav_icon({"name": "Custom", "serviceIds": [detected["detectedServiceId"]], "iconSource": "text"}, owner)
+    # Simulate a legacy library with only a manually linked icon.
+    with service.conn() as connection:
+        connection.execute("DELETE FROM service_navigator_nav_icons WHERE id=?", (detected["id"],))
+        connection.commit()
+    icons = service.list_nav_icons(owner)
+    assert any(icon["id"] == custom["id"] for icon in icons)
+    assert any(icon["detectedServiceId"] == detected["detectedServiceId"] for icon in icons)

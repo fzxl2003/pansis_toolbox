@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import secrets
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import Body, FastAPI, Request
@@ -13,7 +14,7 @@ from backend.app.core.security import get_optional_user
 from tools.service_navigator.backend import service
 
 VISITOR_COOKIE_NAME = "service_navigator_visitor"
-ASSET_VERSION = "39"
+ASSET_VERSION = "50"
 
 
 def _esc(value: object) -> str:
@@ -37,6 +38,8 @@ def _gate(request: Request, slug: str, site: dict) -> HTMLResponse:
     target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
     theme = service._normalise_site_theme(site.get("theme", "auto"))
     accent_color = service._normalise_accent_color(site.get("accent_color", "#4f7cff"))
+    if theme == "background":
+        theme = "auto"
     page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>需要访问权限</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body class="sn-gate-page sn-dashboard-body sn-theme-{_esc(theme)}" style="--sn-user-accent:{_esc(accent_color)}"><main class="sn-gate"><h1>此服务导航站为私密站点</h1><p>请使用受邀平台账号登录，或输入站点访问密码。</p><form data-access-password data-endpoint="/service-nav/{quote(slug)}/unlock"><label>访问密码<input required name="password" type="password" autocomplete="current-password"></label><button>使用密码进入</button></form><div class="sn-divider">或</div><form data-platform-login><label>用户名<input required name="username" autocomplete="username"></label><label>平台密码<input required name="password" type="password" autocomplete="current-password"></label><button>登录并继续</button></form><p class="sn-error" data-error></p></main><script>const error=document.querySelector('[data-error]');for(const form of document.querySelectorAll('form'))form.addEventListener('submit',async(e)=>{{e.preventDefault();error.textContent='';const endpoint=form.hasAttribute('data-platform-login')?'/api/auth/login':form.dataset.endpoint;const r=await fetch(endpoint,{{method:'POST',credentials:'include',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(Object.fromEntries(new FormData(form)))}});if(r.ok)location.href={json.dumps(target)};else{{const b=await r.json().catch(()=>({{}}));error.textContent=b.error?.message||'认证失败';}}}});</script></body></html>'''
     return HTMLResponse(page, status_code=401)
 
@@ -56,14 +59,24 @@ def render_site(site: dict, principal: dict) -> HTMLResponse:
     navigation["appearance"] = {
         "theme": theme,
         "accentColor": accent_color,
+        "accentColorMode": "background" if site.get("accent_color_mode") == "background" else "custom",
+        "backgroundUrl": background,
         "cardOpacity": card_opacity,
         "cardBlur": card_blur,
         "backgroundOverlayOpacity": background_overlay_opacity,
         "backgroundSource": str(site.get("background_source") or "default"),
     }
+    # Version the complete ES module graph; versioning just public.js leaves
+    # its imported modules cached after an update.
+    module_import_map = json.dumps({"imports": {
+        f"/tool-assets/service_navigator/public/{path.name}":
+        f"/tool-assets/service_navigator/public/{path.name}?v={ASSET_VERSION}"
+        for path in (Path(__file__).resolve().parents[1] / "assets" / "public").glob("*.js")
+    }})
     navigation_json = json.dumps(navigation, ensure_ascii=False).replace("</", "<\\/")
     page_add = '<button class="sn-page-add" data-add-page type="button" title="新增页面" aria-label="新增页面">+</button>' if principal.get("kind") == "owner" else ""
     owner_controls = '<div class="sn-owner-controls" data-owner-controls><div class="sn-owner-control-actions"><button class="sn-owner-edit" data-toggle-page-edit>编辑导航</button><button class="sn-owner-edit" data-page-canvas-edit>编辑页面</button><button class="sn-owner-edit" data-page-icons>管理图标</button><button class="sn-owner-edit" data-open-editor>外观与背景</button></div><button class="sn-owner-controls-toggle" data-toggle-owner-controls type="button" title="隐藏编辑工具" aria-label="隐藏编辑工具"><span></span><span></span></button></div>' if principal.get("kind") == "owner" else ""
+    exit_editing = '<button class="sn-edit-exit sn-editor-save" data-exit-editing type="button" hidden>退出编辑</button>' if owner else ""
     identity = ""
     if principal.get("kind") in {"owner", "user", "password"}:
         label = "Guest" if principal.get("kind") == "password" else str(principal.get("label") or "")
@@ -71,7 +84,7 @@ def render_site(site: dict, principal: dict) -> HTMLResponse:
         identity = f'<button class="sn-identity" data-logout="{_esc(endpoint)}" title="退出认证">{_esc(label)} · 退出</button>'
     elif principal.get("kind") == "anonymous":
         identity = '<button class="sn-login-avatar" data-login type="button" title="登录" aria-label="登录"></button>'
-    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="{_esc(site["description"])}"><title>{_esc(site["title"])} · 服务导航</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body class="sn-dashboard-body sn-theme-{_esc(theme)}" data-owner="{str(principal.get("kind") == "owner").lower()}" data-background-source="{_esc(str(site.get("background_source") or "default"))}" style="{background_style}--sn-user-accent:{_esc(accent_color)};--sn-card-opacity:{card_opacity};--sn-background-overlay-opacity:{background_overlay_opacity}%"><main class="sn-dashboard"><aside class="sn-sidebar"><div class="sn-sidebar-top"><a class="sn-brand" href="/service-nav/{_esc(site["slug"])}" aria-label="返回服务导航首页"><span>◈</span><strong>{_esc(site["title"])}</strong></a><button class="sn-sidebar-toggle" data-toggle-sidebar type="button" aria-label="收起导航栏" title="收起导航栏"><span></span><span></span></button></div><nav aria-label="导航页面">{target_pages}{pages}{page_add}</nav><div class="sn-sidebar-footer">{owner_controls}{identity}</div></aside><section class="sn-dashboard-main"><header class="sn-dashboard-head"><time class="sn-clock" aria-label="当前时间"><strong data-clock-time></strong><small data-clock-date></small></time></header><div class="sn-search-area" role="search"><div class="sn-search-row"><button class="sn-engine-trigger" data-engine-trigger type="button" aria-haspopup="true" aria-expanded="false" aria-label="选择搜索引擎" title="选择搜索引擎"><span class="sn-engine-mark sn-engine-google" data-selected-engine>G</span><span class="sn-engine-caret" aria-hidden="true">⌄</span></button><label class="sn-dashboard-search"><input data-search-input type="search" placeholder="输入搜索内容"></label><button class="sn-web-search" data-web-search type="button" aria-label="搜索" title="搜索"><span aria-hidden="true"></span></button></div><div class="sn-engine-menu" data-engine-menu hidden><button type="button" data-engine="baidu"><span class="sn-engine-mark sn-engine-baidu">⌘</span><strong>百度</strong></button><button type="button" data-engine="google"><span class="sn-engine-mark sn-engine-google">G</span><strong>Google</strong></button><button type="button" data-engine="bing"><span class="sn-engine-mark sn-engine-bing">B</span><strong>必应</strong></button></div></div><section data-navigation-content></section></section></main><div class="sn-public-modal" data-action-modal hidden><div class="sn-public-modal-card" role="dialog" aria-modal="true"><button class="sn-modal-close" data-close-modal aria-label="关闭">×</button><div data-modal-content></div></div></div><script id="sn-navigation-data" type="application/json">{navigation_json}</script><script type="module" src="/tool-assets/service_navigator/public.js?v={ASSET_VERSION}"></script></body></html>'''
+    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="{_esc(site["description"])}"><title>{_esc(site["title"])} · 服务导航</title><link rel="stylesheet" href="/tool-assets/service_navigator/public.css?v={ASSET_VERSION}"></head><body class="sn-dashboard-body sn-theme-{_esc(theme)}" data-owner="{str(principal.get("kind") == "owner").lower()}" data-background-source="{_esc(str(site.get("background_source") or "default"))}" style="{background_style}--sn-user-accent:{_esc(accent_color)};--sn-card-opacity:{card_opacity};--sn-background-overlay-opacity:{background_overlay_opacity}%"><main class="sn-dashboard"><aside class="sn-sidebar"><div class="sn-sidebar-top"><a class="sn-brand" href="/service-nav/{_esc(site["slug"])}" aria-label="返回服务导航首页"><span>◈</span><strong>{_esc(site["title"])}</strong></a><button class="sn-sidebar-toggle" data-toggle-sidebar type="button" aria-label="收起导航栏" title="收起导航栏"><span></span><span></span></button></div><nav aria-label="导航页面">{target_pages}{pages}{page_add}</nav><div class="sn-sidebar-footer">{owner_controls}{identity}{exit_editing}</div></aside><section class="sn-dashboard-main"><header class="sn-dashboard-head"><time class="sn-clock" aria-label="当前时间"><strong data-clock-time></strong><small data-clock-date></small></time></header><div class="sn-search-area" role="search"><div class="sn-search-row"><button class="sn-engine-trigger" data-engine-trigger type="button" aria-haspopup="true" aria-expanded="false" aria-label="选择搜索引擎" title="选择搜索引擎"><span class="sn-engine-mark sn-engine-google" data-selected-engine>G</span><span class="sn-engine-caret" aria-hidden="true">⌄</span></button><label class="sn-dashboard-search"><input data-search-input type="search" placeholder="输入搜索内容"></label><button class="sn-web-search" data-web-search type="button" aria-label="搜索" title="搜索"><span aria-hidden="true"></span></button></div><div class="sn-engine-menu" data-engine-menu hidden><button type="button" data-engine="baidu"><span class="sn-engine-mark sn-engine-baidu">⌘</span><strong>百度</strong></button><button type="button" data-engine="google"><span class="sn-engine-mark sn-engine-google">G</span><strong>Google</strong></button><button type="button" data-engine="bing"><span class="sn-engine-mark sn-engine-bing">B</span><strong>必应</strong></button></div></div><section data-navigation-content></section></section></main><div class="sn-public-modal" data-action-modal hidden><div class="sn-public-modal-card" role="dialog" aria-modal="true"><button class="sn-modal-close" data-close-modal aria-label="关闭">×</button><div data-modal-content></div></div></div><script id="sn-navigation-data" type="application/json">{navigation_json}</script><script type="importmap">{module_import_map}</script><script type="module" src="/tool-assets/service_navigator/public.js?v={ASSET_VERSION}"></script></body></html>'''
     return HTMLResponse(page)
 
 

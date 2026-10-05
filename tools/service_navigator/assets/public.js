@@ -1,3 +1,4 @@
+import { initializeTheme } from "./public/theme.js";
 import "./public/clock.js";
 import "./public/search.js";
 import {
@@ -15,6 +16,7 @@ import { setPageEditing } from "./public/page-editing.js";
 import { openOwnerEditor } from "./public/owner-editor.js";
 import { bindPageControls } from "./public/page-controls.js";
 import {
+  isPageCanvasEditing,
   refreshCanvasEditButton,
   stopPageCanvasEditing,
   togglePageCanvasEditing,
@@ -37,6 +39,8 @@ function updatePageStepper() {
   pageStepper.previous.disabled = index <= 0;
   pageStepper.next.disabled = index < 0 || index >= visiblePageIds.length - 1;
 }
+
+initializeTheme(data.appearance);
 
 document.body.classList.toggle(
   "sn-card-blur-off",
@@ -135,16 +139,18 @@ document
   ?.addEventListener("click", () => openOwnerEditor());
 document
   .querySelector("[data-toggle-page-edit]")
-  ?.addEventListener("click", () =>
-    setPageEditing(
-      !document
-        .querySelector(".sn-sidebar")
-        ?.classList.contains("is-editing"),
-    ),
-  );
+  ?.addEventListener("click", () => {
+    stopPageCanvasEditing();
+    setPageEditing(!document.querySelector(".sn-sidebar")?.classList.contains("is-editing"));
+  });
 document
   .querySelector("[data-page-canvas-edit]")
   ?.addEventListener("click", togglePageCanvasEditing);
+document.querySelector("[data-exit-editing]")?.addEventListener("click", () => {
+  closeModal();
+  setPageEditing(false);
+  stopPageCanvasEditing();
+});
 const ownerControls = document.querySelector("[data-owner-controls]");
 const ownerControlsToggle = document.querySelector("[data-toggle-owner-controls]");
 function setOwnerControlsCollapsed(collapsed) {
@@ -166,12 +172,13 @@ window.addEventListener("resize", () => {
   const next = breakpoint();
   if (next !== previousBreakpoint) {
     previousBreakpoint = next;
+    if (next !== 16 && isPageCanvasEditing()) stopPageCanvasEditing();
     render();
   }
 });
 if (readNavigationCookie("sn-sidebar-collapsed") === "1")
   dashboard?.classList.add("is-collapsed");
-if (localStorage.getItem("sn-sidebar-editing") === "1") setPageEditing(true);
+if (document.body.dataset.owner === "true" && localStorage.getItem("sn-sidebar-editing") === "1") setPageEditing(true);
 refreshCanvasEditButton();
 updatePageStepper();
 if (document.body.dataset.backgroundSource === "bing") {

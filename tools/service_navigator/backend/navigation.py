@@ -7,6 +7,16 @@ from .database import *
 from .sites import _owner_site
 
 
+def _detected_icon_defaults(icon: dict[str, Any], has_favicon: bool) -> dict[str, Any]:
+    """Resolve untouched detected icons against the service's latest favicon."""
+    if (icon.get("detected_service_id") and int(icon.get("preference_revision") or 1) == 1
+            and icon.get("icon_source") != "custom" and not icon.get("icon_filename")):
+        icon = {**icon, "icon_source": "favicon" if has_favicon else "text",
+                "favicon_service_id": icon["detected_service_id"] if has_favicon else None,
+                "icon_text": icon.get("icon_text") or icon["name"][:1], "icon_color_mode": "theme"}
+    return icon
+
+
 def _navigation_detail(site_id: str) -> dict[str, Any]:
     """Return the global icon library plus pages that reference its icons."""
     with conn() as database:
@@ -38,7 +48,10 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
 
     def icon_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         selected = [service_by_id[service_id] for service_id in service_ids.get(row["id"], []) if service_id in service_by_id]
-        item = dict(row)
+        item = _detected_icon_defaults(dict(row), any(
+            entry["id"] == dict(row).get("detected_service_id") and entry.get("faviconUrl")
+            for entry in selected))
+        row = item
         destination_type = item.get("destination_type") or "service"
         icon_url = ""
         if row["icon_source"] == "custom" and row["icon_filename"]:
@@ -49,6 +62,7 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
             "id": row["id"], "name": row["name"], "iconSource": row["icon_source"],
             "iconFilename": row["icon_filename"], "iconText": row["icon_text"],
             "iconColor": _normalise_accent_color(row["icon_color"]),
+            "iconColorMode": "theme" if item.get("icon_color_mode") == "theme" else "custom",
             "faviconServiceId": row["favicon_service_id"] or "",
             "detectedServiceId": dict(row).get("detected_service_id") or "",
             "destinationType": destination_type,
@@ -145,9 +159,10 @@ def create_nav_icon(payload: dict[str, Any], user: User) -> dict[str, Any]:
             raise ToolboxError("INVALID_NAV_SERVICES", "已探测服务图标只能关联当前服务", status_code=400, tool_id=TOOL_ID)
         icon_id, now = uuid4().hex, now_iso()
         database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,icon_text,
-            icon_color,favicon_service_id,detected_service_id,destination_type,external_url,external_favicon_filename,preference_revision,sort_order,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, site["id"], name,
+            icon_color,icon_color_mode,favicon_service_id,detected_service_id,destination_type,external_url,external_favicon_filename,preference_revision,sort_order,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, site["id"], name,
             source, "", str(payload.get("iconText") or "")[:4], _normalise_accent_color(payload.get("iconColor", "#4f7cff")),
+            "theme" if payload.get("iconColorMode") == "theme" else "custom",
             favicon_service_id or None, detected_service_id or None, destination_type, external_url, external_favicon_filename, 1, 0, now, now))
         database.executemany("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, service_id) for service_id in service_ids])
         database.commit()
@@ -162,7 +177,9 @@ def _navigation_icon_for_user(icon_id: str, user: User) -> dict[str, Any]:
 def update_nav_icon(icon_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
     site = _owner_site(user)
     with conn() as database:
-        old = _owned_icon(database, site["id"], icon_id)
+        old = dict(_owned_icon(database, site["id"], icon_id))
+        detected_service = database.execute("SELECT favicon_filename FROM service_navigator_services WHERE id=?", (old["detected_service_id"],)).fetchone()
+        old = _detected_icon_defaults(old, bool(detected_service and detected_service["favicon_filename"]))
         name = _clean_nav_name(payload.get("name", old["name"]), "图标名称")
         detected_service_id = str(old["detected_service_id"] or payload.get("detectedServiceId") or "")
         destination_type = _destination_type(payload.get("destinationType", old["destination_type"] or "service"), detected=bool(detected_service_id))
@@ -186,11 +203,12 @@ def update_nav_icon(icon_id: str, payload: dict[str, Any], user: User) -> dict[s
             or external_url != (old["external_url"] or "")
         )
         external_favicon_filename = _download_external_favicon(external_url) if should_refresh_favicon else (old_external_favicon if destination_type == "external" and source == "favicon" else "")
-        database.execute("""UPDATE service_navigator_nav_icons SET name=?,icon_source=?,icon_text=?,icon_color=?,
+        database.execute("""UPDATE service_navigator_nav_icons SET name=?,icon_source=?,icon_text=?,icon_color=?,icon_color_mode=?,
             favicon_service_id=?,destination_type=?,external_url=?,external_favicon_filename=?,preference_revision=preference_revision+1,updated_at=? WHERE id=?""",
             (name, source,
              str(payload.get("iconText", old["icon_text"]) or "")[:4],
-             _normalise_accent_color(payload.get("iconColor", old["icon_color"])), favicon_service_id or None,
+             _normalise_accent_color(payload.get("iconColor", old["icon_color"])),
+             "theme" if payload.get("iconColorMode", old["icon_color_mode"]) == "theme" else "custom", favicon_service_id or None,
              destination_type, external_url, external_favicon_filename, now_iso(), icon_id))
         if destination_type == "service" and ("serviceIds" in payload or old["destination_type"] != "service"):
             database.execute("DELETE FROM service_navigator_nav_icon_services WHERE icon_id=?", (icon_id,))
@@ -262,7 +280,7 @@ def update_nav_custom_icon(icon_id: str, filename: str, content: bytes, user: Us
         icon = _owned_icon(database, site["id"], icon_id)
         saved = f"{icon_id}-{uuid4().hex[:8]}{suffix}"
         (navigation_icon_dir() / saved).write_bytes(content)
-        database.execute("UPDATE service_navigator_nav_icons SET icon_source='custom',icon_filename=?,external_favicon_filename='',updated_at=? WHERE id=?", (saved, now_iso(), icon_id))
+        database.execute("UPDATE service_navigator_nav_icons SET icon_source='custom',icon_filename=?,external_favicon_filename='',preference_revision=preference_revision+1,updated_at=? WHERE id=?", (saved, now_iso(), icon_id))
         database.commit()
     _remove_navigation_icon(icon["icon_filename"])
     _remove_navigation_icon(icon["external_favicon_filename"])
@@ -272,7 +290,7 @@ def clear_nav_custom_icon(icon_id: str, user: User) -> dict[str, Any]:
     site = _owner_site(user)
     with conn() as database:
         icon = _owned_icon(database, site["id"], icon_id)
-        database.execute("UPDATE service_navigator_nav_icons SET icon_source='text',icon_filename='',updated_at=? WHERE id=?", (now_iso(), icon_id))
+        database.execute("UPDATE service_navigator_nav_icons SET icon_source='text',icon_filename='',preference_revision=preference_revision+1,updated_at=? WHERE id=?", (now_iso(), icon_id))
         database.commit()
     _remove_navigation_icon(icon["icon_filename"])
     return _navigation_icon_for_user(icon_id, user)

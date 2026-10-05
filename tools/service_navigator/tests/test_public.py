@@ -80,3 +80,33 @@ def test_public_page_exposes_background_overlay_opacity(monkeypatch, tmp_path) -
     assert "--sn-card-opacity:0" in page.text
     assert '"cardBlur": false' in page.text
     assert '"backgroundOverlayOpacity": 37' in page.text
+
+
+def test_background_theme_public_data_and_private_gate_fallback(monkeypatch, tmp_path) -> None:
+    import json
+    import re
+
+    owner = User(id="theme-owner", username="owner", display_name="Owner")
+    monkeypatch.setattr(database, "root_dir", lambda: tmp_path)
+    database.RECOVERY_DONE = False
+    monkeypatch.setattr(access, "list_users", lambda: [owner])
+    monkeypatch.setattr(access, "can_access_tool", lambda _tool_id, _user: True)
+    service.create_site({"title": "Theme", "slug": "theme", "theme": "background", "accentColorMode": "background", "accentColor": "#123456"}, owner)
+    service.update_background_source("bing", owner)
+    site = service._owner_site(owner)
+    page = public.render_site(site, {"kind": "owner"}).body.decode()
+    payload = json.loads(re.search(r'<script id="sn-navigation-data" type="application/json">(.*?)</script>', page)[1])
+    imports = json.loads(re.search(r'<script type="importmap">(.*?)</script>', page)[1])["imports"]
+    assert imports["/tool-assets/service_navigator/public/service-interactions.js"].endswith(f"?v={public.ASSET_VERSION}")
+    assert imports["/tool-assets/service_navigator/public/theme.js"].endswith(f"?v={public.ASSET_VERSION}")
+    assert 'data-exit-editing type="button" hidden' in page
+    assert 'data-exit-editing' not in public.render_site(site, {"kind": "anonymous"}).body.decode()
+    assert payload["appearance"]["theme"] == "background"
+    assert payload["appearance"]["accentColorMode"] == "background"
+    assert payload["appearance"]["backgroundUrl"] == "/service-nav/background/theme"
+    monkeypatch.setattr(public, "get_optional_user", lambda _request: None)
+    gate = TestClient(_app()).get("/service-nav/theme")
+    assert gate.status_code == 401
+    assert "sn-theme-auto" in gate.text
+    assert "/service-nav/background/" not in gate.text
+    assert "--sn-user-accent:#123456" in gate.text

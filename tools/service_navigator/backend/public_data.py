@@ -63,6 +63,20 @@ def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> d
     """Return visitor-safe placements, with the icon library for the owner only."""
     services = {item["id"]: item for item in public_services(site)}
     detail = _navigation_detail(site["id"])
+    # Fixed cards share the detected icon's appearance, while their service
+    # identity, destination and layout remain controlled by the scan target.
+    for icon in detail["icons"]:
+        service_id = icon.get("detectedServiceId")
+        if service_id not in services:
+            continue
+        icon_url = icon.get("iconUrl", "")
+        if icon["iconSource"] == "favicon":
+            icon_url = services.get(icon.get("faviconServiceId"), {}).get("faviconUrl", "")
+        services[service_id]["navigationIcon"] = {
+            "id": icon["id"], "name": icon["name"], "iconSource": icon["iconSource"],
+            "iconText": icon["iconText"], "iconColor": icon["iconColor"],
+            "iconColorMode": icon["iconColorMode"], "iconUrl": icon_url,
+        }
     pages: list[dict[str, Any]] = []
     for page in detail["pages"]:
         responsive_layouts = _responsive_layouts(page["items"])
@@ -79,7 +93,7 @@ def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> d
                 items.append({
                     "id": item["id"], "iconId": item["iconId"], "name": item["name"], "size": item["size"],
                     "iconUrl": icon_url, "iconSource": source, "iconText": item.get("iconText", ""),
-                    "iconColor": item.get("iconColor", "#4f7cff"), "destinationType": "external",
+                    "iconColorMode": item.get("iconColorMode", "custom"), "iconColor": item.get("iconColor", "#4f7cff"), "destinationType": "external",
                     "externalUrl": item.get("externalUrl", ""), "layouts": responsive_layouts.get(item["id"], {}),
                     "services": [],
                 })
@@ -99,7 +113,7 @@ def public_navigation(site: dict[str, Any], *, include_icons: bool = False) -> d
                 icon_url = ""
             items.append({
                 "id": item["id"], "iconId": item["iconId"], "name": item["name"], "size": item["size"], "iconUrl": icon_url,
-                "iconSource": source, "iconText": item.get("iconText", ""), "iconColor": item.get("iconColor", "#4f7cff"),
+                "iconSource": source, "iconText": item.get("iconText", ""), "iconColorMode": item.get("iconColorMode", "custom"), "iconColor": item.get("iconColor", "#4f7cff"),
                 "destinationType": "service", "serviceType": next(iter(service_types)),
                 "layouts": responsive_layouts.get(item["id"], {}), "services": linked,
             })

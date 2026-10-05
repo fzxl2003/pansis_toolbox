@@ -16,6 +16,7 @@ class SitePayload(BaseModel):
     description: str = ""
     theme: str = "auto"
     accentColor: str = "#4f7cff"
+    accentColorMode: str = "custom"
     cardOpacity: int = 84
     cardBlur: bool = True
     backgroundOverlayOpacity: int = 50
@@ -88,6 +89,7 @@ class NavigationIconPayload(BaseModel):
     faviconServiceId: str = ""
     iconText: str = ""
     iconColor: str = "#4f7cff"
+    iconColorMode: str = "custom"
     serviceIds: list[str] = []
     detectedServiceId: str = ""
     destinationType: str = "service"

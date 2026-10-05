@@ -1,3 +1,4 @@
+import { textIconColor } from "./theme.js";
 import { data, modalContent } from "./state.js";
 import { escapeHtml, serviceName } from "./utils.js";
 import { closeModal, iconEdit, showModal } from "./modal.js";
@@ -15,6 +16,7 @@ export function iconPreviewNode(icon) {
         )?.faviconUrl || ""
       : "");
   if (url) {
+    if (icon?.iconSource === "favicon") node.dataset.faviconImage = "true";
     const image = new Image();
     image.src = url;
     image.alt = "";
@@ -28,7 +30,7 @@ export function iconPreviewNode(icon) {
         : "◌";
     fallback.style.color =
       icon?.iconSource === "text" || icon?.destinationType === "external"
-        ? icon.iconColor || ""
+        ? textIconColor(icon)
         : "";
     node.append(fallback);
   }
@@ -125,15 +127,17 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     iconSource: "text",
     iconText: "A",
     iconColor: "#4f7cff",
+    iconColorMode: "custom",
     serviceIds: [],
     destinationType: "service",
     externalUrl: "",
   }), ...(draft || {}) };
   showModal(
-    `<h2>${detected ? "编辑已探测服务图标" : icon ? "编辑自定义图标" : "添加自定义图标"}</h2><form class="sn-icon-form" data-icon-form><label>名称<input name="name" required></label><label>目标类型<select name="destination"><option value="service">关联服务</option><option value="external">外部链接</option></select></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option></select></label><div data-destination-fields></div><div data-source-fields></div><button class="sn-icon-preview" type="button" data-icon-preview><span data-icon-preview-image></span><span>图标预览</span><small>点击查看各尺寸效果</small></button><div><button class="sn-editor-save" type="submit">保存</button></div></form>`,
+    `<h2>${detected ? "编辑已探测服务图标" : icon ? "编辑自定义图标" : "添加自定义图标"}</h2><form class="sn-icon-form" data-icon-form><div class="sn-icon-form-content"><label>名称<input name="name" required></label><label>目标类型<select name="destination"><option value="service">关联服务</option><option value="external">外部链接</option></select></label><label>图标类型<select name="source"><option value="text">文字图标</option><option value="favicon">服务 favicon</option><option value="custom">上传图片</option></select></label><div data-destination-fields></div><div data-source-fields></div><button class="sn-icon-preview" type="button" data-icon-preview><span data-icon-preview-image></span><span>图标预览</span><small>点击查看各尺寸效果</small></button></div><div class="sn-icon-form-footer"><button class="sn-editor-save" type="submit">保存</button></div></form>`,
     "icon-form",
   );
   const form = modalContent.querySelector("[data-icon-form]");
+  let savedIconId = icon?.id || current.savedIconId || "";
   form.name.value = current.name;
   form.source.value = ["text", "favicon", "custom"].includes(current.iconSource)
     ? current.iconSource
@@ -219,6 +223,7 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     const box = form.querySelector("[data-icon-preview-image]");
     box.replaceChildren();
     const url = previewUrl();
+    box.toggleAttribute("data-favicon-image", form.source.value === "favicon" && Boolean(url));
     if (url) {
       const image = new Image();
       image.src = url;
@@ -235,7 +240,7 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
           : "◌";
       fallback.style.color =
         form.source.value === "text" || form.destination.value === "external"
-          ? form.querySelector('[name="color"]')?.value || ""
+          ? textIconColor({ iconColorMode: form.querySelector('[name="color-mode"]')?.value, iconColor: form.querySelector('[name="color"]')?.value })
           : "";
       box.append(fallback);
     }
@@ -246,7 +251,7 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     if (form.source.value === "text")
       box.insertAdjacentHTML(
         "beforeend",
-        '<label>图标文字<input name="text" maxlength="4" placeholder="A"></label><label>图标颜色<input name="color" type="color"></label>',
+        '<label>图标文字<input name="text" maxlength="4" placeholder="A"></label><label>文字颜色<select name="color-mode"><option value="custom">自定义</option><option value="theme">跟随主题色</option></select><input name="color" type="color"></label>',
       );
     if (form.source.value === "favicon" && form.destination.value === "service")
       box.insertAdjacentHTML(
@@ -264,6 +269,7 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
         '<label data-source-custom>上传图片<input name="file" type="file" accept=".png,.jpg,.jpeg,.webp,.ico"></label>',
       );
     const text = form.querySelector('[name="text"]');
+    const colorMode = form.querySelector('[name="color-mode"]');
     const color = form.querySelector('[name="color"]');
     const favicon = form.querySelector('[name="favicon"]');
     const file = form.querySelector('[name="file"]');
@@ -275,6 +281,10 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
       color.value = /^#[0-9a-f]{6}$/i.test(current.iconColor)
         ? current.iconColor
         : "#4f7cff";
+      colorMode.value = current.iconColorMode === "theme" ? "theme" : "custom";
+      const updateColorMode = () => { color.disabled = colorMode.value === "theme"; renderPreview(); };
+      colorMode.addEventListener("change", updateColorMode);
+      updateColorMode();
       color.addEventListener("input", renderPreview);
     }
     if (favicon) {
@@ -307,8 +317,14 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     renderPreview();
   };
   sourceFields();
-  form.source.addEventListener("change", sourceFields);
+  const rememberText = () => {
+    if (form.querySelector('[name="text"]')) current.iconText = form.querySelector('[name="text"]').value;
+    if (form.querySelector('[name="color"]')) current.iconColor = form.querySelector('[name="color"]').value;
+    if (form.querySelector('[name="color-mode"]')) current.iconColorMode = form.querySelector('[name="color-mode"]').value;
+  };
+  form.source.addEventListener("change", () => { rememberText(); sourceFields(); });
   form.destination.addEventListener("change", () => {
+    rememberText();
     if (form.destination.value === "external" && form.source.value === "text")
       form.source.value = "favicon";
     destinationFields();
@@ -319,10 +335,12 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     .addEventListener("click", () =>
       openGlobalIconSizePreview(
         {
+          savedIconId,
           name: form.name.value,
           iconSource: form.source.value,
           iconText: form.querySelector('[name="text"]')?.value || "",
-          iconColor: form.querySelector('[name="color"]')?.value || "",
+          iconColorMode: form.querySelector('[name="color-mode"]')?.value || current.iconColorMode || "custom",
+          iconColor: form.querySelector('[name="color"]')?.value || current.iconColor || "#4f7cff",
           faviconServiceId: form.querySelector('[name="favicon"]')?.value || "",
           destinationType: form.destination.value,
           externalUrl: form.querySelector('[name="external-url"]')?.value || "",
@@ -340,6 +358,9 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
     );
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const saveButton = form.querySelector('[type="submit"]');
+    if (saveButton.disabled) return;
+    saveButton.disabled = true;
     const destinationType = form.destination.value;
     const serviceIds = destinationType === "service" && detected
       ? [current.detectedServiceId]
@@ -347,10 +368,11 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
           (input) => input.value,
         ) : [];
     const body = {
+      iconColorMode: form.querySelector('[name="color-mode"]')?.value || current.iconColorMode || "custom",
       name: form.name.value,
       iconSource: form.source.value,
       iconText: form.querySelector('[name="text"]')?.value || "",
-      iconColor: form.querySelector('[name="color"]')?.value || "",
+      iconColor: form.querySelector('[name="color"]')?.value || current.iconColor || "#4f7cff",
       faviconServiceId:
         destinationType === "service" && form.source.value === "favicon"
           ? form.querySelector('[name="favicon"]')?.value || ""
@@ -363,11 +385,12 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
         : "",
     };
     try {
-      const result = icon
-        ? await ownerApi(`/navigation/icons/${icon.id}`, "PUT", body)
+      const result = savedIconId
+        ? await ownerApi(`/navigation/icons/${savedIconId}`, "PUT", body)
         : await ownerApi("/navigation/icons", "POST", body);
-      const iconId = icon?.id || result.icon?.id;
-      if (iconEdit.file && iconId) {
+      const iconId = savedIconId || result.icon?.id;
+      savedIconId = iconId;
+      if (form.source.value === "custom" && iconEdit.file && iconId) {
         const upload = new FormData();
         upload.append("file", iconEdit.file);
         const response = await fetch(
@@ -384,6 +407,8 @@ export function openGlobalIconForm(icon, restoreFile = false, onSaved = null, dr
       } else location.reload();
     } catch (error) {
       alert(error.message || "图标保存失败");
+    } finally {
+      saveButton.disabled = false;
     }
   });
 }

@@ -38,6 +38,11 @@ function updatePageStepper() {
   pageStepper.next.disabled = index < 0 || index >= visiblePageIds.length - 1;
 }
 
+document.body.classList.toggle(
+  "sn-card-blur-off",
+  data.appearance?.cardBlur === false,
+);
+
 function selectPage(pageId) {
   if (!pageId) return;
   stopPageCanvasEditing();

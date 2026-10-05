@@ -196,6 +196,8 @@ def init_database(database: sqlite3.Connection) -> None:
           visibility TEXT NOT NULL DEFAULT 'private', background_source TEXT NOT NULL DEFAULT 'default',
           theme TEXT NOT NULL DEFAULT 'auto', accent_color TEXT NOT NULL DEFAULT '#4f7cff',
           card_opacity INTEGER NOT NULL DEFAULT 84,
+          card_blur INTEGER NOT NULL DEFAULT 1,
+          background_overlay_opacity INTEGER NOT NULL DEFAULT 50,
           background_filename TEXT NOT NULL DEFAULT '', show_all_services INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
@@ -338,6 +340,8 @@ def init_database(database: sqlite3.Connection) -> None:
     _ensure_column(database, "service_navigator_sites", "theme", "TEXT NOT NULL DEFAULT 'auto'")
     _ensure_column(database, "service_navigator_sites", "accent_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
     _ensure_column(database, "service_navigator_sites", "card_opacity", "INTEGER NOT NULL DEFAULT 84")
+    _ensure_column(database, "service_navigator_sites", "card_blur", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(database, "service_navigator_sites", "background_overlay_opacity", "INTEGER NOT NULL DEFAULT 50")
     _ensure_column(database, "service_navigator_nav_items", "icon_text", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(database, "service_navigator_nav_items", "icon_color", "TEXT NOT NULL DEFAULT '#4f7cff'")
     _ensure_column(database, "service_navigator_nav_items", "icon_id", "TEXT")
@@ -431,6 +435,8 @@ def _site_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "backgroundFilename": item.get("background_filename", ""), "showAllServices": bool(item.get("show_all_services", 1)),
         "theme": _normalise_site_theme(item.get("theme", "auto")), "accentColor": _normalise_accent_color(item.get("accent_color", "#4f7cff")),
         "cardOpacity": _normalise_card_opacity(item.get("card_opacity", 84)),
+        "cardBlur": bool(item.get("card_blur", 1)),
+        "backgroundOverlayOpacity": _normalise_background_overlay_opacity(item.get("background_overlay_opacity", 50)),
         "createdAt": item["created_at"], "updatedAt": item["updated_at"],
     }
 
@@ -527,7 +533,21 @@ def _normalise_card_opacity(value: Any) -> int:
         opacity = int(value)
     except (TypeError, ValueError):
         return 84
-    return min(100, max(20, opacity))
+    return min(100, max(0, opacity))
+
+
+def _normalise_card_blur(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "on", "yes"}
+    return bool(value)
+
+
+def _normalise_background_overlay_opacity(value: Any) -> int:
+    try:
+        opacity = int(value)
+    except (TypeError, ValueError):
+        return 50
+    return min(100, max(0, opacity))
 
 
 def _compact_port_ranges(ports: set[int]) -> str:
@@ -601,6 +621,8 @@ __all__ = [
     "_migrate_navigation_icons",
     "_normalise_accent_color",
     "_normalise_card_opacity",
+    "_normalise_card_blur",
+    "_normalise_background_overlay_opacity",
     "_normalise_site_theme",
     "_row",
     "_run_public",

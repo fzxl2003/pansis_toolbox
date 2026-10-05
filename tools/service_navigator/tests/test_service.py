@@ -64,16 +64,24 @@ def test_fixed_target_pages_support_ordering(isolated_storage, owner: User) -> N
     assert duplicate.value.code == "INVALID_TARGET_ORDER"
 
 
-def test_site_appearance_persists_only_valid_theme_accent_and_card_opacity(isolated_storage, owner: User) -> None:
+def test_site_appearance_persists_only_valid_theme_accent_and_opacity_settings(isolated_storage, owner: User) -> None:
     service.create_site({"title": "Lab", "slug": "lab-services"}, owner)
-    updated = service.update_site({"theme": "light", "accentColor": " #7C3AED ", "cardOpacity": 62}, owner)
+    assert service.get_site(owner)["site"]["cardBlur"] is True
+    updated = service.update_site({"theme": "light", "accentColor": " #7C3AED ", "cardOpacity": 0, "cardBlur": "false", "backgroundOverlayOpacity": 0}, owner)
     assert updated["site"]["theme"] == "light"
     assert updated["site"]["accentColor"] == "#7c3aed"
-    assert updated["site"]["cardOpacity"] == 62
-    reset = service.update_site({"theme": "sepia", "accentColor": "purple", "cardOpacity": 999}, owner)
+    assert updated["site"]["cardOpacity"] == 0
+    assert updated["site"]["cardBlur"] is False
+    assert updated["site"]["backgroundOverlayOpacity"] == 0
+    reset = service.update_site({"theme": "sepia", "accentColor": "purple", "cardOpacity": 999, "backgroundOverlayOpacity": 999}, owner)
     assert reset["site"]["theme"] == "auto"
     assert reset["site"]["accentColor"] == "#4f7cff"
     assert reset["site"]["cardOpacity"] == 100
+    assert reset["site"]["backgroundOverlayOpacity"] == 100
+    reset = service.update_site({"backgroundOverlayOpacity": -1}, owner)
+    assert reset["site"]["backgroundOverlayOpacity"] == 0
+    reset = service.update_site({"cardOpacity": -1}, owner)
+    assert reset["site"]["cardOpacity"] == 0
 
 
 def test_python_fingerprints_and_rescan_preserves_overrides(isolated_storage, owner: User) -> None:

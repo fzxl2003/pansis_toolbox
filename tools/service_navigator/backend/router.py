@@ -17,6 +17,8 @@ class SitePayload(BaseModel):
     theme: str = "auto"
     accentColor: str = "#4f7cff"
     cardOpacity: int = 84
+    cardBlur: bool = True
+    backgroundOverlayOpacity: int = 50
 
 
 class TargetPayload(BaseModel):

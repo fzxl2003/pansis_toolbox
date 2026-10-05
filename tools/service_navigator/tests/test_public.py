@@ -54,7 +54,7 @@ def test_light_theme_is_applied_to_the_private_gate(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(access, "list_users", lambda: [owner])
     monkeypatch.setattr(access, "can_access_tool", lambda _tool_id, _user: True)
     monkeypatch.setattr(public, "get_optional_user", lambda _request: None)
-    service.create_site({"title": "Light Lab", "slug": "light-lab", "theme": "light"}, owner)
+    service.create_site({"title": "Light Lab", "slug": "light-lab", "theme": "light", "backgroundOverlayOpacity": 37}, owner)
     service.add_password("Guests", "secret", owner)
 
     gate = TestClient(_app()).get("/service-nav/light-lab")
@@ -62,3 +62,21 @@ def test_light_theme_is_applied_to_the_private_gate(monkeypatch, tmp_path) -> No
     assert gate.status_code == 401
     assert 'sn-gate-page sn-dashboard-body sn-theme-light' in gate.text
     assert "--sn-user-accent:#4f7cff" in gate.text
+
+
+def test_public_page_exposes_background_overlay_opacity(monkeypatch, tmp_path) -> None:
+    owner = User(id="appearance-public-owner", username="appearance-owner", display_name="Appearance Owner")
+    monkeypatch.setattr(database, "root_dir", lambda: tmp_path)
+    database.RECOVERY_DONE = False
+    monkeypatch.setattr(access, "list_users", lambda: [owner])
+    monkeypatch.setattr(access, "can_access_tool", lambda _tool_id, _user: True)
+    monkeypatch.setattr(public, "get_optional_user", lambda _request: owner)
+    service.create_site({"title": "Appearance Lab", "slug": "appearance-lab", "cardOpacity": 0, "cardBlur": False, "backgroundOverlayOpacity": 37}, owner)
+
+    page = TestClient(_app()).get("/service-nav/appearance-lab")
+
+    assert page.status_code == 200
+    assert "--sn-background-overlay-opacity:37%" in page.text
+    assert "--sn-card-opacity:0" in page.text
+    assert '"cardBlur": false' in page.text
+    assert '"backgroundOverlayOpacity": 37' in page.text

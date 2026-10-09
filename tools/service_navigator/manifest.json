@@ -1,0 +1,15 @@
+{
+  "id": "service_navigator",
+  "name": "服务导航",
+  "description": "手动扫描 IP 或域名的 TCP 服务，并发布可控访问的服务导航页。",
+  "version": "1.0.0",
+  "enabled": true,
+  "category": "network",
+  "icon": {"type": "lucide", "name": "radar"},
+  "displayMode": "standard",
+  "entry": {"frontend": "frontend/index.tsx", "backend": "backend/router.py"},
+  "api": {"prefix": "/api/tools/service-navigator"},
+  "widgets": [],
+  "dependencies": {},
+  "permissions": {"filesystem": true, "network": true, "longRunningTask": true, "userData": true}
+}

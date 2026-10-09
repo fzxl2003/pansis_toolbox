@@ -26,12 +26,15 @@ storage/          本地数据库、上传文件和用户工具数据
 | `ssh_workspace`      | SSH 工作台         | `ops`     | `/api/tools/ssh-workspace`      | `paramiko`, `cryptography` |
 | `text_cleaner`       | 文本清洗           | `text`    | `/api/tools/text-cleaner`       | 无                             |
 | `url_navigator`      | 网址导航           | `network` | `/api/tools/url-navigator`      | 无                             |
+| `service_navigator`  | 服务导航           | `network` | `/api/tools/service-navigator`  | 无                             |
 | `web_proxy`          | 网页代理           | `network` | `/web-proxy`                    | 内置 Rammerhead Node sidecar   |
 | `git_blog`           | Git 博客           | `text`    | `/api/tools/git-blog`           | Git、Node Markdown renderer    |
 
 ## 本地环境配置
 
 推荐使用 Conda 环境 `pansis_toolbox`。当前仓库在该环境下验证过 Python 测试和前端构建。
+
+“服务导航”使用 Python 标准库进行 TCP 连接和轻量协议探测，无需安装 Nmap 或其他扫描程序。
 
 ```bash
 conda create -n pansis_toolbox python=3.11 nodejs -c conda-forge

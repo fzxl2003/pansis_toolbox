@@ -38,6 +38,14 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      // Service Navigator renders its visitor pages on the FastAPI server,
+      // just like Git Blog.  Without this forwarding Vite falls back to the
+      // SPA route and React Router shows its development 404 boundary.
+      '/service-nav': {
+        target: 'http://127.0.0.1:8000',
+        ws: true,
+        changeOrigin: true,
+      },
       '/tool-assets': {
         target: 'http://127.0.0.1:8000',
         ws: true,

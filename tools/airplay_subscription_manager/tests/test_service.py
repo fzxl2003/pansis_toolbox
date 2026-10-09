@@ -482,8 +482,8 @@ def test_rule_provider_library_crud_and_package(tmp_path, monkeypatch) -> None:
     user = User(id="provider-user", username="provider", display_name="Provider")
 
     builtins = service.list_rule_providers(user)
-    assert len(builtins) == 11
-    assert {item["providerKey"] for item in builtins} >= {"ai-platforms", "google", "common-overseas", "ads", "china", "private-network", "microsoft", "apple", "steam"}
+    assert len(builtins) == 13
+    assert {item["providerKey"] for item in builtins} >= {"ai-platforms", "google", "common-overseas", "ads", "china", "private-network", "microsoft", "apple", "steam", "cryptocurrency", "cn-stock-platforms"}
     assert all(item["builtin"] for item in builtins)
 
     selected = [next(item for item in builtins if item["providerKey"] == key)["id"] for key in ("ai-platforms", "google")]
@@ -524,6 +524,78 @@ def test_rule_provider_library_crud_and_package(tmp_path, monkeypatch) -> None:
     service.delete_rule_provider(custom["id"], user)
     assert all(item["id"] != custom["id"] for item in service.list_rule_providers(user))
 
+
+
+
+@pytest.mark.parametrize("customized", [False, True])
+def test_legacy_steam_provider_upgrade_preserves_bindings_and_user_edits(tmp_path, monkeypatch, customized) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="steam-upgrade-user", username="steam", display_name="Steam")
+    service.list_rule_providers(user)
+    legacy_config = {
+        "type": "http", "behavior": "domain", "interval": 86400,
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/steam.yaml",
+        "path": "./ruleset/steam.yaml", "payload": ["+.steamcontent.com"],
+        "fetchedAt": "2026-01-01T00:00:00+00:00", "fetchError": "",
+    }
+    if customized:
+        legacy_config["url"] = "https://example.invalid/custom-steam.yaml"
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        conn.execute("UPDATE csm_rule_providers SET name='Steam',description=?,config_json=? WHERE id='builtin-provider-steam'",
+                     ("Steam 商店、客户端、游戏下载与社区服务。", service._json(legacy_config)))
+    service._initialized.clear()
+    providers = service.list_rule_providers(user)
+    games = next(item for item in providers if item["id"] == "builtin-provider-steam")
+    assert games["providerKey"] == "steam"
+    assert len(providers) == 13
+    if customized:
+        assert games["name"] == "Steam"
+        assert games["config"] == legacy_config
+    else:
+        assert games["name"] == "游戏平台"
+        assert games["config"]["type"] == "manual"
+        assert "fetchedAt" not in games["config"]
+        packaged = service.package_rule_providers([games["id"]], "PROXY", user)
+        assert packaged["providers"] == {}
+        assert "DOMAIN,store.steampowered.com,PROXY" in packaged["rules"]
+    service._initialized.clear()
+    assert service.list_rule_providers(user) == providers
+
+
+def test_builtin_games_routes_services_without_matching_steam_download_cdns() -> None:
+    games = next(item for item in service.BUILTIN_RULE_PROVIDERS if item["id"] == "builtin-provider-steam")
+    rules = service._manual_provider_rules(games["config"], "PROXY")
+
+    def matches(host: str) -> bool:
+        for rule in rules:
+            kind, domain, target = rule.split(",")
+            assert target == "PROXY"
+            if host == domain or (kind == "DOMAIN-SUFFIX" and host.endswith("." + domain)):
+                return True
+        return False
+
+    for host in ("store.steampowered.com", "api.steampowered.com", "steamcommunity.com",
+                 "store.playstation.com", "accounts.nintendo.com", "ec.nintendo.com",
+                 "accounts.nintendo.co.jp", "eshop.nintendoswitch.cn", "xsts.auth.xboxlive.com",
+                 "store.epicgames.com", "accounts.ea.com", "connect.ubisoft.com",
+                 "account.battle.net", "www.gog.com", "auth.riotgames.com"):
+        assert matches(host), host
+    for host in ("cdn.steamcontent.com", "alibaba.cdn.steampipe.steamcontent.com",
+                 "content1.steampowered.com", "content2.steampowered.com",
+                 "client-download.steampowered.com", "cdn.steamstatic.com",
+                 "steampipe.akamaized.net", "steampipe-kr.akamaized.net",
+                 "steampipe-partner.akamaized.net", "steamcdn-a.akamaihd.net",
+                 "steam.apac.qtlglb.com", "steam.cdn.on.net", "steam.cdn.orcon.net.nz",
+                 "steam.cdn.slingshot.co.nz", "steam.cdn.webra.ru",
+                 "a4e8s8k3.map2.ssl.hwcdn.net", "f3b7q2p3.ssl.hwcdn.net",
+                 "edge.steam-dns.top.comcast.net", "dl.steam.clngaa.com",
+                 "st.dl.bscstorage.net", "st.dl.eccdnx.com", "st.dl.pinyuncloud.com",
+                 "steampowered.com.8686c.com", "steamstatic.com.8686c.com",
+                 "lv.queniujq.cn", "xz.pphimalayanrt.com", "gstore.val.manlaxy.com"):
+        assert not matches(host), host
 
 
 def test_rule_subscription_is_cached_with_generated_hidden_key_and_packaged_inline(tmp_path, monkeypatch) -> None:

@@ -84,7 +84,41 @@ BUILTIN_RULE_PROVIDERS: tuple[dict[str, Any], ...] = (
     {"id": "builtin-provider-private", "name": "私有网络", "providerKey": "private-network", "description": "局域网、私有域名及本地服务，可用于 DIRECT 策略。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.yaml", "path": "./ruleset/private-network.yaml"}},
     {"id": "builtin-provider-microsoft", "name": "Microsoft", "providerKey": "microsoft", "description": "Windows、Office、OneDrive、Xbox 等 Microsoft 服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/microsoft.yaml", "path": "./ruleset/microsoft.yaml"}},
     {"id": "builtin-provider-apple", "name": "Apple", "providerKey": "apple", "description": "App Store、iCloud、Apple 更新及相关服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/apple.yaml", "path": "./ruleset/apple.yaml"}},
-    {"id": "builtin-provider-steam", "name": "Steam", "providerKey": "steam", "description": "Steam 商店、客户端、游戏下载与社区服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/steam.yaml", "path": "./ruleset/steam.yaml"}},
+    {"id": "builtin-provider-crypto", "name": "加密货币", "providerKey": "cryptocurrency", "description": "Binance、OKX、Coinbase、Bybit 等交易所，以及行情、钱包和区块链服务。", "config": {"type": "http", "behavior": "domain", "interval": 86400, "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-cryptocurrency.yaml", "path": "./ruleset/cryptocurrency.yaml"}},
+    {"id": "builtin-provider-cn-stocks", "name": "国内股票平台", "providerKey": "cn-stock-platforms", "description": "同花顺、东方财富、雪球、通达信、大智慧、财联社及和讯，可用于 DIRECT 策略。", "config": {"type": "manual", "behavior": "domain", "payload": [
+        "+.10jqka.com.cn", "+.ths123.com", "+.eastmoney.com", "+.dfcfw.com",
+        "+.1234567.com.cn", "+.18.cn", "+.18.com.cn", "+.guba.com.cn",
+        "+.xueqiu.com", "+.snowballsecurities.com", "+.tdx.com.cn",
+        "+.tdx.com", "+.gw.com.cn", "+.dzh.com.cn", "+.cls.cn", "+.hexun.com",
+    ]}},
+    # Keep the Steam ID/key so existing strategy bindings continue to work.
+    # Steam download hosts can live below steampowered.com / steamstatic.com;
+    # only include selected service hosts, never those broad parent suffixes.
+    # Sources: v2fly/domain-list-community data/{steam,playstation,nintendo,xbox}.
+    {"id": "builtin-provider-steam", "name": "游戏平台", "providerKey": "steam", "description": "Steam 商店与社区、PlayStation、Nintendo/Switch、Xbox、Epic、EA、Ubisoft、Battle.net、GOG 和 Riot；排除 Steam 游戏下载 CDN。", "config": {"type": "manual", "behavior": "domain", "payload": [
+        "steampowered.com", "www.steampowered.com", "store.steampowered.com",
+        "checkout.steampowered.com", "help.steampowered.com", "login.steampowered.com",
+        "api.steampowered.com", "partner.steampowered.com", "+.steamcommunity.com",
+        "+.steam-chat.com", "+.steam-api.com", "+.steam.tv", "+.s.team",
+        "+.steamdeck.com", "+.valvesoftware.com", "+.valve.net",
+        "community.steamstatic.com", "store.steamstatic.com", "shared.steamstatic.com",
+        "steamcommunity-a.akamaihd.net", "steamstore-a.akamaihd.net",
+        "steambroadcast.akamaized.net", "steammobile.akamaized.net",
+        "+.playstation", "+.playstation.com", "+.playstation.net", "+.sonyentertainmentnetwork.com",
+        "+.nintendo.com", "+.nintendo.net", "+.nintendo.co.jp", "+.nintendo.co.uk",
+        "+.nintendo.co.kr", "+.nintendo.com.hk", "+.nintendo.tw", "+.nintendo.eu",
+        "+.nintendo.de", "+.nintendo.fr", "+.nintendo.it", "+.nintendo.es",
+        "+.nintendo.com.au", "+.nintendonetwork.net", "+.nintendoswitch.com",
+        "+.nintendoswitch.net", "+.nintendoswitch.cn", "+.nintendoswitch.com.cn",
+        "+.xbox", "+.xbox.com", "+.xboxlive.com", "+.xboxlive.cn",
+        "+.xboxservices.com", "+.xboxgamepass.com", "+.gamepass.com",
+        "+.epicgames.com", "+.epicgames.dev", "+.unrealengine.com", "+.fortnite.com",
+        "+.ea.com", "+.origin.com", "+.ubi.com", "+.ubisoft.com", "+.ubisoftconnect.com",
+        "+.battle.net", "+.battlenet.com", "+.blizzard.com", "+.blizzard.net",
+        "+.gog.com", "+.gog-statics.com", "+.riotgames.com", "+.riotcdn.net",
+        "+.leagueoflegends.com", "+.playvalorant.com", "+.rockstargames.com",
+        "+.socialclub.rockstargames.com", "+.bethesda.net",
+    ]}},
 )
 _initialized: set[str] = set()
 _init_lock = threading.Lock()
@@ -157,6 +191,20 @@ def _loads(value: str | None, fallback: Any) -> Any:
 def _seed_rule_providers(conn: sqlite3.Connection) -> None:
     now = _now()
     for item in BUILTIN_RULE_PROVIDERS:
+        if item["id"] == "builtin-provider-steam":
+            legacy = conn.execute("SELECT * FROM csm_rule_providers WHERE id=? AND is_builtin=1", (item["id"],)).fetchone()
+            if legacy:
+                config = _loads(legacy["config_json"], {})
+                # Upgrade only the original built-in, preserving user edits and copies.
+                original = {"type": "http", "behavior": "domain",
+                            "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/steam.yaml",
+                            "path": "./ruleset/steam.yaml"}
+                if (legacy["name"] == "Steam" and legacy["provider_key"] == "steam"
+                        and legacy["description"] == "Steam 商店、客户端、游戏下载与社区服务。"
+                        and all(config.get(key) == value for key, value in original.items())
+                        and set(config) <= {*original, "interval", "payload", "fetchedAt", "fetchError"}):
+                    conn.execute("UPDATE csm_rule_providers SET name=?,description=?,config_json=?,updated_at=? WHERE id=?",
+                                 (item["name"], item["description"], _json(item["config"]), now, item["id"]))
         conn.execute("""INSERT OR IGNORE INTO csm_rule_providers(
           id,name,provider_key,description,config_json,is_builtin,created_at,updated_at)
           VALUES(?,?,?,?,?,?,?,?)""", (item["id"], item["name"], item["providerKey"],

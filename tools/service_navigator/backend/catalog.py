@@ -12,6 +12,20 @@ def list_services(user: User) -> list[dict[str, Any]]:
         rows = database.execute("SELECT s.* FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=? ORDER BY s.display_name,s.port,s.id", (site["id"],)).fetchall()
     return [_service_public(row) for row in rows]
 
+def set_service_blocked(service_id: str, blocked: bool, user: User) -> dict[str, Any]:
+    site = _owner_site(user)
+    with conn() as database:
+        row = database.execute("""SELECT s.id FROM service_navigator_services s
+            JOIN service_navigator_targets t ON t.id=s.target_id
+            WHERE s.id=? AND t.site_id=?""", (service_id, site["id"])).fetchone()
+        if row is None:
+            raise ToolboxError("SERVICE_NOT_FOUND", "服务不存在", status_code=404, tool_id=TOOL_ID)
+        database.execute("UPDATE service_navigator_services SET blocked=?,updated_at=? WHERE id=?",
+                         (int(blocked), now_iso(), service_id))
+        database.commit()
+        updated = database.execute("SELECT * FROM service_navigator_services WHERE id=?", (service_id,)).fetchone()
+    return _service_public(updated)
+
 def update_service(service_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
     site = _owner_site(user)
     with conn() as database:
@@ -83,4 +97,4 @@ def default_command(service_name: str, host: str, port: int) -> str:
     template = COMMAND_TEMPLATES.get(normalized)
     return template.format(host=host, port=port) if template else f"{host}:{port}"
 
-__all__ = ['_clean_health_url', '_clean_navigation_url', 'default_command', 'list_services', 'update_service']
+__all__ = ['_clean_health_url', '_clean_navigation_url', 'default_command', 'list_services', 'set_service_blocked', 'update_service']

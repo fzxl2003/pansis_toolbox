@@ -51,8 +51,8 @@ export default function ServiceNavigatorTool() {
   const stats = useMemo(
     () => ({
       online:
-        detail?.services.filter((item) => item.state === "online").length || 0,
-      count: detail?.services.length || 0,
+        detail?.services.filter((item) => item.state === "online" && !item.blocked).length || 0,
+      count: detail?.services.filter((item) => !item.blocked).length || 0,
     }),
     [detail],
   );
@@ -267,6 +267,11 @@ export default function ServiceNavigatorTool() {
                   .catch(showError);
             }}
             onEditService={setService}
+            onBlockService={(item, blocked) => {
+              void apiPut(`${API}/services/${item.id}/block`, { blocked })
+                .then(() => load(true))
+                .catch(showError);
+            }}
           />
         </section>
       )}

@@ -218,6 +218,7 @@ def init_database(database: sqlite3.Connection) -> None:
           command_description TEXT NOT NULL DEFAULT '', service_template TEXT NOT NULL DEFAULT 'generic',
           service_type TEXT NOT NULL DEFAULT 'port',
           visible INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0,
+          blocked INTEGER NOT NULL DEFAULT 0,
           health_enabled INTEGER NOT NULL DEFAULT 1, health_url TEXT NOT NULL DEFAULT '',
           health_status TEXT NOT NULL DEFAULT 'unknown', last_health_checked_at TEXT,
           last_health_status_code INTEGER, last_health_latency_ms INTEGER, last_health_error TEXT NOT NULL DEFAULT '',
@@ -325,6 +326,7 @@ def init_database(database: sqlite3.Connection) -> None:
         """
     )
     _ensure_column(database, "service_navigator_services", "health_enabled", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(database, "service_navigator_services", "blocked", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(database, "service_navigator_services", "service_type", "TEXT NOT NULL DEFAULT 'port'")
     _ensure_column(database, "service_navigator_services", "command_description", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(database, "service_navigator_services", "service_template", "TEXT NOT NULL DEFAULT 'generic'")
@@ -415,7 +417,7 @@ def _migrate_navigation_icons(database: sqlite3.Connection) -> None:
             JOIN service_navigator_targets t ON t.id=s.target_id""").fetchall():
         if database.execute("SELECT 1 FROM service_navigator_nav_icons WHERE detected_service_id=? LIMIT 1", (service["id"],)).fetchone():
             continue
-        name = service["display_name"] or service["http_title"] or service["service_name"] or f"TCP/{service['port']}"
+        name = service["display_name"] or service["http_title"] or (service["service_name"] if service["service_name"] != "unknown" else "") or f"TCP/{service['port']}"
         source = "favicon" if service["favicon_filename"] else "text"
         icon_id, now = uuid4().hex, now_iso()
         database.execute("""INSERT INTO service_navigator_nav_icons(id,site_id,name,icon_source,icon_filename,
@@ -453,7 +455,7 @@ def _service_public(row: sqlite3.Row | dict[str, Any], *, include_fingerprint: b
     item = _row(row) if isinstance(row, sqlite3.Row) else dict(row)
     output = {
         "id": item["id"], "targetId": item["target_id"], "protocol": item["protocol"], "port": int(item["port"]),
-        "state": item["state"], "serviceName": item["service_name"], "httpTitle": item["http_title"],
+        "state": item["state"], "blocked": bool(item.get("blocked", 0)), "serviceName": item["service_name"], "httpTitle": item["http_title"],
         "detectedUrl": item["detected_url"], "displayName": item["display_name"],
         "description": item["description"], "navigationUrl": item["navigation_url"],
         "commandDescription": item.get("command_description") or item["connection_command"],

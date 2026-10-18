@@ -31,7 +31,7 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
         icons = database.execute("SELECT * FROM service_navigator_nav_icons WHERE site_id=? ORDER BY detected_service_id IS NULL,detected_service_id,sort_order,name,id", (site_id,)).fetchall()
         services = database.execute("""SELECT s.*,t.label AS target_label,t.address AS target_address
             FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id
-            WHERE t.site_id=? ORDER BY s.display_name,s.port,s.id""", (site_id,)).fetchall()
+            WHERE t.site_id=? AND s.blocked=0 ORDER BY s.display_name,s.port,s.id""", (site_id,)).fetchall()
         links = database.execute("""SELECT l.icon_id,l.service_id FROM service_navigator_nav_icon_services l
             JOIN service_navigator_nav_icons icon ON icon.id=l.icon_id WHERE icon.site_id=?""", (site_id,)).fetchall()
         layouts = database.execute("""SELECT l.* FROM service_navigator_nav_item_layouts l
@@ -51,6 +51,13 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
         item = _detected_icon_defaults(dict(row), any(
             entry["id"] == dict(row).get("detected_service_id") and entry.get("faviconUrl")
             for entry in selected))
+        detected = service_by_id.get(item.get("detected_service_id"))
+        if detected and (int(item.get("preference_revision") or 1) == 1
+                         or (item.get("name") or "").lower() == "unknown"):
+            name = detected["displayName"] or detected["httpTitle"] or (
+                detected["serviceName"] if detected["serviceName"] != "unknown" else ""
+            ) or f"TCP/{detected['port']}"
+            item = {**item, "name": name, "icon_text": name[:1]}
         row = item
         destination_type = item.get("destination_type") or "service"
         icon_url = ""
@@ -73,10 +80,13 @@ def _navigation_detail(site_id: str) -> dict[str, Any]:
             "createdAt": row["created_at"], "updatedAt": row["updated_at"],
         }
 
-    icon_by_id = {row["id"]: icon_public(row) for row in icons}
+    icon_by_id = {row["id"]: icon_public(row) for row in icons
+                  if not row["detected_service_id"] or row["detected_service_id"] in service_by_id}
     item_by_page: dict[str, list[dict[str, Any]]] = {}
     for row in items:
-        icon = icon_by_id[row["icon_id"]]
+        icon = icon_by_id.get(row["icon_id"])
+        if icon is None:
+            continue
         item_by_page.setdefault(row["page_id"], []).append({
             "id": row["id"], "pageId": row["page_id"], "iconId": row["icon_id"], "size": row["size"],
             **{key: value for key, value in icon.items() if key not in {"id", "detectedServiceId"}},

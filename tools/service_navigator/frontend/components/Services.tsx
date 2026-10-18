@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from "react";
-import { HeartPulse, Pencil, Radar, Trash2 } from "lucide-react";
+import { HeartPulse, Pencil, Radar, RotateCcw, ShieldOff, Trash2 } from "lucide-react";
 import { apiGet, apiPost } from "../../../../frontend/src/api/client";
 import { API, type Run, type Service, type Target } from "../types";
 import { Field, Modal, Progress } from "./shared";
@@ -12,6 +12,7 @@ export function TargetPool({
   onEditTarget,
   onDeleteTarget,
   onEditService,
+  onBlockService,
 }: {
   targets: Target[];
   services: Service[];
@@ -20,8 +21,10 @@ export function TargetPool({
   onEditTarget: (item: Target) => void;
   onDeleteTarget: (item: Target) => void;
   onEditService: (item: Service) => void;
+  onBlockService: (item: Service, blocked: boolean) => void;
 }) {
   const [health, setHealth] = useState<Service | null>(null);
+  const [blockedTarget, setBlockedTarget] = useState<Target | null>(null);
   const [snapshots, setSnapshots] = useState<
     {
       checkedAt: string;
@@ -47,7 +50,8 @@ export function TargetPool({
     <>
       {!targets.length && <p className="sn-empty">尚未添加扫描目标。</p>}
       {targets.map((target) => {
-        const targetServices = services.filter((item) => item.targetId === target.id);
+        const targetServices = services.filter((item) => item.targetId === target.id && !item.blocked);
+        const blockedServices = services.filter((item) => item.targetId === target.id && item.blocked);
         return (
         <section key={target.id} className="sn-target-service-group">
           <header className="sn-target-service-heading">
@@ -59,6 +63,7 @@ export function TargetPool({
             <div className="sn-target-service-actions">
               <button className="sn-icon-button" disabled={!!active} onClick={() => onScan(target.id)} title="扫描此目标" aria-label={`扫描 ${target.label}`}><Radar size={15} /></button>
               <button className="sn-icon-button" onClick={() => onEditTarget(target)} title="编辑目标" aria-label={`编辑 ${target.label}`}><Pencil size={14} /></button>
+              <button className="sn-icon-button" onClick={() => setBlockedTarget(target)} title="屏蔽端口" aria-label={`查看 ${target.label} 的屏蔽端口`}><ShieldOff size={14} />{blockedServices.length > 0 && <span className="sn-blocked-count">{blockedServices.length}</span>}</button>
               <button className="sn-icon-button danger" onClick={() => onDeleteTarget(target)} title="删除目标" aria-label={`删除 ${target.label}`}><Trash2 size={14} /></button>
             </div>
           </header>
@@ -117,6 +122,7 @@ export function TargetPool({
                         <Pencil size={14} />
                         整理
                       </button>
+                      <button className="sn-btn-link" onClick={() => onBlockService(item, true)} title={`屏蔽 TCP/${item.port}`}><ShieldOff size={14} />屏蔽</button>
                     </td>
                   </tr>
                 )) : <tr><td className="sn-target-service-empty" colSpan={4}>尚未发现服务，扫描该目标后会显示在这里。</td></tr>}
@@ -125,6 +131,19 @@ export function TargetPool({
         </section>
         );
       })}
+      {blockedTarget && (
+        <Modal title={`${blockedTarget.label} · 屏蔽端口`} onClose={() => setBlockedTarget(null)}>
+          <div className="sn-blocked-list">
+            {services.filter((item) => item.targetId === blockedTarget.id && item.blocked).length ?
+              services.filter((item) => item.targetId === blockedTarget.id && item.blocked).map((item) => (
+                <div key={item.id} className="sn-blocked-row">
+                  <span><strong>TCP/{item.port}</strong><small>{item.displayName || item.httpTitle || item.serviceName}</small></span>
+                  <button className="sn-btn-link" onClick={() => onBlockService(item, false)}><RotateCcw size={14} />放回</button>
+                </div>
+              )) : <p className="sn-muted">暂无屏蔽端口。</p>}
+          </div>
+        </Modal>
+      )}
       {health && (
         <Modal
           title={`${health.displayName || health.serviceName} · 健康度`}

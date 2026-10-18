@@ -41,6 +41,10 @@ class ServicePayload(BaseModel):
     healthUrl: str = ""
 
 
+class ServiceBlockPayload(BaseModel):
+    blocked: bool
+
+
 class HealthSettingsPayload(BaseModel):
     checkIntervalSeconds: int = 300
     emailRecipients: list[str] | str = []
@@ -187,6 +191,11 @@ def services(request: Request) -> dict:
 @router.put("/services/{service_id}")
 def update_service(request: Request, service_id: str, payload: ServicePayload) -> dict:
     return {"service": service.update_service(service_id, payload.model_dump(exclude_unset=True), require_user(request))}
+
+
+@router.put("/services/{service_id}/block")
+def block_service(request: Request, service_id: str, payload: ServiceBlockPayload) -> dict:
+    return {"service": service.set_service_blocked(service_id, payload.blocked, require_user(request))}
 
 
 @router.get("/navigation")

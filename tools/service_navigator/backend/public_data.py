@@ -12,7 +12,7 @@ from .scanning import _read_limited
 def public_services(site: dict[str, Any]) -> list[dict[str, Any]]:
     with conn() as database:
         rows = database.execute("""SELECT s.*,t.label AS target_label,t.address AS target_address FROM service_navigator_services s
-            JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=? ORDER BY t.label,t.address,s.display_name,s.port,s.id""", (site["id"],)).fetchall()
+            JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=? AND s.blocked=0 ORDER BY t.label,t.address,s.display_name,s.port,s.id""", (site["id"],)).fetchall()
     output = []
     for row in rows:
         item = _service_public(row, include_fingerprint=False)
@@ -53,7 +53,7 @@ def _responsive_layouts(items: list[dict[str, Any]]) -> dict[str, dict[str, dict
 
 def public_icon(service_id: str, site: dict[str, Any]) -> Path | None:
     with conn() as database:
-        row = database.execute("""SELECT s.favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE s.id=? AND t.site_id=?""", (service_id, site["id"])).fetchone()
+        row = database.execute("""SELECT s.favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE s.id=? AND t.site_id=? AND s.blocked=0""", (service_id, site["id"])).fetchone()
     if not row or not row["favicon_filename"]:
         return None
     path = (icon_dir() / Path(row["favicon_filename"]).name).resolve()

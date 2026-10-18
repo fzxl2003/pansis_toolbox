@@ -67,6 +67,8 @@ def update_site(payload: dict[str, Any], user: User) -> dict[str, Any]:
     return get_site(user) or {}
 
 def delete_site(user: User) -> None:
+    from .navigation import _remove_background, _remove_navigation_icon
+    from .scanning import _remove_icon
     site = _owner_site(user)
     with conn() as database:
         filenames = [row[0] for row in database.execute("SELECT favicon_filename FROM service_navigator_services s JOIN service_navigator_targets t ON t.id=s.target_id WHERE t.site_id=?", (site["id"],)).fetchall()]
@@ -141,6 +143,8 @@ def update_target(target_id: str, payload: dict[str, Any], user: User) -> dict[s
     return _target_public(row)
 
 def delete_target(target_id: str, user: User) -> None:
+    from .navigation import _cleanup_empty_navigation_items, _remove_navigation_icon
+    from .scanning import _remove_icon
     site = _owner_site(user)
     with conn() as database:
         _owned_target(database, site["id"], target_id)

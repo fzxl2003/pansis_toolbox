@@ -14,7 +14,7 @@ from backend.app.core.security import get_optional_user
 from tools.service_navigator.backend import service
 
 VISITOR_COOKIE_NAME = "service_navigator_visitor"
-ASSET_VERSION = "50"
+ASSET_VERSION = "51"
 
 
 def _esc(value: object) -> str:

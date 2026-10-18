@@ -15,6 +15,7 @@ export type Service = {
   port: number;
   protocol: string;
   state: string;
+  blocked: boolean;
   serviceType: "http" | "port";
   serviceTemplate: "generic" | "ssh" | "sftp" | "rdp" | "vnc" | "ftp" | "smb";
   serviceName: string;

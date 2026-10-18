@@ -64,6 +64,29 @@ def test_fixed_target_pages_support_ordering(isolated_storage, owner: User) -> N
     assert duplicate.value.code == "INVALID_TARGET_ORDER"
 
 
+def test_blocked_service_stays_hidden_after_rescan_and_can_be_restored(isolated_storage, owner: User) -> None:
+    site, target = _site_and_target(owner)
+    detected = {"port": 8080, "protocol": "tcp", "serviceName": "unknown", "product": "", "version": "",
+                "extraInfo": "", "resolvedAddresses": [], "httpTitle": "", "detectedUrl": "", "faviconFilename": ""}
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [detected])
+    item = service.list_services(owner)[0]
+    service.update_service(item["id"], {"displayName": "中文服务"}, owner)
+    icon = next(icon for icon in service.get_navigation(owner)["icons"] if icon["detectedServiceId"] == item["id"])
+    assert icon["name"] == "中文服务"
+
+    service.set_service_blocked(item["id"], True, owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [detected])
+    assert service.list_services(owner)[0]["blocked"] is True
+    assert service.public_navigation(site)["services"] == []
+    assert all(icon["detectedServiceId"] != item["id"] for icon in service.get_navigation(owner)["icons"])
+
+    service.set_service_blocked(item["id"], False, owner)
+    assert [entry["id"] for entry in service.public_navigation(site)["services"]] == [item["id"]]
+    service.delete_target(target["id"], owner)
+    assert service.list_targets(owner) == []
+    assert service.list_services(owner) == []
+
+
 def test_site_appearance_persists_only_valid_theme_accent_and_opacity_settings(isolated_storage, owner: User) -> None:
     service.create_site({"title": "Lab", "slug": "lab-services"}, owner)
     assert service.get_site(owner)["site"]["cardBlur"] is True

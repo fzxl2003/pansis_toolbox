@@ -394,3 +394,12 @@
 }
 /* Favicon artwork keeps its own transparency across cards and editor previews. */
 .sn-dashboard-body [data-favicon-image]{background:transparent!important;box-shadow:none!important}
+
+/* Keep owner actions visible when navigation or page content grows. */
+@media (min-width:700px){
+  .sn-dashboard .sn-sidebar{position:sticky;top:0;align-self:start;height:100vh;max-height:100vh;overflow:hidden}
+  .sn-dashboard .sn-sidebar nav{min-height:0;flex:1;overflow-y:auto;align-content:start}
+  .sn-dashboard .sn-sidebar-top,.sn-dashboard .sn-sidebar-footer{flex-shrink:0}
+  .sn-dashboard.is-collapsed .sn-sidebar{display:flex;flex-direction:column}
+  .sn-dashboard.is-collapsed .sn-sidebar nav{position:static;transform:none;align-content:center}
+}

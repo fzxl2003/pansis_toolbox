@@ -323,6 +323,7 @@ def init_database(database: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_pages_site ON service_navigator_nav_pages(site_id, sort_order);
         CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_items_page ON service_navigator_nav_items(page_id);
         CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_icons_site ON service_navigator_nav_icons(site_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_service_navigator_nav_icons_detected ON service_navigator_nav_icons(detected_service_id);
         """
     )
     _ensure_column(database, "service_navigator_services", "health_enabled", "INTEGER NOT NULL DEFAULT 1")
@@ -388,8 +389,14 @@ def init_database(database: sqlite3.Connection) -> None:
     with RECOVERY_LOCK:
         if not RECOVERY_DONE:
             database.execute("UPDATE service_navigator_scan_runs SET status='interrupted', finished_at=?, error='服务重启导致扫描中断' WHERE status IN ('queued','running')", (now_iso(),))
+            orphan_files = _prune_orphan_navigation_icons(database)
             RECOVERY_DONE = True
     database.commit()
+    if 'orphan_files' in locals():
+        for filename in orphan_files:
+            path = (navigation_icon_dir() / Path(filename).name).resolve()
+            if path.parent == navigation_icon_dir().resolve():
+                path.unlink(missing_ok=True)
 
 
 def _ensure_column(database: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -414,9 +421,9 @@ def _migrate_navigation_icons(database: sqlite3.Connection) -> None:
         database.executemany("INSERT OR IGNORE INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", [(icon_id, link["service_id"]) for link in links])
         database.execute("UPDATE service_navigator_nav_items SET icon_id=?,updated_at=? WHERE id=?", (icon_id, now, row["id"]))
     for service in database.execute("""SELECT s.*,t.site_id FROM service_navigator_services s
-            JOIN service_navigator_targets t ON t.id=s.target_id""").fetchall():
-        if database.execute("SELECT 1 FROM service_navigator_nav_icons WHERE detected_service_id=? LIMIT 1", (service["id"],)).fetchone():
-            continue
+            JOIN service_navigator_targets t ON t.id=s.target_id
+            LEFT JOIN service_navigator_nav_icons icon ON icon.detected_service_id=s.id
+            WHERE icon.id IS NULL""").fetchall():
         name = service["display_name"] or service["http_title"] or (service["service_name"] if service["service_name"] != "unknown" else "") or f"TCP/{service['port']}"
         source = "favicon" if service["favicon_filename"] else "text"
         icon_id, now = uuid4().hex, now_iso()
@@ -425,6 +432,18 @@ def _migrate_navigation_icons(database: sqlite3.Connection) -> None:
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (icon_id, service["site_id"], name, source, "",
             name[:1], "#4f7cff", "theme", service["id"] if source == "favicon" else None, service["id"], 1, 0, now, now))
         database.execute("INSERT INTO service_navigator_nav_icon_services(icon_id,service_id) VALUES(?,?)", (icon_id, service["id"]))
+
+
+def _prune_orphan_navigation_icons(database: sqlite3.Connection, site_id: str | None = None) -> list[str]:
+    """Remove service icons whose last linked service was deleted."""
+    clause = "AND icon.site_id=?" if site_id else ""
+    rows = database.execute(f"""SELECT icon.id,icon.icon_filename,icon.external_favicon_filename
+        FROM service_navigator_nav_icons icon
+        WHERE icon.destination_type='service' {clause}
+          AND NOT EXISTS (SELECT 1 FROM service_navigator_nav_icon_services link WHERE link.icon_id=icon.id)""",
+        (site_id,) if site_id else ()).fetchall()
+    database.executemany("DELETE FROM service_navigator_nav_icons WHERE id=?", [(row["id"],) for row in rows])
+    return [filename for row in rows for filename in (row["icon_filename"], row["external_favicon_filename"]) if filename]
 
 
 def _row(row: sqlite3.Row) -> dict[str, Any]:
@@ -475,7 +494,10 @@ def _service_public(row: sqlite3.Row | dict[str, Any], *, include_fingerprint: b
 
 
 def _run_public(row: sqlite3.Row) -> dict[str, Any]:
-    return {"id": row["id"], "targetId": row["target_id"], "status": row["status"], "requestedAt": row["requested_at"], "startedAt": row["started_at"], "finishedAt": row["finished_at"], "error": row["error"], "summary": json.loads(row["summary_json"] or "{}")}
+    summary = json.loads(row["summary_json"] or "{}")
+    # Individual open port arrays can be huge and are not used by the UI.
+    summary = {key: summary[key] for key in ("targetCount", "completedTargetCount", "successCount", "portCount", "completedPortCount") if key in summary}
+    return {"id": row["id"], "targetId": row["target_id"], "status": row["status"], "requestedAt": row["requested_at"], "startedAt": row["started_at"], "finishedAt": row["finished_at"], "error": row["error"], "summary": summary}
 
 
 def normalize_slug(value: str) -> str:
@@ -629,6 +651,7 @@ __all__ = [
     "_normalise_card_blur",
     "_normalise_background_overlay_opacity",
     "_normalise_site_theme",
+    "_prune_orphan_navigation_icons",
     "_row",
     "_run_public",
     "_service_public",

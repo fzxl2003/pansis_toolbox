@@ -149,6 +149,7 @@ def delete_target(target_id: str, user: User) -> None:
     with conn() as database:
         _owned_target(database, site["id"], target_id)
         filenames = [row[0] for row in database.execute("SELECT favicon_filename FROM service_navigator_services WHERE target_id=?", (target_id,)).fetchall()]
+        database.execute("DELETE FROM service_navigator_scan_runs WHERE target_id=?", (target_id,))
         database.execute("DELETE FROM service_navigator_targets WHERE id=?", (target_id,))
         navigation_filenames = _cleanup_empty_navigation_items(database, site["id"])
         database.commit()

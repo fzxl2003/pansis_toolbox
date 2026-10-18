@@ -85,6 +85,23 @@ def test_blocked_service_stays_hidden_after_rescan_and_can_be_restored(isolated_
     service.delete_target(target["id"], owner)
     assert service.list_targets(owner) == []
     assert service.list_services(owner) == []
+    assert service.get_navigation(owner)["icons"] == []
+
+
+def test_startup_removes_icons_orphaned_by_older_target_deletion(isolated_storage, owner: User) -> None:
+    _site, target = _site_and_target(owner)
+    service._persist_target_scan({"id": target["id"], "address": target["address"]}, [{
+        "port": 22, "protocol": "tcp", "serviceName": "ssh", "resolvedAddresses": [],
+        "httpTitle": "", "detectedUrl": "", "faviconFilename": "",
+    }])
+    assert len(service.get_navigation(owner)["icons"]) == 1
+    with service.conn() as database_connection:
+        database_connection.execute("DELETE FROM service_navigator_targets WHERE id=?", (target["id"],))
+        database_connection.commit()
+        assert database_connection.execute("SELECT COUNT(*) FROM service_navigator_nav_icons").fetchone()[0] == 1
+    database.RECOVERY_DONE = False
+    with service.conn() as database_connection:
+        assert database_connection.execute("SELECT COUNT(*) FROM service_navigator_nav_icons").fetchone()[0] == 0
 
 
 def test_site_appearance_persists_only_valid_theme_accent_and_opacity_settings(isolated_storage, owner: User) -> None:

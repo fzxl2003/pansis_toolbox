@@ -534,7 +534,7 @@ def _remove_background(filename: str) -> None:
         path.unlink(missing_ok=True)
 
 def _cleanup_empty_navigation_items(database: sqlite3.Connection, site_id: str) -> list[str]:
-    """Placement and icon cleanup is explicit; deleting services keeps library icons."""
-    return []
+    """Delete service icons that lost their final link when a target was removed."""
+    return _prune_orphan_navigation_icons(database, site_id)
 
 __all__ = ['_clean_nav_name', '_cleanup_empty_navigation_items', '_first_available_layout', '_library_source', '_nav_size', '_navigation_detail', '_navigation_icon_for_user', '_navigation_item_for_user', '_owned_icon', '_owned_item', '_owned_page', '_remove_background', '_remove_navigation_icon', '_validate_item_services', 'clear_nav_custom_icon', 'create_nav_icon', 'create_nav_item', 'create_nav_page', 'delete_nav_icon', 'delete_nav_item', 'delete_nav_page', 'get_navigation', 'list_nav_icons', 'reorder_nav_pages', 'save_nav_canvas', 'save_nav_layout', 'set_all_services_visible', 'update_background_source', 'update_custom_background', 'update_nav_custom_icon', 'update_nav_icon', 'update_nav_item', 'update_nav_page']

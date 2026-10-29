@@ -122,7 +122,19 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     assert profile["passwordRequired"] is True
     assert profile["ruleSetName"] == "basic rules"
     assert "targetKernel" not in profile
+    preview_metadata = service.preview_profile_metadata(profile["id"], user)
+    assert "yaml" not in preview_metadata
+    assert preview_metadata["yamlBytes"] > 0 and preview_metadata["yamlLines"] > 0
+    preview_page = service.preview_profile_yaml_page(profile["id"], user, limit=3)
+    assert len(preview_page["lines"]) == 3
     published = service.publish_profile(profile["id"], user)
+    assert "yaml" not in published
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        snapshot = conn.execute(
+            "SELECT details_encrypted FROM csm_published_snapshots WHERE profile_id=?", (profile["id"],)
+        ).fetchone()
+        snapshot_details = json.loads(service._decrypt(snapshot["details_encrypted"]))
+        assert snapshot_details["groups"][0]["providerIds"] == [provider["id"]]
     assert service.public_subscription(published["subscriptionToken"]) is None
     assert service.authenticate_public_profile(published["subscriptionToken"], "wrong-password") is None
     view_session = service.authenticate_public_profile(published["subscriptionToken"], "secret-pass")
@@ -139,6 +151,7 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
                      (service._id(), node_row["id"], "", now))
         conn.execute("INSERT INTO csm_refresh_runs(id,source_id,status,started_at,finished_at,duration_ms,nodes_before,nodes_after,error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                      (service._id(), source["id"], "success", now, now, 120, 1, 1, "", now))
+        conn.execute("UPDATE csm_published_snapshots SET details_encrypted='' WHERE profile_id=?", (profile["id"],))
     assert service.list_profiles(user)[0]["ruleSetName"] == "basic rules"
     result = service.public_subscription(
         published["subscriptionToken"], client_ip="127.0.0.1", user_agent="pytest"
@@ -153,10 +166,22 @@ def test_profile_publish_and_token_lookup(tmp_path, monkeypatch) -> None:
     assert details["proxies"][0]["country"] == "HK"
     assert details["proxies"][0]["countryLabel"] == "香港"
     assert details["proxies"][0]["latencyMs"] == 123
-    assert details["groups"][0]["providers"][0]["payload"] == ["example.com"]
+    assert "payload" not in details["groups"][0]["providers"][0]
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        conn.execute("UPDATE csm_rule_sets SET import_meta_json='{}' WHERE id=?", (rule_set["id"],))
+    rule_page = service.public_rule_provider_rules(
+        published["subscriptionToken"], provider["id"], limit=200
+    )
+    assert rule_page and rule_page["items"] == ["example.com"]
     assert details["requestRuns"][0]["clientIp"] == "127.0.0.1"
     assert details["requestRuns"][0]["userAgent"] == "pytest"
-    assert "vless" in details["yaml"]
+    assert "yaml" not in details
+    with database.user_tool_connection_context(user.id, service.TOOL_ID) as conn:
+        assert conn.execute(
+            "SELECT length(details_encrypted) FROM csm_published_snapshots WHERE profile_id=?", (profile["id"],)
+        ).fetchone()[0] > 0
+    yaml_page = service.public_subscription_yaml_page(published["subscriptionToken"])
+    assert yaml_page and any("vless" in line for line in yaml_page["lines"])
 
 
 def test_public_details_returns_scheduled_http_rule_provider_snapshot(tmp_path, monkeypatch) -> None:
@@ -203,7 +228,9 @@ def test_public_details_returns_scheduled_http_rule_provider_snapshot(tmp_path, 
     provider_details = details["groups"][0]["providers"][0]
     assert provider_details["kind"] == "规则订阅"
     assert provider_details["ruleCount"] == len(remote_payload)
-    assert provider_details["payload"] == remote_payload
+    assert "payload" not in provider_details
+    page = service.public_rule_provider_rules(published["subscriptionToken"], provider["id"], limit=3)
+    assert page and page["items"] == remote_payload[:3] and page["total"] == len(remote_payload)
     assert provider_details["error"] == ""
 
     # The scheduler refreshes due snapshots outside the public request path.
@@ -523,6 +550,31 @@ def test_rule_provider_library_crud_and_package(tmp_path, monkeypatch) -> None:
 
     service.delete_rule_provider(custom["id"], user)
     assert all(item["id"] != custom["id"] for item in service.list_rule_providers(user))
+
+
+def test_rule_provider_summaries_and_pages_bound_large_payloads(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="large-provider-user", username="large", display_name="Large")
+    rules = [f"rule-{index:06d}.example" for index in range(100_001)]
+    provider = service.save_rule_provider({
+        "name": "大型规则", "providerKey": "large-rules",
+        "config": {"type": "manual", "behavior": "domain", "payload": rules},
+    }, user)
+
+    summary = next(item for item in service.list_rule_provider_summaries(user) if item["id"] == provider["id"])
+    assert summary["ruleCount"] == len(rules)
+    assert "config" not in summary and "payload" not in json.dumps(summary)
+    assert len(json.dumps(summary)) < 1_000
+    detail = service.get_rule_provider(provider["id"], user)
+    assert "payload" not in detail["config"]
+    page = service.rule_provider_rules(provider["id"], user, offset=200, limit=200)
+    assert page["items"] == rules[200:400] and page["total"] == len(rules)
+    assert len(service.rule_provider_rules(provider["id"], user, limit=100_000)["items"]) == 500
+    searched = service.rule_provider_rules(provider["id"], user, search="099999")
+    assert searched["items"] == ["rule-099999.example"]
 
 
 
@@ -1031,14 +1083,14 @@ def test_subscription_details_html_layout() -> None:
 
     page = _subscription_details_html("token", {
         "name": "visual sub", "ruleSetName": "basic rules", "publishedAt": "2026-01-01T00:00:00+00:00",
-        "contentHash": "hash", "mode": "rule", "yaml": "mode: rule",
+        "contentHash": "hash", "mode": "rule", "yaml": "never-embed-yaml",
         "proxies": [{"name": "node", "type": "vless", "server": "example.org", "port": 443,
                      "country": "HK", "countryLabel": "香港",
                      "shareUri": "vless://uuid@example.org:443#node",
                      "latencyMs": 123, "reachable": True, "checkedAt": "2026-01-01T00:01:00+00:00"}],
         "groups": [{"name": "PROXY", "type": "select", "proxies": ["node"],
                     "providers": [{"name": "示例域名", "kind": "自定义", "behavior": "domain",
-                                   "ruleCount": 1, "payload": ["example.com"]}]}],
+                                   "ruleCount": 1, "payload": ["payload-only.example"]}]}],
         "requestRuns": [{"requestedAt": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
                          "clientIp": "127.0.0.1", "userAgent": "pytest", "statusCode": 200}],
     })
@@ -1059,7 +1111,11 @@ def test_subscription_details_html_layout() -> None:
     assert "123 ms" in page
     assert "国家或地区" in page
     assert 'data-country-code="HK">香港</td>' in page
-    assert "example.com" in page
+    assert "payload-only.example" not in page
+    assert "data-provider-dialog" in page
+    assert "/rules?offset=" in page
+    assert "data-yaml-code" in page
+    assert "never-embed-yaml" not in page
     assert "Rule Provider" not in page
     assert "<h2>规则</h2>" not in page
     protected_page = _subscription_details_html(
@@ -1094,6 +1150,27 @@ def test_closed_public_download_has_empty_response(monkeypatch) -> None:
 
     assert response.status_code == 404
     assert response.content == b""
+
+
+def test_public_lazy_detail_endpoints_enforce_view_access(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from tools.airplay_subscription_manager.backend.router import mount_extra
+
+    monkeypatch.setattr(service, "public_profile_access", lambda _token: {"passwordRequired": False})
+    monkeypatch.setattr(service, "public_subscription_yaml_page", lambda *_args, **_kwargs: {"lines": ["mode: rule"], "total": 1, "offset": 0, "limit": 300})
+    monkeypatch.setattr(service, "public_rule_provider_rules", lambda *_args, **_kwargs: {"items": ["example.test"], "total": 1, "offset": 0, "limit": 200})
+    app = FastAPI()
+    mount_extra(app)
+    client = TestClient(app)
+
+    assert client.get("/sub/airplay/details/token/yaml").json()["lines"] == ["mode: rule"]
+    assert client.get("/sub/airplay/details/token/providers/provider/rules").json()["items"] == ["example.test"]
+
+    monkeypatch.setattr(service, "public_profile_access", lambda _token: {"passwordRequired": True})
+    monkeypatch.setattr(service, "public_profile_session_valid", lambda *_args: False)
+    assert client.get("/sub/airplay/details/token/yaml").status_code == 404
+    assert client.get("/sub/airplay/details/token/providers/provider/rules").status_code == 404
 
 
 def test_external_base_url_honours_https_reverse_proxy() -> None:

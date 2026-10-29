@@ -1,8 +1,7 @@
 """Remote-tail TensorBoard progress collection and ETA calculations.
 
-Event files are never copied to the toolbox host.  ``REMOTE_COLLECTOR_SOURCE``
-is sent to ``python3 -`` over the already-authenticated SSH channel and emits a
-small JSON summary only.
+Event files are never copied to the toolbox host.  A small, versioned collector
+is cached per SSH account on the remote host and emits a JSON summary only.
 """
 from __future__ import annotations
 
@@ -235,7 +234,13 @@ if __name__ == '__main__':
         sys.exit(2)
 '''
 REMOTE_COLLECTOR_DIGEST = hashlib.sha256(REMOTE_COLLECTOR_SOURCE.encode("utf-8")).hexdigest()[:20]
-REMOTE_COLLECTOR_PATH = f"/tmp/tpm_progress_collector_{REMOTE_COLLECTOR_DIGEST}.py"
+REMOTE_COLLECTOR_LEGACY_PATH = f"/tmp/tpm_progress_collector_{REMOTE_COLLECTOR_DIGEST}.py"
+
+
+def _remote_collector_path(username: str) -> str:
+    """Namespace the cache by SSH account without exposing the username."""
+    account_digest = hashlib.sha256(str(username).encode("utf-8")).hexdigest()[:16]
+    return f"/tmp/tpm_progress_collector_{account_digest}_{REMOTE_COLLECTOR_DIGEST}.py"
 
 
 def init_database(user_id: str) -> None:
@@ -805,36 +810,58 @@ def _trim_report_history(conn: sqlite3.Connection, task_id: str, rate_report_cou
     conn.execute(f"DELETE FROM tpm_reports WHERE task_id=? AND id IN ({placeholders})", [task_id, *stale_ids])
 
 
-def _ensure_remote_collector_script(client: Any) -> str:
+def _remote_collector_file_valid(sftp: Any, path: str, payload: bytes) -> bool:
+    """Require exact bytes and private executable permissions before reuse."""
+    try:
+        attributes = sftp.stat(path)
+        if int(attributes.st_size) != len(payload) or int(attributes.st_mode) & 0o777 != 0o700:
+            return False
+        with sftp.open(path, "rb") as remote_file:
+            return hashlib.sha256(remote_file.read()).digest() == hashlib.sha256(payload).digest()
+    except (OSError, AttributeError):
+        return False
+
+
+def _ensure_remote_collector_script(client: Any, username: str) -> str:
     """Upload the versioned collector once per remote server/account."""
     payload = REMOTE_COLLECTOR_SOURCE.encode("utf-8")
+    path = _remote_collector_path(username)
     temporary = ""
     sftp = client.open_sftp()
     try:
-        try:
-            if int(sftp.stat(REMOTE_COLLECTOR_PATH).st_size) == len(payload):
-                return REMOTE_COLLECTOR_PATH
-        except OSError:
-            pass
-        temporary = f"{REMOTE_COLLECTOR_PATH}.{secrets.token_urlsafe(6)}.tmp"
+        if _remote_collector_file_valid(sftp, path, payload):
+            return path
+        temporary = f"{path}.{secrets.token_urlsafe(6)}.tmp"
         with sftp.open(temporary, "wb") as remote_file:
             remote_file.write(payload)
             remote_file.flush()
-        sftp.chmod(temporary, 0o600)
+        sftp.chmod(temporary, 0o700)
         try:
             # OpenSSH SFTP supports atomic replacement.  If another report
-            # deployed the same version first, accepting the same-size file
-            # avoids a needless retry.
-            sftp.posix_rename(temporary, REMOTE_COLLECTOR_PATH)
+            # deployed the same version first, accept it only after validating
+            # both the bytes and final permissions.
+            sftp.posix_rename(temporary, path)
         except (AttributeError, OSError):
             try:
-                sftp.rename(temporary, REMOTE_COLLECTOR_PATH)
+                sftp.rename(temporary, path)
             except OSError:
-                if int(sftp.stat(REMOTE_COLLECTOR_PATH).st_size) != len(payload):
+                if not _remote_collector_file_valid(sftp, path, payload):
                     raise
                 sftp.remove(temporary)
         temporary = ""
-        return REMOTE_COLLECTOR_PATH
+        sftp.chmod(path, 0o700)
+        if not _remote_collector_file_valid(sftp, path, payload):
+            raise OSError("uploaded collector failed content or permission validation")
+        return path
+    except ToolboxError:
+        raise
+    except Exception as exc:
+        raise ToolboxError(
+            "REMOTE_COLLECTOR_DEPLOY_FAILED",
+            f"无法部署远程采集脚本 {path}：{exc}",
+            status_code=502,
+            tool_id=TOOL_ID,
+        ) from exc
     finally:
         if temporary:
             try:
@@ -844,7 +871,7 @@ def _ensure_remote_collector_script(client: Any) -> str:
         sftp.close()
 
 
-def _remote_collector_command(python_command: str, script_path: str = REMOTE_COLLECTOR_PATH) -> str:
+def _remote_collector_command(python_command: str, script_path: str) -> str:
     """Keep the remote invocation small; request data is supplied via stdin."""
     return f"{_validate_python_command(python_command)} {shlex.quote(script_path)} --request-stdin-base64"
 
@@ -852,7 +879,10 @@ def _remote_collector_command(python_command: str, script_path: str = REMOTE_COL
 def _run_remote_collector(server: sqlite3.Row, python_command: str, config: dict[str, Any], previous_files: dict[str, dict[str, int]]) -> dict[str, Any]:
     request = base64.b64encode(json.dumps({"root": config["tensorboard_root"], "progress_tag": config["progress_tag"], "progress_mode": config["progress_mode"], "tail_bytes": config["tail_bytes"], "previous_files": previous_files}, separators=(",", ":")).encode()).decode()
     with ssh_connection_service.borrowed_client(_ssh_spec(server, 60)) as client:
-        command = _remote_collector_command(python_command, _ensure_remote_collector_script(client))
+        command = _remote_collector_command(
+            python_command,
+            _ensure_remote_collector_script(client, str(server["ssh_username"])),
+        )
         stdin, stdout, stderr = client.exec_command(command, timeout=120)
         # The cached file-state map can grow well beyond the OS argument limit.
         # It is request data, so send it over the SSH stream rather than argv.
@@ -1124,7 +1154,12 @@ def _run_task(user_id: str, task_id: str) -> dict[str, Any]:
                 remote = _run_remote_collector(server, task["python_command"], config, previous_files)
                 _merge_cached_progress(conn, task["id"], remote); summary, runs = _make_report(conn, task, server, config, remote); return _save_report(conn, task, summary, runs, config, remote, yaml_hash=yaml_hash)
             except Exception as exc:
-                message = exc.message if isinstance(exc, ToolboxError) else str(exc)
+                if isinstance(exc, ToolboxError):
+                    message = exc.message
+                    if exc.code == "REMOTE_COLLECTOR_DEPLOY_FAILED":
+                        message = f"{exc.code}: {message}"
+                else:
+                    message = str(exc)
                 return _save_report(conn, task, {"generatedAt": now_iso(), "counts": {}, "groups": [], "overallEtaSeconds": None, "overallEtaReason": message, "remoteErrors": []}, [], {}, error=message[:500])
     finally: lock.release()
 

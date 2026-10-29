@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import shlex
 import struct
 import subprocess
@@ -10,8 +12,12 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
-from tools.tensorboard_progress_monitor.backend.service import REMOTE_COLLECTOR_SOURCE, _child_color_group_param, _color_key_regex, _conda_python_runner, _find_group, _find_group_path, _glob_regex, _group_path_color_regex, _group_path_regex, _group_patterns, _invalidate_task_history, _layer_tb_url_params, _make_report, _match_group, _merge_tb_url_params, _parse_config, _previous_file_states, _regex_param, _remote_collector_command, _same_collection_config, _serialize_extra_params, _tb_environment_configured, _trim_report_history, _validate_remote_yaml_path, _validate_tb_environment, _yaml_hash
+import pytest
+
+from backend.app.core.errors import ToolboxError
+from tools.tensorboard_progress_monitor.backend.service import REMOTE_COLLECTOR_LEGACY_PATH, REMOTE_COLLECTOR_SOURCE, _child_color_group_param, _color_key_regex, _conda_python_runner, _ensure_remote_collector_script, _find_group, _find_group_path, _glob_regex, _group_path_color_regex, _group_path_regex, _group_patterns, _invalidate_task_history, _layer_tb_url_params, _make_report, _match_group, _merge_tb_url_params, _parse_config, _previous_file_states, _regex_param, _remote_collector_command, _remote_collector_path, _same_collection_config, _serialize_extra_params, _tb_environment_configured, _trim_report_history, _validate_remote_yaml_path, _validate_tb_environment, _yaml_hash
 
 
 def _varint(value: int) -> bytes:
@@ -73,6 +79,94 @@ def _collect(root: Path, mode: str, previous_files: dict[str, dict[str, int]] | 
 def test_remote_collector_command_uses_a_short_script_invocation() -> None:
     command = _remote_collector_command("python3", "/tmp/collector.py")
     assert command == "python3 /tmp/collector.py --request-stdin-base64"
+
+
+class _LocalSftp:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def _path(self, remote: str) -> Path:
+        return self.root / remote.lstrip("/").replace("/", "_")
+
+    def stat(self, remote: str) -> SimpleNamespace:
+        value = self._path(remote).stat()
+        return SimpleNamespace(st_size=value.st_size, st_mode=value.st_mode)
+
+    def open(self, remote: str, mode: str):
+        return self._path(remote).open(mode)
+
+    def chmod(self, remote: str, mode: int) -> None:
+        self._path(remote).chmod(mode)
+
+    def posix_rename(self, source: str, target: str) -> None:
+        os.replace(self._path(source), self._path(target))
+
+    rename = posix_rename
+
+    def remove(self, remote: str) -> None:
+        self._path(remote).unlink()
+
+    def close(self) -> None:
+        pass
+
+
+class _LocalSftpClient:
+    def __init__(self, sftp: _LocalSftp) -> None:
+        self.sftp = sftp
+
+    def open_sftp(self) -> _LocalSftp:
+        return self.sftp
+
+
+def test_remote_collector_cache_is_account_scoped_and_verified(tmp_path: Path) -> None:
+    sftp = _LocalSftp(tmp_path)
+    client = _LocalSftpClient(sftp)
+    first = _remote_collector_path("alice")
+    second = _remote_collector_path("bob")
+    assert first != second
+
+    deployed = _ensure_remote_collector_script(client, "alice")
+    local = sftp._path(deployed)
+    assert deployed == first
+    assert local.read_text(encoding="utf-8") == REMOTE_COLLECTOR_SOURCE
+    assert local.stat().st_mode & 0o777 == 0o700
+
+    # Same-size corruption and wrong permissions must never pass the cache check.
+    local.write_bytes(b"x" * len(REMOTE_COLLECTOR_SOURCE.encode("utf-8")))
+    local.chmod(0o600)
+    assert _ensure_remote_collector_script(client, "alice") == first
+    assert local.read_text(encoding="utf-8") == REMOTE_COLLECTOR_SOURCE
+    assert local.stat().st_mode & 0o777 == 0o700
+
+    legacy = sftp._path(REMOTE_COLLECTOR_LEGACY_PATH)
+    legacy.write_text("owned by another account", encoding="utf-8")
+    legacy.chmod(0o600)
+    _ensure_remote_collector_script(client, "bob")
+    assert legacy.read_text(encoding="utf-8") == "owned by another account"
+
+
+def test_remote_collector_deploy_failure_has_specific_error(tmp_path: Path) -> None:
+    class BrokenSftp(_LocalSftp):
+        def open(self, remote: str, mode: str):
+            raise PermissionError("permission denied")
+
+    with pytest.raises(ToolboxError) as failure:
+        _ensure_remote_collector_script(_LocalSftpClient(BrokenSftp(tmp_path)), "alice")
+    assert failure.value.code == "REMOTE_COLLECTOR_DEPLOY_FAILED"
+    assert _remote_collector_path("alice") in failure.value.message
+
+
+def test_remote_collector_concurrent_deploy_is_atomic(tmp_path: Path) -> None:
+    sftp = _LocalSftp(tmp_path)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        paths = list(executor.map(
+            lambda _index: _ensure_remote_collector_script(_LocalSftpClient(sftp), "alice"),
+            range(16),
+        ))
+    assert set(paths) == {_remote_collector_path("alice")}
+    deployed = sftp._path(paths[0])
+    assert deployed.read_text(encoding="utf-8") == REMOTE_COLLECTOR_SOURCE
+    assert deployed.stat().st_mode & 0o777 == 0o700
 
 
 def test_remote_collector_large_file_cache_is_streamed_not_put_in_argv(tmp_path: Path) -> None:

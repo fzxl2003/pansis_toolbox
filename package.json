@@ -1,6 +1,6 @@
 {
   "name": "pansis-toolbox-workspace",
-  "version": "0.1.0",
+  "version": "1.2.1",
   "private": true,
   "scripts": {
     "prepare:git-blog-assets": "npm --prefix tools/git_blog run build",

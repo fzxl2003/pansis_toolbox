@@ -377,7 +377,7 @@ def init_database(user_id: str) -> None:
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS csm_published_snapshots (
               id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, content_encrypted TEXT NOT NULL,
-              content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+              content_hash TEXT NOT NULL, details_encrypted TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
               FOREIGN KEY(profile_id) REFERENCES csm_profiles(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS csm_refresh_runs (
               id TEXT PRIMARY KEY, source_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
@@ -456,6 +456,9 @@ def init_database(user_id: str) -> None:
             rule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_rule_sets)")}
             if "group_name" not in rule_columns:
                 conn.execute("ALTER TABLE csm_rule_sets ADD COLUMN group_name TEXT NOT NULL DEFAULT '默认分组'")
+            snapshot_columns = {row["name"] for row in conn.execute("PRAGMA table_info(csm_published_snapshots)")}
+            if "details_encrypted" not in snapshot_columns:
+                conn.execute("ALTER TABLE csm_published_snapshots ADD COLUMN details_encrypted TEXT NOT NULL DEFAULT ''")
             placeholders = ",".join("?" for _ in AIRPLAY_PROXY_TYPES)
             conn.execute(f"UPDATE csm_nodes SET supported_output=CASE WHEN lower(protocol) IN ({placeholders}) THEN 1 ELSE 0 END", tuple(sorted(AIRPLAY_PROXY_TYPES)))
             conn.execute("UPDATE csm_profiles SET target_kernel='airplay' WHERE target_kernel<>'airplay'")
@@ -1639,6 +1642,98 @@ def _rule_provider_row(row: sqlite3.Row) -> dict[str, Any]:
             "updatedAt": row["updated_at"]}
 
 
+def _rule_provider_summary_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"], "name": row["name"], "providerKey": row["provider_key"],
+        "description": row["description"] or "", "builtin": bool(row["is_builtin"]),
+        "type": str(row["provider_type"] or ""), "behavior": str(row["behavior"] or ""),
+        "source": str(row["source"] or ""), "ruleCount": int(row["rule_count"] or 0),
+        "fetchError": str(row["fetch_error"] or ""), "updatedAt": row["updated_at"],
+    }
+
+
+_RULE_PROVIDER_SUMMARY_SELECT = """SELECT id,name,provider_key,description,is_builtin,updated_at,
+  json_extract(config_json,'$.type') AS provider_type,
+  json_extract(config_json,'$.behavior') AS behavior,
+  COALESCE(json_extract(config_json,'$.sourceUrl'),json_extract(config_json,'$.url'),json_extract(config_json,'$.path'),'') AS source,
+  COALESCE(json_array_length(json_extract(config_json,'$.payload')),0) AS rule_count,
+  COALESCE(json_extract(config_json,'$.fetchError'),'') AS fetch_error
+  FROM csm_rule_providers"""
+
+
+def list_rule_provider_summaries(user: User) -> list[dict[str, Any]]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        return [_rule_provider_summary_row(row) for row in conn.execute(
+            f"{_RULE_PROVIDER_SUMMARY_SELECT} ORDER BY is_builtin DESC,name COLLATE NOCASE"
+        )]
+
+
+def rule_provider_summary(provider_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute(f"{_RULE_PROVIDER_SUMMARY_SELECT} WHERE id=?", (provider_id,)).fetchone()
+        if not row:
+            _not_found("Rule Provider")
+        return _rule_provider_summary_row(row)
+
+
+def get_rule_provider(provider_id: str, user: User, *, include_payload: bool = False) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        summary_row = conn.execute(f"{_RULE_PROVIDER_SUMMARY_SELECT} WHERE id=?", (provider_id,)).fetchone()
+        if not summary_row:
+            _not_found("Rule Provider")
+        config_row = conn.execute(
+            "SELECT CASE WHEN ? THEN config_json ELSE json_remove(config_json,'$.payload') END AS config_json "
+            "FROM csm_rule_providers WHERE id=?",
+            (int(include_payload), provider_id),
+        ).fetchone()
+    config = _normalise_legacy_manual_provider(_loads(config_row["config_json"], {}))
+    return {**_rule_provider_summary_row(summary_row), "config": config}
+
+
+def rule_provider_rules(
+    provider_id: str, user: User, *, offset: int = 0, limit: int = 200, search: str = ""
+) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        return _rule_provider_rules_page(
+            conn, provider_id, offset=offset, limit=limit, search=search, missing_raises=True
+        )
+
+
+def _rule_provider_rules_page(
+    conn: sqlite3.Connection, provider_id: str, *, offset: int = 0, limit: int = 200,
+    search: str = "", missing_raises: bool = False,
+) -> dict[str, Any] | None:
+    """Page a JSON payload inside SQLite instead of materialising it in Python."""
+    if not conn.execute("SELECT 1 FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone():
+        if missing_raises:
+            _not_found("Rule Provider")
+        return None
+    offset = max(0, int(offset))
+    limit = max(1, min(500, int(limit)))
+    keyword = str(search or "").strip()[:200]
+    search_sql = " AND instr(lower(CAST(rule.value AS TEXT)), lower(?)) > 0" if keyword else ""
+    parameters: list[Any] = [provider_id, ""]
+    base = """ FROM csm_rule_providers AS provider,
+      json_each(provider.config_json, '$.payload') AS rule
+      WHERE provider.id=? AND rule.type='text' AND trim(CAST(rule.value AS TEXT))<>?"""
+    if keyword:
+        parameters.append(keyword)
+    total = int(conn.execute("SELECT COUNT(*)" + base + search_sql, parameters).fetchone()[0])
+    rows = conn.execute(
+        "SELECT CAST(rule.value AS TEXT) AS item" + base + search_sql
+        + " ORDER BY CAST(rule.key AS INTEGER) LIMIT ? OFFSET ?",
+        [*parameters, limit, offset],
+    ).fetchall()
+    return {
+        "items": [str(row["item"]) for row in rows],
+        "total": total, "offset": offset, "limit": limit,
+    }
+
+
 def list_rule_providers(user: User) -> list[dict[str, Any]]:
     init_database(user.id)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
@@ -1936,6 +2031,63 @@ def _rule_row(row: sqlite3.Row) -> dict[str, Any]:
             "rules": _loads(row["rules_json"], []), "providers": _loads(row["providers_json"], {}),
             "groups": _loads(row["groups_json"], []), "importMeta": _loads(row["import_meta_json"], {}),
             "updatedAt": row["updated_at"]}
+
+
+def _rule_set_summary_row(row: sqlite3.Row) -> dict[str, Any]:
+    meta = _loads(row["import_meta_json"], {})
+    bindings = meta.get("providerBindings") if isinstance(meta, dict) else {}
+    provider_ids = {
+        str(provider_id)
+        for values in bindings.values() if isinstance(values, list)
+        for provider_id in values if provider_id
+    } if isinstance(bindings, dict) else set()
+    return {
+        "id": row["id"], "name": row["name"],
+        "ruleCount": int(row["rule_count"] or 0), "groupCount": int(row["group_count"] or 0),
+        "providerCount": len(provider_ids), "updatedAt": row["updated_at"],
+    }
+
+
+def list_rule_set_summaries(user: User) -> list[dict[str, Any]]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        rows = conn.execute("""SELECT id,name,import_meta_json,updated_at,
+          COALESCE(json_array_length(rules_json),0) AS rule_count,
+          COALESCE(json_array_length(groups_json),0) AS group_count
+          FROM csm_rule_sets ORDER BY name COLLATE NOCASE""").fetchall()
+        return [_rule_set_summary_row(row) for row in rows]
+
+
+def rule_set_summary(rule_set_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("""SELECT id,name,import_meta_json,updated_at,
+          COALESCE(json_array_length(rules_json),0) AS rule_count,
+          COALESCE(json_array_length(groups_json),0) AS group_count
+          FROM csm_rule_sets WHERE id=?""", (rule_set_id,)).fetchone()
+        if not row:
+            _not_found("规则组")
+        return _rule_set_summary_row(row)
+
+
+def get_rule_set(rule_set_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (rule_set_id,)).fetchone()
+        if not row:
+            _not_found("规则组")
+        detail = _rule_row(row)
+        meta = detail["importMeta"] if isinstance(detail["importMeta"], dict) else {}
+        bindings = meta.get("providerBindings")
+        detail.update({
+            "ruleCount": len(detail["rules"]), "groupCount": len(detail["groups"]),
+            "providerCount": len({
+                str(provider_id)
+                for values in bindings.values() if isinstance(values, list)
+                for provider_id in values if provider_id
+            }) if isinstance(bindings, dict) else 0,
+        })
+        return detail
 
 
 def list_rule_sets(user: User) -> list[dict[str, Any]]:
@@ -2456,6 +2608,67 @@ def preview_profile(profile_id: str, user: User) -> dict[str, Any]:
     return {"yaml": content, "valid": not any(m["level"] == "error" for m in messages), "messages": messages, "buildLog": build_log}
 
 
+def preview_profile_metadata(profile_id: str, user: User) -> dict[str, Any]:
+    preview = preview_profile(profile_id, user)
+    content = str(preview.pop("yaml"))
+    preview.update({
+        "profileId": profile_id, "yamlBytes": len(content.encode("utf-8")),
+        "yamlLines": len(content.splitlines()),
+    })
+    return preview
+
+
+def preview_profile_yaml_page(
+    profile_id: str, user: User, *, offset: int = 0, limit: int = 300
+) -> dict[str, Any]:
+    content = str(preview_profile(profile_id, user)["yaml"])
+    return _text_lines_page(content, offset=offset, limit=limit)
+
+
+def _provider_bindings(rule_row: sqlite3.Row | None) -> dict[str, list[str]]:
+    if rule_row is None:
+        return {}
+    meta = _loads(rule_row["import_meta_json"], {})
+    bindings = meta.get("providerBindings") if isinstance(meta, dict) else None
+    if not isinstance(bindings, dict):
+        return {}
+    return {
+        str(group_name): list(dict.fromkeys(str(item) for item in values if item))
+        for group_name, values in bindings.items() if isinstance(values, list)
+    }
+
+
+def _published_details_summary(
+    document: dict[str, Any], provider_bindings: dict[str, list[str]] | None = None
+) -> dict[str, Any]:
+    """Keep only the encrypted, bounded material needed by the public page."""
+    proxies: list[dict[str, Any]] = []
+    for item in document.get("proxies") or []:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalise_proxy_option_types(item, str(item.get("type") or "").lower())
+        proxies.append({
+            "name": str(normalized.get("name") or ""),
+            "type": str(normalized.get("type") or ""),
+            "server": str(normalized.get("server") or ""),
+            "port": normalized.get("port"),
+            "shareUri": proxy_share_uri(normalized),
+        })
+    bindings = provider_bindings or {}
+    groups = []
+    for item in document.get("proxy-groups") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        groups.append({
+            "name": name,
+            "type": str(item.get("type") or ""),
+            "proxies": [str(value) for value in item.get("proxies") or []],
+            "providerIds": bindings.get(name, []),
+        })
+    return {"mode": str(document.get("mode") or "rule"), "proxies": proxies, "groups": groups}
+
+
 def publish_profile(profile_id: str, user: User) -> dict[str, Any]:
     init_database(user.id)
     run_id, started, clock = _id(), _now(), time.monotonic()
@@ -2469,14 +2682,21 @@ def publish_profile(profile_id: str, user: User) -> dict[str, Any]:
         now = _now()
         with user_tool_connection_context(user.id, TOOL_ID) as conn:
             profile = conn.execute("SELECT * FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
-            _create_published_snapshot(conn, profile_id, preview["yaml"], now)
+            document = yaml.safe_load(preview["yaml"]) or {}
+            rule_row = conn.execute(
+                "SELECT import_meta_json FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)
+            ).fetchone() if profile["rule_set_id"] else None
+            details = _published_details_summary(
+                document if isinstance(document, dict) else {}, _provider_bindings(rule_row)
+            )
+            _create_published_snapshot(conn, profile_id, preview["yaml"], now, details)
             row = conn.execute("SELECT refresh_seconds FROM csm_profiles WHERE id=?", (profile_id,)).fetchone()
             refresh_seconds = int(row["refresh_seconds"] or DEFAULT_PROFILE_REFRESH_SECONDS)
             next_refresh = datetime.fromtimestamp(time.time() + refresh_seconds, timezone.utc).isoformat()
             conn.execute("UPDATE csm_profiles SET published_at=?,published_status='published',last_validation_json=?,next_refresh_at=?,updated_at=? WHERE id=?", (now, _json(preview["messages"]), next_refresh, now, profile_id))
             token = _decrypt(profile["token_encrypted"])
             conn.execute("UPDATE csm_profile_refresh_runs SET status='success',finished_at=?,duration_ms=? WHERE id=?", (now, int((time.monotonic() - clock) * 1000), run_id))
-        return {"profileId": profile_id, "publishedAt": now, "subscriptionToken": token, "yaml": preview["yaml"]}
+        return {"profileId": profile_id, "publishedAt": now, "subscriptionToken": token}
     except Exception as exc:
         message = exc.message if isinstance(exc, ToolboxError) else str(exc)
         finished = _now()
@@ -2486,10 +2706,26 @@ def publish_profile(profile_id: str, user: User) -> dict[str, Any]:
         raise
 
 
-def _create_published_snapshot(conn: sqlite3.Connection, profile_id: str, content: str, now: str) -> None:
-    conn.execute("CREATE TABLE IF NOT EXISTS csm_published_snapshots (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, content_encrypted TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL)")
+def _create_published_snapshot(
+    conn: sqlite3.Connection, profile_id: str, content: str, now: str, details: dict[str, Any]
+) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS csm_published_snapshots (
+      id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, content_encrypted TEXT NOT NULL,
+      content_hash TEXT NOT NULL, details_encrypted TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)""")
     conn.execute("DELETE FROM csm_published_snapshots WHERE profile_id=?", (profile_id,))
-    conn.execute("INSERT INTO csm_published_snapshots VALUES(?,?,?,?,?)", (_id(), profile_id, _encrypt(content), hashlib.sha256(content.encode()).hexdigest(), now))
+    conn.execute("""INSERT INTO csm_published_snapshots
+      (id,profile_id,content_encrypted,content_hash,details_encrypted,created_at)
+      VALUES(?,?,?,?,?,?)""", (
+        _id(), profile_id, _encrypt(content), hashlib.sha256(content.encode()).hexdigest(),
+        _encrypt(_json(details)), now,
+    ))
+
+
+def _text_lines_page(content: str, *, offset: int = 0, limit: int = 300) -> dict[str, Any]:
+    offset = max(0, int(offset))
+    limit = max(1, min(1000, int(limit)))
+    lines = content.splitlines()
+    return {"lines": lines[offset:offset + limit], "total": len(lines), "offset": offset, "limit": limit}
 
 
 def _public_profile_location(token: str) -> tuple[str, str] | None:
@@ -2660,37 +2896,29 @@ def _probe_for_output_name(name: str, aliases: dict[str, list[sqlite3.Row]], ori
 
 
 def _public_group_details(conn: sqlite3.Connection, rule_row: sqlite3.Row | None, groups: list[dict[str, Any]]) -> None:
-    """Attach safe Provider payloads to the strategy groups that use them."""
-    if rule_row is None: return
-    meta = _loads(rule_row["import_meta_json"], {})
-    bindings = meta.get("providerBindings") if isinstance(meta, dict) else None
-    if not isinstance(bindings, dict): return
-    provider_ids = [str(item) for values in bindings.values() if isinstance(values, list) for item in values if item]
+    """Attach bounded Provider metadata without copying payloads into the page."""
+    bindings = _provider_bindings(rule_row)
+    provider_ids = [
+        str(item)
+        for group in groups
+        for item in (
+            group["providerIds"] if "providerIds" in group
+            else bindings.get(str(group.get("name") or ""), [])
+        )
+        if item
+    ]
+    if not provider_ids:
+        return
     provider_rows: dict[str, sqlite3.Row] = {}
     for provider_id in dict.fromkeys(provider_ids):
-        row = conn.execute("SELECT * FROM csm_rule_providers WHERE id=?", (provider_id,)).fetchone()
+        row = conn.execute(f"{_RULE_PROVIDER_SUMMARY_SELECT} WHERE id=?", (provider_id,)).fetchone()
         if row: provider_rows[provider_id] = row
 
-    # A library Provider may be referenced by several strategy groups.  Public
-    # detail reads always use the locally persisted snapshot and never fetch the
-    # remote URL on the request path.
-    provider_payloads: dict[str, tuple[list[str], str]] = {}
-
-    def resolve_payload(provider_id: str, config: dict[str, Any]) -> tuple[list[str], str]:
-        if provider_id in provider_payloads:
-            return provider_payloads[provider_id]
-        payload = _rule_provider_snapshot_payload(config)
-        error = str(config.get("fetchError") or "")
-        if not payload and not error:
-            error = "规则快照尚未生成，等待定时拉取。"
-        elif not payload:
-            error = "规则快照为空，等待下次定时拉取。"
-        value = (payload, error)
-        provider_payloads[provider_id] = value
-        return value
-
     for group in groups:
-        raw_ids = bindings.get(str(group.get("name") or ""))
+        raw_ids = (
+            group["providerIds"] if "providerIds" in group
+            else bindings.get(str(group.get("name") or ""))
+        )
         if not isinstance(raw_ids, list):
             group["providers"] = []
             continue
@@ -2698,14 +2926,18 @@ def _public_group_details(conn: sqlite3.Connection, rule_row: sqlite3.Row | None
         for provider_id in dict.fromkeys(str(item) for item in raw_ids if item):
             row = provider_rows.get(provider_id)
             if not row: continue
-            config = _normalise_legacy_manual_provider(_loads(row["config_json"], {}))
-            payload, error = resolve_payload(provider_id, config)
+            rule_count = int(row["rule_count"] or 0)
+            error = str(row["fetch_error"] or "")
+            if not rule_count and not error:
+                error = "规则快照尚未生成，等待定时拉取。"
+            elif not rule_count:
+                error = "规则快照为空，等待下次定时拉取。"
             providers.append({
                 "id": provider_id,
                 "name": str(row["name"]),
-                "kind": "规则订阅" if str(config.get("type") or "").lower() in {"cached", "http"} else "自定义",
-                "behavior": str(config.get("behavior") or ""), "ruleCount": len(payload),
-                "payload": payload, "error": error,
+                "kind": "规则订阅" if str(row["provider_type"] or "").lower() in {"cached", "http"} else "自定义",
+                "behavior": str(row["behavior"] or ""), "ruleCount": rule_count,
+                "error": error,
             })
         group["providers"] = providers
 
@@ -2812,6 +3044,47 @@ def _test_domain_result(domain: str, rules: list[Any], providers: dict[str, dict
         "matches": matches,
     }
 
+def _snapshot_details(conn: sqlite3.Connection, snapshot: sqlite3.Row) -> dict[str, Any]:
+    encrypted = str(snapshot["details_encrypted"] or "")
+    value: Any = None
+    if encrypted:
+        try:
+            value = _loads(_decrypt(encrypted), {})
+            if isinstance(value, dict):
+                groups = value.get("groups")
+                if isinstance(groups, list) and all(
+                    isinstance(group, dict) and "providerIds" in group for group in groups
+                ):
+                    return value
+        except ToolboxError:
+            pass
+    profile = conn.execute(
+        "SELECT rule_set_id FROM csm_profiles WHERE id=?", (snapshot["profile_id"],)
+    ).fetchone()
+    rule_row = conn.execute(
+        "SELECT import_meta_json FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)
+    ).fetchone() if profile and profile["rule_set_id"] else None
+    bindings = _provider_bindings(rule_row)
+    if encrypted and isinstance(value, dict):
+        for group in value.get("groups") or []:
+            if isinstance(group, dict):
+                group.setdefault("providerIds", bindings.get(str(group.get("name") or ""), []))
+    else:
+        content = _decrypt(snapshot["content_encrypted"])
+        try:
+            document = yaml.safe_load(content) or {}
+        except yaml.YAMLError as exc:
+            raise ToolboxError("INVALID_PUBLISHED_SNAPSHOT", "已发布订阅内容无效。", status_code=500) from exc
+        if not isinstance(document, dict):
+            raise ToolboxError("INVALID_PUBLISHED_SNAPSHOT", "已发布订阅内容无效。", status_code=500)
+        value = _published_details_summary(document, bindings)
+    conn.execute(
+        "UPDATE csm_published_snapshots SET details_encrypted=? WHERE id=?",
+        (_encrypt(_json(value)), snapshot["id"]),
+    )
+    return value
+
+
 def public_subscription_details(token: str) -> dict[str, Any] | None:
     """Return a safe visual summary of the current published subscription."""
     if not token or len(token) > 300: return None
@@ -2824,24 +3097,19 @@ def public_subscription_details(token: str) -> dict[str, Any] | None:
             profile = conn.execute(f"{_PROFILE_WITH_RULE_SET} WHERE p.id=?", (index["profile_id"],)).fetchone()
             snapshot = conn.execute("SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1", (index["profile_id"],)).fetchone()
             if not profile or not snapshot: return None
-            content = _normalise_published_content(_decrypt(snapshot["content_encrypted"]))
             rule_row = conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (profile["rule_set_id"],)).fetchone() if profile["rule_set_id"] else None
             aliases, originals = _latest_node_probes(conn)
-            try: document = yaml.safe_load(content) or {}
-            except yaml.YAMLError: return None
-            if not isinstance(document, dict): return None
-            groups = [dict(item) for item in document.get("proxy-groups") or [] if isinstance(item, dict)]
+            details = _snapshot_details(conn, snapshot)
+            groups = [dict(item) for item in details.get("groups") or [] if isinstance(item, dict)]
             try: _public_group_details(conn, rule_row, groups)
             except sqlite3.Error: groups = [group for group in groups if "providers" not in group]
             try: request_runs = _public_subscription_requests(conn, index["profile_id"])
             except sqlite3.Error: request_runs = []
     except (sqlite3.Error, ToolboxError): return None
     proxies: list[dict[str, Any]] = []
-    for item in document.get("proxies") or []:
+    for item in details.get("proxies") or []:
         if not isinstance(item, dict): continue
-        value = {"name": str(item.get("name") or ""), "type": str(item.get("type") or ""),
-                 "server": str(item.get("server") or ""), "port": item.get("port"),
-                 "shareUri": proxy_share_uri(item)}
+        value = dict(item)
         probe = _probe_for_output_name(value["name"], aliases, originals)
         country_code = str(probe["country_override_code"] or probe["country_code"] or "") if probe else ""
         country_label = str(probe["country_override_label"] or "") if probe else ""
@@ -2855,10 +3123,56 @@ def public_subscription_details(token: str) -> dict[str, Any] | None:
                       "country": country_code or None,
                       "countryLabel": country_label or None})
         proxies.append(value)
-    return {"name": profile["name"], "publishedAt": snapshot["created_at"], "contentHash": hashlib.sha256(content.encode()).hexdigest(),
-            "mode": str(document.get("mode") or "rule"), "proxies": proxies, "groups": groups,
+    return {"name": profile["name"], "publishedAt": snapshot["created_at"], "contentHash": snapshot["content_hash"],
+            "mode": str(details.get("mode") or "rule"), "proxies": proxies, "groups": groups,
             "ruleSetName": profile["rule_set_name"], "ruleSetUpdatedAt": profile["rule_set_updated_at"],
-            "requestRuns": request_runs, "yaml": content}
+            "requestRuns": request_runs}
+
+
+def public_subscription_yaml_page(token: str, *, offset: int = 0, limit: int = 300) -> dict[str, Any] | None:
+    location = _public_profile_location(token)
+    if not location:
+        return None
+    user_id, profile_id = location
+    init_database(user_id)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        snapshot = conn.execute(
+            "SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if not snapshot:
+            return None
+        page = _text_lines_page(_decrypt(snapshot["content_encrypted"]), offset=offset, limit=limit)
+        page["contentHash"] = snapshot["content_hash"]
+        return page
+
+
+def public_rule_provider_rules(
+    token: str, provider_id: str, *, offset: int = 0, limit: int = 200, search: str = ""
+) -> dict[str, Any] | None:
+    location = _public_profile_location(token)
+    if not location:
+        return None
+    user_id, profile_id = location
+    init_database(user_id)
+    with user_tool_connection_context(user_id, TOOL_ID) as conn:
+        snapshot = conn.execute(
+            "SELECT * FROM csm_published_snapshots WHERE profile_id=? ORDER BY created_at DESC LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if not snapshot:
+            return None
+        allowed_ids = {
+            str(item)
+            for group in (_snapshot_details(conn, snapshot).get("groups") or [])
+            if isinstance(group, dict)
+            for item in (group.get("providerIds") or []) if item
+        }
+        if provider_id not in allowed_ids:
+            return None
+        return _rule_provider_rules_page(
+            conn, provider_id, offset=offset, limit=limit, search=search
+        )
 
 
 
@@ -2967,7 +3281,9 @@ def dashboard(user: User) -> dict[str, Any]:
         rule_sets = int(conn.execute("SELECT COUNT(*) FROM csm_rule_sets").fetchone()[0])
         node_groups = int(conn.execute("SELECT COUNT(*) FROM csm_node_groups").fetchone()[0])
         latency_groups = int(conn.execute("SELECT COUNT(*) FROM csm_node_groups WHERE kind='latency'").fetchone()[0])
-        provider_rows = conn.execute("SELECT config_json FROM csm_rule_providers").fetchall()
+        provider_status = conn.execute("""SELECT COUNT(*) AS total,
+          SUM(CASE WHEN COALESCE(json_extract(config_json,'$.fetchError'),'') <> '' THEN 1 ELSE 0 END) AS errors
+          FROM csm_rule_providers""").fetchone()
         requests_24h = int(conn.execute("SELECT COUNT(*) FROM csm_subscription_requests WHERE requested_at>=?", (now_iso,)).fetchone()[0])
         protocol = [{"name": r["protocol"], "value": r["count"]} for r in conn.execute("SELECT protocol,COUNT(*) count FROM csm_nodes GROUP BY protocol ORDER BY count DESC")]
         regions = [{"name": r["region"], "value": r["count"]} for r in conn.execute("""SELECT COALESCE(NULLIF(country_override_label,''),NULLIF(country_override_code,''),NULLIF(country_label,''),NULLIF(country_code,''),'未识别') region,COUNT(*) count
@@ -2979,11 +3295,7 @@ def dashboard(user: User) -> dict[str, Any]:
         sources = [_row_source(r) for r in conn.execute("SELECT * FROM csm_sources ORDER BY CASE status WHEN 'error' THEN 0 ELSE 1 END,last_attempt_at DESC LIMIT 12")]
         profiles = [_profile_row(r) for r in conn.execute(f"{_PROFILE_WITH_RULE_SET} ORDER BY p.updated_at DESC LIMIT 12")]
 
-    provider_errors = 0
-    for row in provider_rows:
-        config = _loads(row["config_json"], {})
-        if isinstance(config, dict) and config.get("fetchError"):
-            provider_errors += 1
+    provider_errors = int(provider_status["errors"] or 0)
     sources_total = int(source_counts["total"] or 0)
     healthy_sources = int(source_counts["healthy"] or 0)
     error_sources = int(source_counts["error"] or 0)
@@ -3012,7 +3324,7 @@ def dashboard(user: User) -> dict[str, Any]:
         "tcpReachable": reachable_nodes, "avgLatencyMs": avg_latency, "latencyP50Ms": latency_p50, "latencyP95Ms": latency_p95,
         "profiles": published + draft_profiles, "publishedProfiles": published, "draftProfiles": draft_profiles,
         "degradedProfiles": degraded_profiles, "profileErrors": profile_errors, "ruleSets": rule_sets,
-        "ruleProviders": len(provider_rows), "providerErrors": provider_errors, "nodeGroups": node_groups,
+        "ruleProviders": int(provider_status["total"] or 0), "providerErrors": provider_errors, "nodeGroups": node_groups,
         "latencyNodeGroups": latency_groups, "requests24h": requests_24h, "alerts": len(alerts),
     }
     health = {

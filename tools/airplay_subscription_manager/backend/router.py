@@ -267,7 +267,16 @@ def validate_profile(request: Request, profile_id: str) -> dict[str, Any]:
 
 @router.get("/profiles/{profile_id}/preview")
 def preview_profile(request: Request, profile_id: str) -> dict[str, Any]:
-    return service.preview_profile(profile_id, require_user(request))
+    return service.preview_profile_metadata(profile_id, require_user(request))
+
+
+@router.get("/profiles/{profile_id}/preview/yaml")
+def preview_profile_yaml(
+    request: Request, profile_id: str, offset: int = 0, limit: int = 300
+) -> dict[str, Any]:
+    return service.preview_profile_yaml_page(
+        profile_id, require_user(request), offset=offset, limit=limit
+    )
 
 
 @router.post("/profiles/{profile_id}/publish")
@@ -287,17 +296,35 @@ def get_profile_refresh_runs(request: Request, profileId: str | None = None, lim
 
 @router.get("/rule-providers")
 def get_rule_providers(request: Request) -> dict[str, Any]:
-    return {"providers": service.list_rule_providers(require_user(request))}
+    return {"providers": service.list_rule_provider_summaries(require_user(request))}
+
+
+@router.get("/rule-providers/{provider_id}")
+def get_rule_provider(request: Request, provider_id: str, includePayload: bool = False) -> dict[str, Any]:
+    return {"provider": service.get_rule_provider(provider_id, require_user(request), include_payload=includePayload)}
+
+
+@router.get("/rule-providers/{provider_id}/rules")
+def get_rule_provider_rules(
+    request: Request, provider_id: str, offset: int = 0, limit: int = 200, search: str = ""
+) -> dict[str, Any]:
+    return service.rule_provider_rules(
+        provider_id, require_user(request), offset=offset, limit=limit, search=search
+    )
 
 
 @router.post("/rule-providers")
 def post_rule_provider(request: Request, payload: RuleProviderLibraryPayload) -> dict[str, Any]:
-    return {"provider": service.save_rule_provider(payload.model_dump(), require_user(request))}
+    user = require_user(request)
+    saved = service.save_rule_provider(payload.model_dump(), user)
+    return {"provider": service.rule_provider_summary(saved["id"], user)}
 
 
 @router.put("/rule-providers/{provider_id}")
 def put_rule_provider(request: Request, provider_id: str, payload: RuleProviderLibraryPayload) -> dict[str, Any]:
-    return {"provider": service.save_rule_provider(payload.model_dump(), require_user(request), provider_id)}
+    user = require_user(request)
+    service.save_rule_provider(payload.model_dump(), user, provider_id)
+    return {"provider": service.rule_provider_summary(provider_id, user)}
 
 
 @router.delete("/rule-providers/{provider_id}")
@@ -307,7 +334,9 @@ def remove_rule_provider(request: Request, provider_id: str) -> dict[str, bool]:
 
 @router.post("/rule-providers/{provider_id}/copy")
 def copy_rule_provider(request: Request, provider_id: str, payload: RuleProviderCopyPayload) -> dict[str, Any]:
-    return {"provider": service.copy_rule_provider(provider_id, payload.mode, require_user(request))}
+    user = require_user(request)
+    copied = service.copy_rule_provider(provider_id, payload.mode, user)
+    return {"provider": service.rule_provider_summary(copied["id"], user)}
 
 
 @router.post("/rule-providers/package")
@@ -317,17 +346,26 @@ def package_rule_providers(request: Request, payload: RuleProviderPackagePayload
 
 @router.get("/rule-sets")
 def get_rule_sets(request: Request) -> dict[str, Any]:
-    return {"ruleSets": service.list_rule_sets(require_user(request))}
+    return {"ruleSets": service.list_rule_set_summaries(require_user(request))}
+
+
+@router.get("/rule-sets/{rule_set_id}")
+def get_rule_set(request: Request, rule_set_id: str) -> dict[str, Any]:
+    return {"ruleSet": service.get_rule_set(rule_set_id, require_user(request))}
 
 
 @router.post("/rule-sets")
 def post_rule_set(request: Request, payload: RuleSetPayload) -> dict[str, Any]:
-    return {"ruleSet": service.save_rule_set(payload.model_dump(), require_user(request))}
+    user = require_user(request)
+    saved = service.save_rule_set(payload.model_dump(), user)
+    return {"ruleSet": service.rule_set_summary(saved["id"], user)}
 
 
 @router.put("/rule-sets/{rule_set_id}")
 def put_rule_set(request: Request, rule_set_id: str, payload: RuleSetPayload) -> dict[str, Any]:
-    return {"ruleSet": service.save_rule_set(payload.model_dump(), require_user(request), rule_set_id)}
+    user = require_user(request)
+    service.save_rule_set(payload.model_dump(), user, rule_set_id)
+    return {"ruleSet": service.rule_set_summary(rule_set_id, user)}
 
 
 @router.delete("/rule-sets/{rule_set_id}")
@@ -337,7 +375,9 @@ def remove_rule_set(request: Request, rule_set_id: str) -> dict[str, bool]:
 
 @router.post("/rule-sets/import")
 def import_rule_set(request: Request, payload: RuleImportPayload) -> dict[str, Any]:
-    return {"ruleSet": service.import_rule_set(payload.model_dump(), require_user(request))}
+    user = require_user(request)
+    saved = service.import_rule_set(payload.model_dump(), user)
+    return {"ruleSet": service.rule_set_summary(saved["id"], user)}
 
 
 @router.post("/rule-sets/{rule_set_id}/test-domain")
@@ -468,7 +508,6 @@ def _subscription_details_html(
         title = f"{item.get('name') or '节点'} · {label}"
         return f'<i class="speed-dot {latency_level(item)}" title="{e(title)}"></i>'
 
-    no_payload = '<li class="muted">暂无内容</li>'
     no_members = '<span class="muted">暂无成员</span>'
     no_providers = '<p class="muted">该策略组未绑定规则内容。</p>'
 
@@ -537,7 +576,6 @@ def _subscription_details_html(
     group_modals: list[str] = []
     provider_modals: list[str] = []
     provider_modal_keys: set[str] = set()
-    provider_preview_limit = 5
     for index, group in enumerate(groups):
         members = [str(item) for item in group.get("proxies") or []]
         member_chips = "".join(f'<span class="chip">{e(member)}</span>' for member in members[:80])
@@ -545,38 +583,36 @@ def _subscription_details_html(
             member_chips += f'<span class="chip">另有 {len(members) - 80} 个成员</span>'
         provider_items: list[str] = []
         for provider_index, provider in enumerate(group.get("providers") or []):
-            payload = [str(item) for item in provider.get("payload") or []]
             error = str(provider.get("error") or "")
-            preview = payload[:provider_preview_limit]
-            payload_html = "".join(f"<li><code>{e(item)}</code></li>" for item in preview)
-            if error:
-                payload_html = f'<li class="error-text">{e(error)}</li>' + payload_html
             provider_name = e(str(provider.get("name") or ""))
+            rule_count = int(provider.get("ruleCount") or 0)
             provider_meta = e(
-                f'{provider.get("kind") or ""} · {provider.get("behavior") or ""} · {provider.get("ruleCount") or 0} 条'
+                f'{provider.get("kind") or ""} · {provider.get("behavior") or ""} · {rule_count} 条'
             )
-            more_button = ""
-            if len(payload) > provider_preview_limit:
-                provider_id = str(provider.get("id") or f"{index}-{provider_index}")
-                provider_modal_id = f"provider-modal-{provider_id}"
-                if provider_id not in provider_modal_keys:
-                    provider_modal_keys.add(provider_id)
-                    provider_modals.append(
-                        f'<dialog class="modal" id="{provider_modal_id}" aria-label="规则内容详情"><article class="modal-panel">'
-                        f'<header class="modal-head"><div><strong>{provider_name}</strong><span>{provider_meta} · 全部 {len(payload)} 条</span></div>'
-                        f'<button type="button" class="modal-close" onclick="this.closest(\'dialog\').close()">关闭</button></header>'
-                        f'<div class="modal-body"><section><h3>规则内容</h3><ul class="payload payload-full">'
-                        + "".join(f"<li><code>{e(item)}</code></li>" for item in payload)
-                        + '</ul></section></div></article></dialog>'
-                    )
-                more_button = (
-                    f'<button type="button" class="provider-more" onclick="this.closest(\'dialog\').close();'
-                    f'document.getElementById(\'{provider_modal_id}\').showModal()">显示全部（{len(payload)} 条）</button>'
+            provider_id = str(provider.get("id") or f"{index}-{provider_index}")
+            provider_modal_id = f"provider-modal-{provider_id}"
+            if provider_id not in provider_modal_keys:
+                provider_modal_keys.add(provider_id)
+                provider_modals.append(
+                    f'<dialog class="modal" id="{provider_modal_id}" data-provider-dialog data-provider-id="{e(provider_id, quote=True)}" aria-label="规则内容详情"><article class="modal-panel">'
+                    f'<header class="modal-head"><div><strong>{provider_name}</strong><span>{provider_meta}</span></div>'
+                    f'<button type="button" class="modal-close" onclick="this.closest(\'dialog\').close()">关闭</button></header>'
+                    f'<div class="modal-body"><section><h3>规则内容（每页 200 条）</h3>'
+                    f'<ul class="payload payload-full" data-rule-list><li class="muted">打开后加载…</li></ul>'
+                    f'<div class="page-controls"><button type="button" class="provider-more" data-page-prev>上一页</button>'
+                    f'<span class="muted" data-page-status>尚未加载</span>'
+                    f'<button type="button" class="provider-more" data-page-next>下一页</button></div>'
+                    f'</section></div></article></dialog>'
                 )
+            open_rules = (
+                f'<button type="button" class="provider-more" data-open-provider="{e(provider_modal_id, quote=True)}">'
+                f'分页查看（{rule_count} 条）</button>' if rule_count else '<span class="muted">暂无规则内容</span>'
+            )
+            error_html = f'<p class="error-text">{e(error)}</p>' if error else ""
             provider_items.append(
                 f'<article class="provider-card"><header><strong>{provider_name}</strong>'
                 f'<span>{provider_meta}</span></header>'
-                f'<ul class="payload">{payload_html or no_payload}</ul>{more_button}</article>'
+                f'{error_html}{open_rules}</article>'
             )
         group_name = e(str(group.get("name") or ""))
         group_meta = e(f'{group.get("type") or ""} · {len(members)} 个成员 · {len(group.get("providers") or [])} 组规则内容')
@@ -655,6 +691,7 @@ button.group-card:hover{border-color:#93c5fd;transform:translateY(-1px)}
 .providers{display:grid;gap:10px}.provider-card{border:1px solid var(--line);border-radius:14px;padding:12px}.provider-card header{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.provider-card strong{font-size:13px}.provider-card header span{color:var(--muted);font-size:12px;white-space:nowrap}
 .payload{list-style:none;margin:10px 0 0;padding:0;max-height:210px;overflow:auto}.payload li{padding:7px 8px;border-top:1px solid var(--line);font-size:12px}.payload code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.payload-full{max-height:calc(100vh - 180px)}.payload-full code{display:inline;overflow:visible;text-overflow:clip;white-space:normal;word-break:break-all}
 .provider-more{margin-top:10px;border:0;border-radius:8px;padding:7px 10px;background:#eef2ff;color:#3730a3;font:inherit;font-size:12px;font-weight:700;cursor:pointer}.provider-more:hover{background:#e0e7ff}
+.page-controls{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:12px}.page-controls .provider-more{margin-top:0}.page-controls button:disabled{cursor:not-allowed;opacity:.45}
 .modal{width:min(880px,calc(100vw - 32px));max-height:min(780px,calc(100vh - 40px));padding:0;border:0;border-radius:18px;background:var(--panel);color:var(--text);box-shadow:0 24px 70px rgba(15,23,42,.28)}
 .modal::backdrop{background:rgba(15,23,42,.56);backdrop-filter:blur(3px)}
 .modal-panel{display:flex;flex-direction:column;max-height:inherit}
@@ -679,6 +716,60 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
   document.querySelectorAll("dialog.modal").forEach(function(dialog){
     dialog.addEventListener("click", function(event){ if(event.target === dialog) dialog.close(); });
   });
+  function pageStatus(data){
+    if(!data.total) return "没有内容";
+    return (data.offset + 1) + "–" + Math.min(data.total, data.offset + data.limit) + " / " + data.total;
+  }
+  document.querySelectorAll("[data-provider-dialog]").forEach(function(dialog){
+    var offset = 0, limit = 200, loaded = false;
+    var list = dialog.querySelector("[data-rule-list]");
+    var status = dialog.querySelector("[data-page-status]");
+    var previous = dialog.querySelector("[data-page-prev]");
+    var next = dialog.querySelector("[data-page-next]");
+    function load(target){
+      list.textContent = "";
+      var waiting = document.createElement("li"); waiting.className = "muted"; waiting.textContent = "加载中…"; list.appendChild(waiting);
+      previous.disabled = true; next.disabled = true;
+      var providerId = encodeURIComponent(dialog.getAttribute("data-provider-id") || "");
+      fetch(window.location.pathname + "/providers/" + providerId + "/rules?offset=" + target + "&limit=" + limit)
+        .then(function(response){ if(!response.ok) throw new Error("加载失败：" + response.status); return response.json(); })
+        .then(function(data){
+          offset = data.offset; loaded = true; list.textContent = "";
+          data.items.forEach(function(item){ var li=document.createElement("li"), code=document.createElement("code"); code.textContent=item; li.appendChild(code); list.appendChild(li); });
+          if(!data.items.length){ var empty=document.createElement("li"); empty.className="muted"; empty.textContent="暂无内容"; list.appendChild(empty); }
+          status.textContent = pageStatus(data); previous.disabled = offset <= 0; next.disabled = offset + data.limit >= data.total;
+        }).catch(function(error){ list.textContent=""; var li=document.createElement("li"); li.className="error-text"; li.textContent=error.message; list.appendChild(li); status.textContent="加载失败"; });
+    }
+    previous.addEventListener("click", function(){ load(Math.max(0, offset - limit)); });
+    next.addEventListener("click", function(){ load(offset + limit); });
+    dialog.loadFirstPage = function(){ if(!loaded) load(0); };
+  });
+  document.querySelectorAll("[data-open-provider]").forEach(function(openProvider){
+    openProvider.addEventListener("click", function(){
+      var parent = openProvider.closest("dialog"); if(parent) parent.close();
+      var dialog = document.getElementById(openProvider.getAttribute("data-open-provider"));
+      if(dialog){ dialog.showModal(); if(dialog.loadFirstPage) dialog.loadFirstPage(); }
+    });
+  });
+  var yamlDialog = document.getElementById("yaml-modal");
+  var yamlOpen = document.querySelector("[data-open-yaml]");
+  if(yamlDialog && yamlOpen){
+    var yamlOffset = 0, yamlLimit = 300, yamlLoaded = false;
+    var yamlCode = yamlDialog.querySelector("[data-yaml-code]");
+    var yamlStatus = yamlDialog.querySelector("[data-page-status]");
+    var yamlPrevious = yamlDialog.querySelector("[data-page-prev]");
+    var yamlNext = yamlDialog.querySelector("[data-page-next]");
+    function loadYaml(target){
+      yamlCode.textContent = "加载中…"; yamlPrevious.disabled = true; yamlNext.disabled = true;
+      fetch(window.location.pathname + "/yaml?offset=" + target + "&limit=" + yamlLimit)
+        .then(function(response){ if(!response.ok) throw new Error("加载失败：" + response.status); return response.json(); })
+        .then(function(data){ yamlOffset=data.offset; yamlLoaded=true; yamlCode.textContent=data.lines.join("\n"); yamlStatus.textContent=pageStatus(data); yamlPrevious.disabled=yamlOffset<=0; yamlNext.disabled=yamlOffset+data.limit>=data.total; })
+        .catch(function(error){ yamlCode.textContent=error.message; yamlStatus.textContent="加载失败"; });
+    }
+    yamlOpen.addEventListener("click", function(){ yamlDialog.showModal(); if(!yamlLoaded) loadYaml(0); });
+    yamlPrevious.addEventListener("click", function(){ loadYaml(Math.max(0,yamlOffset-yamlLimit)); });
+    yamlNext.addEventListener("click", function(){ loadYaml(yamlOffset+yamlLimit); });
+  }
   var openButton = document.querySelector("[data-open-public-access]");
   if(openButton){
     var accessStatus = document.querySelector("[data-access-status]");
@@ -836,8 +927,8 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 <h2>节点</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>协议</th><th>服务器</th><th>端口</th><th>国家或地区</th><th>延迟</th><th>导入</th></tr></thead><tbody>{node_rows or '<tr><td colspan="7" class="muted">暂无节点</td></tr>'}</tbody></table></div></div>
 <div class="section-head"><h2>策略组</h2><button class="button" type="button" onclick="document.getElementById('domain-test-modal').showModal()">测试域名</button></div><p class="section-note">点击卡片在弹窗中查看成员与该策略组使用的规则内容。</p><div class="group-grid">{''.join(group_cards) or '<p class="muted">暂无策略组</p>'}</div>
 <dialog class="modal" id="domain-test-modal" aria-label="测试域名命中"><article class="modal-panel"><header class="modal-head"><div><strong>测试域名命中</strong><span>输入域名，查看最终命中的策略</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><form class="domain-test-form" data-domain-test-form><input class="domain-input" type="text" name="domain" placeholder="example.com" autocomplete="off" required><button class="button" type="submit">测试命中</button><div class="domain-test-result" data-domain-test-result hidden></div></form></div></article></dialog>
-<div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" onclick="document.getElementById('yaml-modal').showModal()">打开预览</button></div>
-<dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 AirPlay 配置</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code>{e(str(details.get("yaml") or ""))}</code></pre></div></article></dialog>
+<div class="section-head"><h2>YAML 预览</h2><button class="button" type="button" data-open-yaml>打开预览</button></div>
+<dialog class="modal" id="yaml-modal" aria-label="YAML 预览"><article class="modal-panel"><header class="modal-head"><div><strong>YAML 预览</strong><span>当前发布的 AirPlay 配置（每页 300 行）</span></div><button type="button" class="modal-close" onclick="this.closest('dialog').close()">关闭</button></header><div class="modal-body"><pre class="yaml"><code data-yaml-code>打开后加载…</code></pre><div class="page-controls"><button type="button" class="provider-more" data-page-prev>上一页</button><span class="muted" data-page-status>尚未加载</span><button type="button" class="provider-more" data-page-next>下一页</button></div></div></article></dialog>
 <h2>订阅拉取日志</h2><p class="section-note">记录聚合订阅链接的请求，不包含上游订阅源刷新记录。</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端 IP</th><th>User-Agent</th><th>状态</th></tr></thead><tbody>{log_rows or '<tr><td colspan="4" class="muted">暂无拉取日志</td></tr>'}</tbody></table></div></div>
 {''.join(group_modals)}
 {''.join(provider_modals)}
@@ -894,6 +985,29 @@ def mount_extra(app: FastAPI) -> None:
         if result is None:
             return Response(status_code=404)
         return JSONResponse(result)
+
+    @app.get("/sub/airplay/details/{token}/yaml", include_in_schema=False)
+    def public_airplay_subscription_yaml(
+        token: str, request: Request, offset: int = 0, limit: int = 300
+    ) -> Response:
+        access = service.public_profile_access(token)
+        if access is None or not _public_view_allowed(token, request, access):
+            return Response(status_code=404)
+        result = service.public_subscription_yaml_page(token, offset=offset, limit=limit)
+        return JSONResponse(result) if result is not None else Response(status_code=404)
+
+    @app.get("/sub/airplay/details/{token}/providers/{provider_id}/rules", include_in_schema=False)
+    def public_airplay_provider_rules(
+        token: str, provider_id: str, request: Request,
+        offset: int = 0, limit: int = 200, search: str = "",
+    ) -> Response:
+        access = service.public_profile_access(token)
+        if access is None or not _public_view_allowed(token, request, access):
+            return Response(status_code=404)
+        result = service.public_rule_provider_rules(
+            token, provider_id, offset=offset, limit=limit, search=search
+        )
+        return JSONResponse(result) if result is not None else Response(status_code=404)
 
     @app.get("/sub/airplay/{token}", include_in_schema=False)
     def public_airplay_subscription(token: str, request: Request) -> Response:

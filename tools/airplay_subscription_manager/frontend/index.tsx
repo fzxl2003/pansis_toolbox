@@ -137,12 +137,23 @@ type AutoUpdateSettings = {
   lastRunAt: Partial<Record<AutoUpdateTaskKey, string | null>>;
 };
 type ProfilePreview = {
-  yaml: string;
+  profileId: string;
+  yaml?: string;
+  yamlBytes: number;
+  yamlLines: number;
   valid: boolean;
   messages: ValidationMessage[];
   buildLog: string[];
 };
-type RuleSet = {
+type RuleSetSummary = {
+  id: string;
+  name: string;
+  ruleCount: number;
+  groupCount: number;
+  providerCount: number;
+  updatedAt?: string;
+};
+type RuleSet = RuleSetSummary & {
   id: string;
   name: string;
   rules: unknown[];
@@ -165,9 +176,16 @@ type RuleProviderLibraryItem = {
   name: string;
   providerKey: string;
   description: string;
-  config: Record<string, unknown>;
+  type: string;
+  behavior: string;
+  source: string;
+  ruleCount: number;
+  fetchError?: string;
   builtin: boolean;
   updatedAt?: string;
+};
+type RuleProviderDetail = RuleProviderLibraryItem & {
+  config: Record<string, unknown>;
 };
 type RuleGroupDraft = {
   id: string;
@@ -218,7 +236,7 @@ export default function AirPlaySubscriptionManager() {
   const [sources, setSources] = useState<Source[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [ruleSets, setRuleSets] = useState<RuleSet[]>([]);
+  const [ruleSets, setRuleSets] = useState<RuleSetSummary[]>([]);
   const [providerLibrary, setProviderLibrary] = useState<
     RuleProviderLibraryItem[]
   >([]);
@@ -237,9 +255,11 @@ export default function AirPlaySubscriptionManager() {
     ruleSet?: RuleSet;
   } | null>(null);
   const [providerModal, setProviderModal] = useState<
-    RuleProviderLibraryItem | null | false
+    RuleProviderDetail | null | false
   >(false);
   const [providerCopy, setProviderCopy] =
+    useState<RuleProviderLibraryItem | null>(null);
+  const [providerRules, setProviderRules] =
     useState<RuleProviderLibraryItem | null>(null);
   const [nodeGroupModal, setNodeGroupModal] = useState<
     NodeGroup | null | false
@@ -251,58 +271,84 @@ export default function AirPlaySubscriptionManager() {
   );
   const [aliasNode, setAliasNode] = useState<Node | null>(null);
   const [countryNode, setCountryNode] = useState<Node | null>(null);
-  const [loading, setLoading] = useState(true);
+  type LoadKey = "dashboard" | "node-pool" | "node-groups" | "profiles" | "providers" | "rule-sets" | "auto-update";
+  const loaded = useRef(new Set<LoadKey>());
+  const [loadingKeys, setLoadingKeys] = useState<Set<LoadKey>>(
+    () => new Set(["dashboard"]),
+  );
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const { confirm, dialog } = useConfirm();
 
-  async function loadAll() {
-    setLoading(true);
+  const currentLoadKey: LoadKey =
+    view === "dashboard" ? "dashboard"
+      : view === "nodes" ? (nodesTab === "pool" ? "node-pool" : "node-groups")
+        : view === "profiles" ? "profiles"
+          : view === "auto-update" ? "auto-update"
+            : rulesTab === "providers" ? "providers" : "rule-sets";
+  const loading = loadingKeys.has(currentLoadKey);
+
+  async function loadResource(key: LoadKey, force = false) {
+    if (!force && loaded.current.has(key)) return;
+    setLoadingKeys((current) => new Set(current).add(key));
     try {
-      const [
-        dashboardData,
-        sourceData,
-        nodeData,
-        profileData,
-        ruleData,
-        providerData,
-        nodeGroupData,
-        runData,
-        autoUpdateData,
-      ] = await Promise.all([
-        apiGet<Dashboard>(`${API}/dashboard`),
-        apiGet<{ sources: Source[] }>(`${API}/sources`),
-        apiGet<{ nodes: Node[] }>(`${API}/nodes`),
-        apiGet<{ profiles: Profile[] }>(`${API}/profiles`),
-        apiGet<{ ruleSets: RuleSet[] }>(`${API}/rule-sets`),
-        apiGet<{ providers: RuleProviderLibraryItem[] }>(
-          `${API}/rule-providers`,
-        ),
-        apiGet<{ groups: NodeGroup[] }>(`${API}/node-groups`),
-        apiGet<{ runs: RefreshRun[] }>(`${API}/refresh-runs?limit=100`),
-        apiGet<AutoUpdateSettings>(`${API}/auto-update-settings`),
-      ]);
-      setDashboard(dashboardData);
-      setSources(sourceData.sources);
-      setNodes(nodeData.nodes);
-      setProfiles(profileData.profiles);
-      setRuleSets(ruleData.ruleSets);
-      setProviderLibrary(providerData.providers);
-      setNodeGroups(nodeGroupData.groups);
-      setRuns(runData.runs);
-      setAutoUpdateSettings(autoUpdateData);
+      if (key === "dashboard") {
+        const [dashboardData, runData, autoUpdateData] = await Promise.all([
+          apiGet<Dashboard>(`${API}/dashboard`),
+          apiGet<{ runs: RefreshRun[] }>(`${API}/refresh-runs?limit=100`),
+          apiGet<AutoUpdateSettings>(`${API}/auto-update-settings`),
+        ]);
+        setDashboard(dashboardData); setRuns(runData.runs); setAutoUpdateSettings(autoUpdateData);
+      } else if (key === "node-pool") {
+        const [sourceData, nodeData] = await Promise.all([
+          apiGet<{ sources: Source[] }>(`${API}/sources`),
+          apiGet<{ nodes: Node[] }>(`${API}/nodes`),
+        ]);
+        setSources(sourceData.sources); setNodes(nodeData.nodes);
+      } else if (key === "node-groups") {
+        const [nodeData, groupData] = await Promise.all([
+          apiGet<{ nodes: Node[] }>(`${API}/nodes`),
+          apiGet<{ groups: NodeGroup[] }>(`${API}/node-groups`),
+        ]);
+        setNodes(nodeData.nodes); setNodeGroups(groupData.groups);
+      } else if (key === "profiles") {
+        const [profileData, ruleData] = await Promise.all([
+          apiGet<{ profiles: Profile[] }>(`${API}/profiles`),
+          apiGet<{ ruleSets: RuleSetSummary[] }>(`${API}/rule-sets`),
+        ]);
+        setProfiles(profileData.profiles); setRuleSets(ruleData.ruleSets);
+      } else if (key === "providers") {
+        const data = await apiGet<{ providers: RuleProviderLibraryItem[] }>(`${API}/rule-providers`);
+        setProviderLibrary(data.providers);
+      } else if (key === "rule-sets") {
+        const data = await apiGet<{ ruleSets: RuleSetSummary[] }>(`${API}/rule-sets`);
+        setRuleSets(data.ruleSets);
+      } else {
+        setAutoUpdateSettings(await apiGet<AutoUpdateSettings>(`${API}/auto-update-settings`));
+      }
+      loaded.current.add(key);
       setError("");
     } catch (caught) {
       setError(message(caught));
     } finally {
-      setLoading(false);
+      setLoadingKeys((current) => {
+        const next = new Set(current); next.delete(key); return next;
+      });
     }
   }
 
   useEffect(() => {
-    void loadAll();
-  }, []);
+    void loadResource(currentLoadKey);
+  }, [view, rulesTab, nodesTab]);
+
+  async function reloadCurrent() {
+    if (currentLoadKey !== "dashboard") loaded.current.delete("dashboard");
+    if (currentLoadKey === "node-pool") loaded.current.delete("node-groups");
+    if (currentLoadKey === "node-groups") loaded.current.delete("node-pool");
+    if (currentLoadKey === "rule-sets") loaded.current.delete("profiles");
+    await loadResource(currentLoadKey, true);
+  }
 
   async function action(
     key: string,
@@ -315,7 +361,8 @@ export default function AirPlaySubscriptionManager() {
     try {
       await work();
       setNotice(success);
-      if (reload) await loadAll();
+      loaded.current.delete("dashboard");
+      if (reload) await reloadCurrent();
       return true;
     } catch (caught) {
       setError(message(caught));
@@ -369,7 +416,7 @@ export default function AirPlaySubscriptionManager() {
         {},
       );
       setNotice("已复制为自定义节点，可以直接编辑");
-      await loadAll();
+      await reloadCurrent();
       setCustomNodeModal(result.node);
     } catch (caught) {
       setError(message(caught));
@@ -390,7 +437,7 @@ export default function AirPlaySubscriptionManager() {
       },
     });
   }
-  function removeRuleSet(ruleSet: RuleSet) {
+  function removeRuleSet(ruleSet: RuleSetSummary) {
     confirm({
       title: "删除规则组",
       message: (
@@ -425,7 +472,7 @@ export default function AirPlaySubscriptionManager() {
     });
   }
   function copyRuleProvider(provider: RuleProviderLibraryItem) {
-    if (String(provider.config.type ?? "") !== "manual") {
+    if (provider.type !== "manual") {
       setProviderCopy(provider);
       return;
     }
@@ -437,6 +484,30 @@ export default function AirPlaySubscriptionManager() {
         }),
       "Rule Provider 已复制",
     );
+  }
+  async function openProviderEditor(provider: RuleProviderLibraryItem) {
+    setPending(`provider-open-${provider.id}`); setError("");
+    try {
+      const result = await apiGet<{ provider: RuleProviderDetail }>(
+        `${API}/rule-providers/${provider.id}`,
+      );
+      setProviderModal(result.provider);
+    } catch (caught) { setError(message(caught)); }
+    finally { setPending(""); }
+  }
+  async function openRuleEditor(mode: "edit" | "import" | "create", summary?: RuleSetSummary) {
+    setPending(summary ? `rule-open-${summary.id}` : "rule-open-new"); setError("");
+    try {
+      const [nodeData, providerData, groupData, detailData] = await Promise.all([
+        apiGet<{ nodes: Node[] }>(`${API}/nodes`),
+        apiGet<{ providers: RuleProviderLibraryItem[] }>(`${API}/rule-providers`),
+        apiGet<{ groups: NodeGroup[] }>(`${API}/node-groups`),
+        summary ? apiGet<{ ruleSet: RuleSet }>(`${API}/rule-sets/${summary.id}`) : Promise.resolve(null),
+      ]);
+      setNodes(nodeData.nodes); setProviderLibrary(providerData.providers); setNodeGroups(groupData.groups);
+      setRuleModal({ mode, ruleSet: detailData?.ruleSet });
+    } catch (caught) { setError(message(caught)); }
+    finally { setPending(""); }
   }
   function removeNodeGroup(group: NodeGroup) {
     confirm({
@@ -485,7 +556,7 @@ export default function AirPlaySubscriptionManager() {
           className="csm-btn csm-btn-secondary"
           type="button"
           disabled={loading}
-          onClick={() => void loadAll()}
+          onClick={() => void reloadCurrent()}
         >
           <RefreshCw size={14} className={loading ? "csm-spin" : ""} />
           刷新
@@ -635,8 +706,13 @@ export default function AirPlaySubscriptionManager() {
             }
           />
         )}
-        {view === "auto-update" && autoUpdateSettings && (
-          <AutoUpdateView settings={autoUpdateSettings} onSaved={setAutoUpdateSettings} />
+        {view === "auto-update" && (
+          autoUpdateSettings
+            ? <AutoUpdateView settings={autoUpdateSettings} onSaved={(settings) => {
+                setAutoUpdateSettings(settings);
+                loaded.current.delete("dashboard");
+              }} />
+            : <Loading text="加载自动更新设置…" />
         )}
         {profileLogModal && (
           <ProfileRefreshLogModal profile={profileLogModal} runs={profileRuns} onClose={() => setProfileLogModal(null)} />
@@ -665,8 +741,8 @@ export default function AirPlaySubscriptionManager() {
               <RulesView
                 ruleSets={ruleSets}
                 loading={loading}
-                onCreate={() => setRuleModal({ mode: "create" })}
-                onEdit={(ruleSet) => setRuleModal({ mode: "edit", ruleSet })}
+                onCreate={() => void openRuleEditor("create")}
+                onEdit={(ruleSet) => void openRuleEditor("edit", ruleSet)}
                 onRemove={removeRuleSet}
               />
             ) : (
@@ -675,7 +751,8 @@ export default function AirPlaySubscriptionManager() {
                 loading={loading}
                 pending={pending}
                 onAdd={() => setProviderModal(null)}
-                onEdit={setProviderModal}
+                onView={setProviderRules}
+                onEdit={(provider) => void openProviderEditor(provider)}
                 onCopy={copyRuleProvider}
                 onRemove={removeRuleProvider}
               />
@@ -720,7 +797,7 @@ export default function AirPlaySubscriptionManager() {
             setSourceModal(false);
             setSourceInitialUrl("");
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -732,7 +809,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async (text) => {
             setProfileModal(false);
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -743,7 +820,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async (text) => {
             setCustomNodeModal(false);
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -754,7 +831,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async () => {
             setAliasNode(null);
             setNotice("节点别名已保存");
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -765,7 +842,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async () => {
             setCountryNode(null);
             setNotice("节点国家/地区已保存");
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -780,7 +857,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async (text) => {
             setRuleModal(null);
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -800,7 +877,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async (text) => {
             setNodeGroupModal(false);
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -811,7 +888,7 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async (text) => {
             setProviderModal(false);
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
       )}
@@ -822,9 +899,12 @@ export default function AirPlaySubscriptionManager() {
           onSaved={async (text) => {
             setProviderCopy(null);
             setNotice(text);
-            await loadAll();
+            await reloadCurrent();
           }}
         />
+      )}
+      {providerRules && (
+        <RuleProviderRulesModal provider={providerRules} onClose={() => setProviderRules(null)} />
       )}
       {dialog}
     </div>
@@ -2514,6 +2594,7 @@ function RuleProvidersView({
   loading,
   pending,
   onAdd,
+  onView,
   onEdit,
   onCopy,
   onRemove,
@@ -2522,6 +2603,7 @@ function RuleProvidersView({
   loading: boolean;
   pending: string;
   onAdd: () => void;
+  onView: (provider: RuleProviderLibraryItem) => void;
   onEdit: (provider: RuleProviderLibraryItem) => void;
   onCopy: (provider: RuleProviderLibraryItem) => void;
   onRemove: (provider: RuleProviderLibraryItem) => void;
@@ -2532,7 +2614,7 @@ function RuleProvidersView({
     return providers.filter(
       (provider) =>
         !keyword ||
-        `${provider.name} ${provider.providerKey} ${provider.description} ${String(provider.config.url ?? "")} ${stringList(provider.config.payload).join(" ")}`
+        `${provider.name} ${provider.providerKey} ${provider.description} ${provider.source}`
           .toLowerCase()
           .includes(keyword),
     );
@@ -2565,7 +2647,7 @@ function RuleProvidersView({
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="搜索名称、Provider Key、规则或地址"
+            placeholder="搜索名称、Provider Key 或来源地址"
           />
         </label>
         <span className="csm-muted">共 {filtered.length} 个 Provider</span>
@@ -2592,17 +2674,10 @@ function RuleProvidersView({
           </thead>
           <tbody>
             {filtered.map((provider) => {
-              const payload = stringList(provider.config.payload);
-              const handwritten =
-                String(provider.config.type ?? "") === "manual";
+              const handwritten = provider.type === "manual";
               const source = handwritten
-                ? `自定义 ${payload.length} 条规则`
-                : String(
-                    provider.config.sourceUrl ??
-                      provider.config.url ??
-                      provider.config.path ??
-                      "—",
-                  );
+                ? `自定义 ${provider.ruleCount} 条规则`
+                : provider.source || "—";
               return (
                 <tr key={provider.id}>
                   <td>
@@ -2621,7 +2696,7 @@ function RuleProvidersView({
                   <td>
                     <code className="csm-code">
                       {handwritten ? "自定义" : "规则订阅"} /{" "}
-                      {String(provider.config.behavior ?? "—")}
+                      {provider.behavior || "—"}
                     </code>
                   </td>
                   <td>
@@ -2638,6 +2713,14 @@ function RuleProvidersView({
                   </td>
                   <td>
                     <Actions>
+                      <button
+                        className="csm-btn csm-btn-sm csm-btn-ghost"
+                        type="button"
+                        title="分页查看规则"
+                        onClick={() => onView(provider)}
+                      >
+                        <Eye size={13} />
+                      </button>
                       <button
                         className="csm-btn csm-btn-sm csm-btn-ghost"
                         type="button"
@@ -2678,6 +2761,58 @@ function RuleProvidersView({
         </Table>
       )}
     </div>
+  );
+}
+
+function RuleProviderRulesModal({
+  provider,
+  onClose,
+}: {
+  provider: RuleProviderLibraryItem;
+  onClose: () => void;
+}) {
+  const pageSize = 200;
+  const [offset, setOffset] = useState(0);
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const [items, setItems] = useState<string[]>([]);
+  const [total, setTotal] = useState(provider.ruleCount);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true); setError("");
+    apiGet<{ items: string[]; total: number; offset: number; limit: number }>(
+      `${API}/rule-providers/${provider.id}/rules?offset=${offset}&limit=${pageSize}&search=${encodeURIComponent(search)}`,
+    ).then((result) => {
+      if (!active) return;
+      setItems(result.items); setTotal(result.total);
+    }).catch((caught) => { if (active) setError(message(caught)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [provider.id, offset, search]);
+
+  return (
+    <Modal title={`规则内容：${provider.name}`} width={900} onClose={onClose}>
+      <div className="csm-stack">
+        <form className="csm-filterbar" onSubmit={(event) => {
+          event.preventDefault(); setOffset(0); setSearch(query.trim());
+        }}>
+          <label className="csm-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索规则内容" /></label>
+          <button className="csm-btn csm-btn-secondary" type="submit">搜索</button>
+        </form>
+        {error && <Alert type="error">{error}</Alert>}
+        {loading ? <Loading text="加载规则…" /> : (
+          <div className="csm-preview"><pre>{items.length ? items.join("\n") : "暂无规则"}</pre></div>
+        )}
+        <div className="csm-pagination">
+          <button className="csm-btn csm-btn-secondary" type="button" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>上一页</button>
+          <span className="csm-muted">{total ? `${offset + 1}–${Math.min(total, offset + pageSize)} / ${total}` : "0 条"}</span>
+          <button className="csm-btn csm-btn-secondary" type="button" disabled={loading || offset + pageSize >= total} onClick={() => setOffset(offset + pageSize)}>下一页</button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -2764,7 +2899,7 @@ function RuleProviderModal({
   onClose,
   onSaved,
 }: {
-  provider: RuleProviderLibraryItem | null;
+  provider: RuleProviderDetail | null;
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
@@ -2783,10 +2918,27 @@ function RuleProviderModal({
     String(initialConfig.type ?? "") === "manual" ? "manual" : "subscription",
   );
   const [manualContent, setManualContent] = useState(initialPayload.join("\n"));
+  const [manualLoaded, setManualLoaded] = useState(
+    !provider || provider.type !== "manual" || initialPayload.length > 0,
+  );
+  const [loadingRules, setLoadingRules] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const behavior = String(config.behavior ?? "domain");
   const autoGeneratedProviderKey = /^rp-[0-9a-f]{32}$/.test(providerKey);
+
+  async function loadAllManualRules() {
+    if (!provider) return;
+    setLoadingRules(true); setError("");
+    try {
+      const result = await apiGet<{ provider: RuleProviderDetail }>(
+        `${API}/rule-providers/${provider.id}?includePayload=true`,
+      );
+      setManualContent(stringList(result.provider.config.payload).join("\n"));
+      setManualLoaded(true);
+    } catch (caught) { setError(message(caught)); }
+    finally { setLoadingRules(false); }
+  }
 
   function setConfigField(key: string, value: unknown) {
     setConfig((current) => ({ ...current, [key]: value }));
@@ -2820,6 +2972,8 @@ function RuleProviderModal({
     setError("");
     try {
       const material = visualConfig();
+      if (material.type === "manual" && !manualLoaded)
+        throw new Error("请先点击“加载全部规则进行编辑”。");
       if (material.type === "manual" && !stringList(material.payload).length)
         throw new Error("请至少填写一条自定义规则。");
       const payload = {
@@ -2977,14 +3131,30 @@ function RuleProviderModal({
         ) : (
           <>
             <Field label="自定义规则（每行一条）" full>
-              <textarea
-                className="csm-textarea csm-code-editor"
-                rows={12}
-                spellCheck={false}
-                value={manualContent}
-                onChange={(event) => setManualContent(event.target.value)}
-                placeholder="每行输入一条规则"
-              />
+              {!manualLoaded ? (
+                <div className="csm-stack">
+                  <Alert type="info">
+                    该 Provider 有 {provider?.ruleCount ?? 0} 条规则，默认不加载完整内容。
+                  </Alert>
+                  <button
+                    className="csm-btn csm-btn-secondary"
+                    type="button"
+                    disabled={loadingRules}
+                    onClick={() => void loadAllManualRules()}
+                  >
+                    {loadingRules ? <><Spin size={14} />加载中</> : "加载全部规则进行编辑"}
+                  </button>
+                </div>
+              ) : (
+                <textarea
+                  className="csm-textarea csm-code-editor"
+                  rows={12}
+                  spellCheck={false}
+                  value={manualContent}
+                  onChange={(event) => setManualContent(event.target.value)}
+                  placeholder="每行输入一条规则"
+                />
+              )}
               <small className="csm-muted">
                 当前 behavior 为 <code>{behavior}</code>，每行会作为一条 payload
                 保存，空行自动忽略。
@@ -3569,7 +3739,7 @@ function RuleDomainTestModal({
   ruleSet,
   onClose,
 }: {
-  ruleSet: RuleSet;
+  ruleSet: RuleSetSummary;
   onClose: () => void;
 }) {
   const [domain, setDomain] = useState("");
@@ -3664,13 +3834,13 @@ function RulesView({
   onEdit,
   onRemove,
 }: {
-  ruleSets: RuleSet[];
+  ruleSets: RuleSetSummary[];
   loading: boolean;
   onCreate: () => void;
-  onEdit: (rule: RuleSet) => void;
-  onRemove: (rule: RuleSet) => void;
+  onEdit: (rule: RuleSetSummary) => void;
+  onRemove: (rule: RuleSetSummary) => void;
 }) {
-  const [testingRule, setTestingRule] = useState<RuleSet | null>(null);
+  const [testingRule, setTestingRule] = useState<RuleSetSummary | null>(null);
   return (
     <div className="csm-panel">
       <Toolbar
@@ -3713,9 +3883,9 @@ function RulesView({
                 <td>
                   <strong>{rule.name}</strong>
                 </td>
-                <td>{rule.rules.length}</td>
-                <td>{rule.groups.length}</td>
-                <td>{Object.keys(rule.providers).length}</td>
+                <td>{rule.ruleCount}</td>
+                <td>{rule.groupCount}</td>
+                <td>{rule.providerCount}</td>
                 <td>{stamp(rule.updatedAt)}</td>
                 <td>
                   <Actions>
@@ -3911,7 +4081,7 @@ function ProfileModal({
   onSaved,
 }: {
   profile: Profile | null;
-  ruleSets: RuleSet[];
+  ruleSets: RuleSetSummary[];
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
@@ -4177,6 +4347,11 @@ function ProfileDiagnosticModal({
   const [copyState, setCopyState] = useState<"idle" | "success" | "failed">(
     "idle",
   );
+  const [yamlOffset, setYamlOffset] = useState(0);
+  const [yamlLines, setYamlLines] = useState<string[] | null>(null);
+  const [yamlLoading, setYamlLoading] = useState(false);
+  const [yamlError, setYamlError] = useState("");
+  const yamlPageSize = 300;
   const validationText = preview.messages
     .map(
       (item) =>
@@ -4194,9 +4369,20 @@ function ProfileDiagnosticModal({
     "===== 生成过程日志 =====",
     preview.buildLog.join("\n"),
     "",
-    "===== YAML 原文 =====",
-    preview.yaml,
+    "===== YAML 预览 =====",
+    yamlLines?.join("\n") ?? `未加载（共 ${preview.yamlLines} 行，${preview.yamlBytes} 字节）`,
   ].join("\n");
+
+  async function loadYaml(offset: number) {
+    setYamlLoading(true); setYamlError("");
+    try {
+      const result = await apiGet<{ lines: string[]; total: number; offset: number; limit: number }>(
+        `${API}/profiles/${preview.profileId}/preview/yaml?offset=${offset}&limit=${yamlPageSize}`,
+      );
+      setYamlOffset(result.offset); setYamlLines(result.lines);
+    } catch (caught) { setYamlError(message(caught)); }
+    finally { setYamlLoading(false); }
+  }
 
   async function copyDiagnostic() {
     try {
@@ -4219,7 +4405,7 @@ function ProfileDiagnosticModal({
               ? "诊断信息已复制。"
               : copyState === "failed"
                 ? "复制失败，请手动选择内容复制。"
-                : "复制内容包含校验消息、生成过程日志和 YAML 原文。"}
+                : "复制当前已加载的诊断内容。"}
           </span>
           <button
             className="csm-btn csm-btn-secondary"
@@ -4241,16 +4427,28 @@ function ProfileDiagnosticModal({
     >
       <div className="csm-stack">
         <Alert type="error">
-          配置校验未通过，已发布版本未被覆盖。请结合下方过程日志与 YAML
-          原文定位问题。
+          配置校验未通过，已发布版本未被覆盖。请结合下方过程日志定位问题，
+          YAML 仅在需要时分页加载。
         </Alert>
         <div className="csm-preview">
           <strong>校验消息</strong>
           <pre>{validationText || "无"}</pre>
           <strong>生成过程日志</strong>
           <pre>{preview.buildLog.join("\n")}</pre>
-          <strong>YAML 原文</strong>
-          <pre>{preview.yaml}</pre>
+          <strong>YAML 预览（{preview.yamlLines} 行，{preview.yamlBytes} 字节）</strong>
+          {yamlError && <Alert type="error">{yamlError}</Alert>}
+          {yamlLines ? <pre>{yamlLines.join("\n")}</pre> : (
+            <button className="csm-btn csm-btn-secondary" type="button" disabled={yamlLoading} onClick={() => void loadYaml(0)}>
+              {yamlLoading ? "加载中…" : "加载前 300 行"}
+            </button>
+          )}
+          {yamlLines && (
+            <div className="csm-pagination">
+              <button className="csm-btn csm-btn-secondary" type="button" disabled={yamlLoading || yamlOffset === 0} onClick={() => void loadYaml(Math.max(0, yamlOffset - yamlPageSize))}>上一页</button>
+              <span className="csm-muted">{yamlOffset + 1}–{Math.min(preview.yamlLines, yamlOffset + yamlPageSize)} / {preview.yamlLines}</span>
+              <button className="csm-btn csm-btn-secondary" type="button" disabled={yamlLoading || yamlOffset + yamlPageSize >= preview.yamlLines} onClick={() => void loadYaml(yamlOffset + yamlPageSize)}>下一页</button>
+            </div>
+          )}
         </div>
       </div>
     </Modal>
@@ -5150,7 +5348,7 @@ function StrategyGroupModal({
                         <strong>{provider.name}</strong>
                         <code>
                           {providerKeyText(provider)} ·{" "}
-                          {String(provider.config.type ?? "") === "manual"
+                          {provider.type === "manual"
                             ? "自定义"
                             : "规则订阅"}
                         </code>

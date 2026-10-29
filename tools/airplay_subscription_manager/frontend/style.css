@@ -85,6 +85,7 @@
 .csm-cell-error,.csm-error-text { color: #b91c1c; }
 .csm-footnote { margin: 12px 0 0; color: #64748b; font-size: 12px; }
 .csm-filterbar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.csm-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; }
 .csm-search { display: flex; align-items: center; gap: 8px; width: min(420px,100%); min-height: 36px; padding: 0 10px; color: #64748b; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; }
 .csm-search input { width: 100%; min-width: 0; border: 0; outline: 0; color: #1e293b; background: transparent; }
 .csm-compact { width: auto !important; min-width: 135px; }

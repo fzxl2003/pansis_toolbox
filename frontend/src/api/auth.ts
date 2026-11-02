@@ -14,16 +14,35 @@ export type AuthState = {
   user: AuthUser | null;
 };
 
+type AuthStateListener = (state: AuthState) => void;
+
+const authStateListeners = new Set<AuthStateListener>();
+
+function publishAuthState(state: AuthState) {
+  authStateListeners.forEach((listener) => listener(state));
+}
+
+export function onAuthStateChange(listener: AuthStateListener) {
+  authStateListeners.add(listener);
+  return () => {
+    authStateListeners.delete(listener);
+  };
+}
+
 export function fetchMe() {
   return apiGet<AuthState>('/api/auth/me');
 }
 
-export function login(username: string, password: string) {
-  return apiPost<AuthState>('/api/auth/login', { username, password });
+export async function login(username: string, password: string) {
+  const state = await apiPost<AuthState>('/api/auth/login', { username, password });
+  publishAuthState(state);
+  return state;
 }
 
-export function logout() {
-  return apiPost<AuthState>('/api/auth/logout', {});
+export async function logout() {
+  const state = await apiPost<AuthState>('/api/auth/logout', {});
+  publishAuthState(state);
+  return state;
 }
 
 export function changePassword(currentPassword: string, newPassword: string) {

@@ -2,18 +2,31 @@ import { LogOut, UserCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import { fetchMe, logout, type AuthUser } from '../api/auth';
+import { fetchMe, logout, onAuthStateChange, type AuthUser } from '../api/auth';
 
 export function AuthStatus() {
   const [user, setUser] = useState<AuthUser | null>(null);
 
   useEffect(() => {
-    fetchMe().then((state) => setUser(state.user)).catch(() => setUser(null));
+    let authChanged = false;
+    const unsubscribe = onAuthStateChange((state) => {
+      authChanged = true;
+      setUser(state.user);
+    });
+
+    fetchMe()
+      .then((state) => {
+        if (!authChanged) setUser(state.user);
+      })
+      .catch(() => {
+        if (!authChanged) setUser(null);
+      });
+
+    return unsubscribe;
   }, []);
 
   async function signOut() {
     await logout();
-    setUser(null);
   }
 
   if (!user) {

@@ -134,11 +134,13 @@ docker/compose.yml      容器创建和启动配置
 ./docker/build-image.sh
 ```
 
-可通过环境变量覆盖镜像名、标签和平台：
+可通过环境变量覆盖镜像名、额外标签和平台：
 
 ```bash
 IMAGE_NAME=pansis-toolbox IMAGE_TAG=prod PLATFORM=linux/amd64 ./docker/build-image.sh
 ```
+
+基础版本唯一来源是 `pyproject.toml` 中的 `project.version`。构建脚本始终生成对应版本标签和 `latest`；如果本地已存在同名基础版本，新标签为 `<版本>-<7 位 commit 哈希>`。`IMAGE_TAG` 只会额外添加自定义标签，不会取代版本标签。
 
 构建脚本会扫描当前仓库中的 `tools/*/manifest.json`，只处理当前存在且启用的工具。镜像内部同样按工具目录扫描：
 
@@ -152,6 +154,8 @@ IMAGE_NAME=pansis-toolbox IMAGE_TAG=prod PLATFORM=linux/amd64 ./docker/build-ima
 ```bash
 docker compose -f docker/compose.yml up -d
 ```
+
+Compose 使用上一步已构建的镜像，不会绕过统一版本构建脚本自行构建。
 
 默认访问：
 

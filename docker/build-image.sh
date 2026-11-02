@@ -5,9 +5,20 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 IMAGE_NAME=${IMAGE_NAME:-pansis-toolbox}
-IMAGE_TAG=${IMAGE_TAG:-latest}
+CUSTOM_IMAGE_TAG=${IMAGE_TAG:-}
 
-printf 'Building %s:%s from %s\n' "$IMAGE_NAME" "$IMAGE_TAG" "$ROOT_DIR"
+BASE_VERSION=$(cd "$ROOT_DIR" && python3 -m backend.app.core.version)
+VCS_REF=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)
+VERSION_TAG=$BASE_VERSION
+if docker image inspect "$IMAGE_NAME:$BASE_VERSION" >/dev/null 2>&1; then
+    if [ -z "$VCS_REF" ]; then
+        echo "Cannot create a duplicate-version image tag without a Git commit" >&2
+        exit 1
+    fi
+    VERSION_TAG="$BASE_VERSION-$(printf '%.7s' "$VCS_REF")"
+fi
+
+printf 'Building %s:%s from %s\n' "$IMAGE_NAME" "$VERSION_TAG" "$ROOT_DIR"
 python3 - "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
@@ -45,4 +56,14 @@ else
     set --
 fi
 
-docker build "$@" -f "$ROOT_DIR/docker/Dockerfile" -t "$IMAGE_NAME:$IMAGE_TAG" "$ROOT_DIR"
+set -- "$@" \
+    --build-arg "APP_BUILD_VERSION=$VERSION_TAG" \
+    --build-arg "VCS_REF=$VCS_REF" \
+    -t "$IMAGE_NAME:$VERSION_TAG" \
+    -t "$IMAGE_NAME:latest"
+
+if [ -n "$CUSTOM_IMAGE_TAG" ] && [ "$CUSTOM_IMAGE_TAG" != "$VERSION_TAG" ] && [ "$CUSTOM_IMAGE_TAG" != "latest" ]; then
+    set -- "$@" -t "$IMAGE_NAME:$CUSTOM_IMAGE_TAG"
+fi
+
+docker build "$@" -f "$ROOT_DIR/docker/Dockerfile" "$ROOT_DIR"

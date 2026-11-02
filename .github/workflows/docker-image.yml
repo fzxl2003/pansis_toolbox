@@ -10,6 +10,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,16 +25,10 @@ jobs:
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Extract version from about.json
+      - name: Extract base version from pyproject.toml
         id: version
         run: |
-          version=""
-          if [ -f about.json ]; then
-            # 从 about.json 的 items 中查找 label 为 "版本" 的 value
-            version=$(jq -r '.items[] | select(.label=="版本") | .value' about.json 2>/dev/null | head -n1 || true)
-          fi
-          # 仅在解析到非空值时输出，否则保持默认（latest + sha）
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "base_version=$(python3 -m backend.app.core.version)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -43,6 +41,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve image version
+        id: image-version
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          BASE_VERSION: ${{ steps.version.outputs.base_version }}
+        run: |
+          image_version="$BASE_VERSION"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && docker buildx imagetools inspect "$IMAGE_NAME:$BASE_VERSION" >/dev/null 2>&1; then
+            image_version="$BASE_VERSION-${GITHUB_SHA:0:7}"
+          fi
+          echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -50,7 +60,7 @@ jobs:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
+            type=raw,value=${{ steps.image-version.outputs.image_version }}
             type=sha,prefix=
 
       - name: Build and push Docker image
@@ -60,4 +70,10 @@ jobs:
           file: docker/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.version=${{ steps.image-version.outputs.image_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            APP_BUILD_VERSION=${{ steps.image-version.outputs.image_version }}
+            VCS_REF=${{ github.sha }}

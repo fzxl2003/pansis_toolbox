@@ -2,7 +2,6 @@
   "id": "airplay_subscription_manager",
   "name": "AirPlay 订阅聚合器",
   "description": "导入、去重并发布 AirPlay YAML 聚合订阅。",
-  "version": "1.0.0",
   "enabled": true,
   "category": "network",
   "icon": {"type": "lucide", "name": "radio-tower"},

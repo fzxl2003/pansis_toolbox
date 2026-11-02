@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from backend.app.core.errors import ToolboxError
 from backend.app.core.security import get_optional_user, require_admin, require_user
+from backend.app.core.version import PROJECT_ROOT, get_build_version
 from backend.app.registry.tool_registry import tool_registry
 from backend.app.services.data_management import (
     compute_before_date,
@@ -22,10 +22,8 @@ from backend.app.services import ssh_server_service
 from backend.app.services import github_key_service
 from backend.app.services import proxy_service
 
-# Project-root relative file that holds the "About" information shown in the
-# settings page.  Edit this file to update version / developer / contact info
-# without touching code.
-ABOUT_FILE = Path("about.json")
+# Project metadata shown alongside the version sourced from pyproject.toml.
+ABOUT_FILE = PROJECT_ROOT / "about.json"
 
 router = APIRouter()
 
@@ -335,13 +333,24 @@ def delete_data_route(request: Request, payload: DataDeletionPayload) -> dict:
 def about_route(request: Request) -> dict:
     """Return platform about info (version, developer, contact, ...).
 
-    The content is read from ``about.json`` at the project root so it can be
-    updated without restarting the service.  Available to any visitor.
+    Descriptive content is read from ``about.json``. The application version
+    is always injected from pyproject.toml (or the derived image build version).
+    Available to any visitor.
     """
     get_optional_user(request)
+    payload: dict = {"items": []}
     if ABOUT_FILE.exists():
         try:
-            return json.loads(ABOUT_FILE.read_text(encoding="utf-8"))
+            loaded = json.loads(ABOUT_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
         except (json.JSONDecodeError, OSError):
             pass
-    return {"items": []}
+    items = payload.get("items")
+    if not isinstance(items, list):
+        items = []
+    payload["items"] = [
+        {"label": "版本", "value": get_build_version(), "type": "text"},
+        *(item for item in items if not isinstance(item, dict) or item.get("label") != "版本"),
+    ]
+    return payload

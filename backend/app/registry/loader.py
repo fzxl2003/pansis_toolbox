@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
+from backend.app.core.version import get_build_version
 from backend.app.registry.models import RegisteredTool, ToolManifest, ToolStatus
 from backend.app.registry.tool_registry import tool_registry
 from backend.app.registry.widget_registry import widget_registry
@@ -34,7 +35,9 @@ def discover_tools(tools_dir: Path) -> list[RegisteredTool]:
             continue
 
         try:
-            manifest = ToolManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_data["version"] = get_build_version()
+            manifest = ToolManifest.model_validate(manifest_data)
             status = _initial_status(tool_root, manifest, seen_ids, seen_prefixes)
             error = _status_error(status)
             tools.append(RegisteredTool(manifest=manifest, root_path=tool_root, status=status, error_message=error))
@@ -45,7 +48,7 @@ def discover_tools(tools_dir: Path) -> list[RegisteredTool]:
                 id=tool_root.name,
                 name=tool_root.name,
                 description="Manifest 加载失败",
-                version="0.0.0",
+                version=get_build_version(),
                 enabled=False,
                 entry={"frontend": "frontend/index.tsx", "backend": "backend/router.py"},
                 api={"prefix": f"/api/tools/{tool_root.name}"},

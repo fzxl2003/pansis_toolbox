@@ -2,7 +2,6 @@
   "id": "ssh_workspace",
   "name": "SSH 工作台",
   "description": "个人 SSH 服务器、网页终端、screen 会话、命令模板和定时任务工作台。",
-  "version": "1.0.0",
   "enabled": true,
   "category": "ops",
   "icon": "terminal",

@@ -30,6 +30,9 @@ def main() -> int:
         frontend_entry = manifest.get("entry", {}).get("frontend")
         backend_entry = manifest.get("entry", {}).get("backend")
 
+        if "version" in manifest:
+            errors.append(f"{tool_dir.name}: version must come from pyproject.toml, not manifest.json")
+
         if not tool_id:
             errors.append(f"{tool_dir.name}: missing id")
         elif tool_id in seen_ids:

@@ -1,6 +1,5 @@
 {
   "name": "pansis-toolbox-frontend",
-  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {

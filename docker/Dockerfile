@@ -17,8 +17,13 @@ RUN python3 scripts/generate_tool_views.py && npm --prefix frontend run build
 
 FROM python:3.12-slim-bookworm AS runtime
 
+ARG APP_BUILD_VERSION
+ARG VCS_REF
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    APP_BUILD_VERSION=${APP_BUILD_VERSION} \
+    VCS_REF=${VCS_REF} \
     APP_ENV=production \
     TOOLS_DIR=/app/tools \
     FRONTEND_DIST_DIR=/app/frontend/dist \
@@ -27,6 +32,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WIDGET_LAYOUT_PATH=/app/storage/data/widget_layout.json \
     FRONTEND_ORIGIN=http://localhost:8000
 
+LABEL org.opencontainers.image.version="${APP_BUILD_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}"
+
 WORKDIR /app
 
 RUN apt-get update \
@@ -34,6 +42,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
+COPY about.json ./
 COPY backend ./backend
 COPY tools ./tools
 COPY scripts ./scripts

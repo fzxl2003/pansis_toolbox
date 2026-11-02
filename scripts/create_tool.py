@@ -33,7 +33,6 @@ def main() -> int:
         "id": tool_id,
         "name": tool_id.replace("_", " ").title(),
         "description": "New toolbox tool.",
-        "version": "0.1.0",
         "enabled": True,
         "category": "other",
         "icon": {"type": "lucide", "name": "wrench"},

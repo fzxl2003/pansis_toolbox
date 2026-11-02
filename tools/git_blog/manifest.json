@@ -2,7 +2,6 @@
   "id": "git_blog",
   "name": "Git 博客",
   "description": "从 GitHub 仓库同步 Markdown，发布为多用户公开博客。",
-  "version": "0.1.0",
   "enabled": true,
   "category": "text",
   "icon": {"type": "lucide", "name": "book-open"},

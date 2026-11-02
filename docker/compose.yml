@@ -1,9 +1,6 @@
 services:
   pansis-toolbox:
     image: ${IMAGE_NAME:-pansis-toolbox}:${IMAGE_TAG:-latest}
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
     container_name: ${CONTAINER_NAME:-pansis-toolbox}
     restart: unless-stopped
     ports:

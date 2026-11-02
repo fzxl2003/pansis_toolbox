@@ -148,6 +148,7 @@ export type DataCategoryInfo = {
   timeColumn: string | null;
   storage: 'user_tool_db' | 'platform_db';
   tables: string[];
+  cascadeCategories: string[];
 };
 
 export type ToolDataCategories = {

@@ -965,6 +965,22 @@ function rangeLabel(start: string, end: string): string {
   return `${start || '…'} ~ ${end || '…'}`;
 }
 
+function getCascadeCategoryNames(tool: ToolDataCategories, roots: string[]): string[] {
+  const categories = new Map(tool.categories.map((category) => [category.name, category]));
+  const rootNames = new Set(roots);
+  const cascaded = new Set<string>();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const current = categories.get(pending.pop() ?? '');
+    for (const name of current?.cascadeCategories ?? []) {
+      if (rootNames.has(name) || cascaded.has(name)) continue;
+      cascaded.add(name);
+      pending.push(name);
+    }
+  }
+  return [...cascaded];
+}
+
 /** A compact button that opens a popover with two date inputs (day granularity). */
 function DateRangePicker({
   start,
@@ -1422,7 +1438,14 @@ function DataCleanupPanel({
     const selectedCats = tool.categories.filter((c) => catState[c.name]?.selected);
     const catsToDelete = selectedCats.length > 0 ? selectedCats : tool.categories;
     const descList = catsToDelete.map((c) => c.description).join('、');
-    if (!window.confirm(`确认删除${userClause || scopeLabel}在「${tool.toolName}」中的「${descList}」？该操作不可恢复。`)) return;
+    const cascadeNames = getCascadeCategoryNames(tool, catsToDelete.map((c) => c.name));
+    const cascadeDescriptions = cascadeNames
+      .map((name) => tool.categories.find((category) => category.name === name)?.description ?? name)
+      .join('、');
+    const cascadeWarning = cascadeDescriptions
+      ? `\n\n为保持数据一致性，还将同步删除关联的「${cascadeDescriptions}」。`
+      : '';
+    if (!window.confirm(`确认删除${userClause || scopeLabel}在「${tool.toolName}」中的「${descList}」？${cascadeWarning}\n\n该操作不可恢复。`)) return;
 
     setDeleting(true);
     try {
@@ -1673,6 +1696,7 @@ function DataCleanupPanel({
                                 {selCount !== null && ` · 选中 ${selCount} 条`}
                                 {cat.storage === 'platform_db' ? ' · 共享数据库' : ' · 用户数据库'}
                                 {!isTimeBased && ' · 配置数据（不支持按时间删除）'}
+                                {cat.cascadeCategories.length > 0 && ' · 删除时会同步清理关联数据'}
                               </small>
                             </span>
                           </label>

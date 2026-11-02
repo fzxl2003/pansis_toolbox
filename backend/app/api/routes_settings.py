@@ -203,6 +203,7 @@ def data_categories_route(request: Request) -> dict:
                     "timeColumn": c.time_column,
                     "storage": c.storage,
                     "tables": c.tables,
+                    "cascadeCategories": c.cascade_categories,
                 }
                 for c in cats
             ],
@@ -237,7 +238,7 @@ def data_usage_route(request: Request, tool_id: str, userId: str | None = None) 
 
 
 class DataCountItem(BaseModel):
-    category: str | None = None  # None = all time-based categories
+    category: str | None = None  # None = all categories (date filters skip non-time-based ones)
     startDate: str | None = None  # YYYY-MM-DD inclusive
     endDate: str | None = None  # YYYY-MM-DD inclusive
 

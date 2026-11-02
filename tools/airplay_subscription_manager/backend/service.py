@@ -128,8 +128,20 @@ _geoip_job_users: set[str] = set()
 _geoip_job_lock = threading.Lock()
 
 register_tool_categories(TOOL_ID, [
-    DataCategory("configuration", ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_rule_sets", "csm_rule_providers", "csm_node_groups", "csm_published_snapshots", "csm_settings"], None, "订阅源、节点、配置、自动更新设置和最后有效发布版本"),
-    DataCategory("history", ["csm_source_snapshots", "csm_refresh_runs", "csm_profile_refresh_runs", "csm_probe_results", "csm_ip_geo_cache", "csm_subscription_requests"], "created_at", "订阅刷新、聚合配置更新、TCP 探测、GeoIP 缓存和聚合订阅请求记录"),
+    DataCategory(
+        "configuration",
+        ["csm_sources", "csm_nodes", "csm_node_sources", "csm_profiles", "csm_rule_sets", "csm_rule_providers", "csm_node_groups", "csm_published_snapshots", "csm_settings"],
+        None,
+        "订阅源、节点、配置、自动更新设置和最后有效发布版本",
+        cascade_categories=["history", "public_tokens"],
+    ),
+    DataCategory(
+        "history",
+        ["csm_source_snapshots", "csm_refresh_runs", "csm_profile_refresh_runs", "csm_probe_results", "csm_ip_geo_cache", "csm_subscription_requests"],
+        "created_at",
+        "订阅刷新、聚合配置更新、TCP 探测、GeoIP 缓存和聚合订阅请求记录",
+        table_time_columns={"csm_subscription_requests": "requested_at"},
+    ),
     DataCategory("public_tokens", ["csm_public_tokens"], None, "公开订阅令牌索引", storage="platform_db", user_id_column="user_id"),
 ])
 

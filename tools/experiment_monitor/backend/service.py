@@ -257,6 +257,7 @@ register_tool_categories(TOOL_ID, [
         time_column=None,
         description="配置数据（服务器、监控任务、报警动作、脚本队列）",
         storage="user_tool_db",
+        cascade_categories=["samples", "events", "script_history"],
     ),
     DataCategory(
         name="samples",
@@ -278,6 +279,7 @@ register_tool_categories(TOOL_ID, [
         time_column="triggered_at",
         description="脚本执行历史和 Screen 会话",
         storage="user_tool_db",
+        table_time_columns={"em_screen_sessions": "started_at"},
     ),
 ])
 

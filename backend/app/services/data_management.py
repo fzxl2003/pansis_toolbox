@@ -46,6 +46,9 @@ class DataCategory:
         description: Human-readable description shown in the settings UI.
         storage: ``"user_tool_db"`` for per-user databases, ``"platform_db"``
             for the shared platform database.
+        table_time_columns: Optional per-table timestamp overrides.
+        cascade_categories: Categories that must be removed before this one
+            when the category is deleted without a time filter.
     """
 
     name: str
@@ -56,6 +59,13 @@ class DataCategory:
     # Platform-owned rows normally belong to the entire installation.  Tools
     # that keep a small public lookup index can opt into user-scoped cleanup.
     user_id_column: str | None = None
+    # Some logical categories group tables that use different timestamp
+    # columns.  Entries here override ``time_column`` for a specific table.
+    table_time_columns: dict[str, str | None] = field(default_factory=dict)
+    # Deleting this category in full also deletes these dependent categories.
+    # This is intentionally explicit so cleanup never broadens its scope based
+    # on an unrelated foreign key in the shared platform database.
+    cascade_categories: list[str] = field(default_factory=list)
 
 
 # Global registry: tool_id -> list of categories
@@ -70,6 +80,28 @@ def register_tool_categories(tool_id: str, categories: list[DataCategory]) -> No
 def get_tool_categories(tool_id: str) -> list[DataCategory]:
     """Return the registered categories for *tool_id* (empty if none)."""
     return list(_TOOL_CATEGORIES.get(tool_id, []))
+
+
+def _table_time_column(category: DataCategory, table: str) -> str | None:
+    return category.table_time_columns.get(table, category.time_column)
+
+
+def _expand_cascade_categories(
+    all_categories: list[DataCategory],
+    selected_categories: list[DataCategory],
+) -> list[DataCategory]:
+    """Expand explicit cleanup dependencies while preserving registry order."""
+    by_name = {category.name: category for category in all_categories}
+    selected_names = {category.name for category in selected_categories}
+    pending = list(selected_categories)
+    while pending:
+        current = pending.pop()
+        for name in current.cascade_categories:
+            if name in selected_names or name not in by_name:
+                continue
+            selected_names.add(name)
+            pending.append(by_name[name])
+    return [category for category in all_categories if category.name in selected_names]
 
 
 def all_registered_tools() -> list[str]:
@@ -152,11 +184,12 @@ def delete_data(
 
     Returns a summary dict with deleted row counts per table.
     """
-    categories = get_tool_categories(tool_id)
-    if not categories:
+    all_categories = get_tool_categories(tool_id)
+    if not all_categories:
         return {"toolId": tool_id, "deleted": {}, "message": "未注册数据分类"}
 
     # Filter categories
+    categories = all_categories
     if category is not None:
         categories = [c for c in categories if c.name == category]
         if not categories:
@@ -173,6 +206,8 @@ def delete_data(
                 "deleted": {},
                 "message": "所选分类均为配置数据，无法按时间删除",
             }
+    else:
+        effective_categories = _expand_cascade_categories(all_categories, effective_categories)
 
     deleted: dict[str, dict[str, int]] = {}
 
@@ -182,16 +217,35 @@ def delete_data(
 
     if user_tool_cats:
         if user_id is not None:
-            deleted.update(_delete_user_tool_data(tool_id, user_id, user_tool_cats, before_date, after_date))
+            _merge_deleted_counts(
+                deleted,
+                _delete_user_tool_data(tool_id, user_id, user_tool_cats, before_date, after_date),
+            )
         else:
             # All users
             for uid, _path in list_user_tool_dbs(tool_id):
-                deleted.update(_delete_user_tool_data(tool_id, uid, user_tool_cats, before_date, after_date))
+                _merge_deleted_counts(
+                    deleted,
+                    _delete_user_tool_data(tool_id, uid, user_tool_cats, before_date, after_date),
+                )
 
     if platform_cats:
-        deleted.update(_delete_platform_data(tool_id, platform_cats, before_date, after_date, user_id))
+        _merge_deleted_counts(
+            deleted,
+            _delete_platform_data(tool_id, platform_cats, before_date, after_date, user_id),
+        )
 
     return {"toolId": tool_id, "deleted": deleted}
+
+
+def _merge_deleted_counts(
+    target: dict[str, dict[str, int]],
+    source: dict[str, dict[str, int]],
+) -> None:
+    for category, tables in source.items():
+        category_counts = target.setdefault(category, {})
+        for table, count in tables.items():
+            category_counts[table] = category_counts.get(table, 0) + count
 
 
 def _delete_user_tool_data(
@@ -203,17 +257,24 @@ def _delete_user_tool_data(
 ) -> dict[str, dict[str, int]]:
     """Delete rows from a single user's per-tool database."""
     result: dict[str, dict[str, int]] = {}
-    try:
-        conn = get_user_tool_connection(user_id, tool_id)
-    except Exception:
+    if not get_user_tool_db_path(user_id, tool_id).exists():
         return result
+    conn = get_user_tool_connection(user_id, tool_id)
     try:
-        for cat in categories:
-            for table in cat.tables:
-                count = _delete_rows(conn, table, cat.time_column, before_date, after_date)
-                if count > 0:
-                    result.setdefault(cat.name, {})[table] = count
+        for cat, table in _ordered_category_tables(conn, categories):
+            count = _delete_rows(
+                conn,
+                table,
+                _table_time_column(cat, table),
+                before_date,
+                after_date,
+            )
+            if count > 0:
+                result.setdefault(cat.name, {})[table] = count
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
     return result
@@ -230,15 +291,72 @@ def _delete_platform_data(
     result: dict[str, dict[str, int]] = {}
     conn = get_connection()
     try:
-        for cat in categories:
-            for table in cat.tables:
-                count = _delete_rows(conn, table, cat.time_column, before_date, after_date, user_id if cat.user_id_column else None, cat.user_id_column)
-                if count > 0:
-                    result.setdefault(cat.name, {})[table] = count
+        for cat, table in _ordered_category_tables(conn, categories):
+            count = _delete_rows(
+                conn,
+                table,
+                _table_time_column(cat, table),
+                before_date,
+                after_date,
+                user_id if cat.user_id_column else None,
+                cat.user_id_column,
+            )
+            if count > 0:
+                result.setdefault(cat.name, {})[table] = count
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
     return result
+
+
+def _ordered_category_tables(
+    conn: sqlite3.Connection,
+    categories: list[DataCategory],
+) -> list[tuple[DataCategory, str]]:
+    """Return registered tables in child-before-parent foreign-key order."""
+    table_categories: dict[str, DataCategory] = {}
+    declared_order: list[str] = []
+    for category in categories:
+        for table in category.tables:
+            if table in table_categories:
+                continue
+            table_categories[table] = category
+            declared_order.append(table)
+
+    selected_tables = set(declared_order)
+    edges: dict[str, set[str]] = {table: set() for table in declared_order}
+    indegree: dict[str, int] = {table: 0 for table in declared_order}
+    for child in declared_order:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (child,),
+        ).fetchone()
+        if exists is None:
+            continue
+        for foreign_key in conn.execute(f'PRAGMA foreign_key_list("{child}")').fetchall():
+            parent = foreign_key["table"]
+            if parent not in selected_tables or parent == child or parent in edges[child]:
+                continue
+            edges[child].add(parent)
+            indegree[parent] += 1
+
+    ready = [table for table in declared_order if indegree[table] == 0]
+    ordered: list[str] = []
+    while ready:
+        child = ready.pop(0)
+        ordered.append(child)
+        for parent in edges[child]:
+            indegree[parent] -= 1
+            if indegree[parent] == 0:
+                ready.append(parent)
+
+    # Cycles are not expected in registered tool schemas. Keep their declared
+    # order so SQLite can reject the transaction without leaving partial data.
+    ordered.extend(table for table in declared_order if table not in ordered)
+    return [(table_categories[table], table) for table in ordered]
 
 
 def _delete_rows(
@@ -266,7 +384,9 @@ def _delete_rows(
     columns = {col["name"] for col in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if user_id is not None and (not user_id_column or user_id_column not in columns):
         return 0
-    if time_column is not None and has_time_filter:
+    if has_time_filter:
+        if time_column is None:
+            return 0
         if time_column not in columns:
             return 0
         clauses: list[str] = []
@@ -281,14 +401,11 @@ def _delete_rows(
             clauses.append(f'"{user_id_column}" = ?')
             params.append(user_id)
         cursor = conn.execute(f'DELETE FROM "{table}" WHERE {" AND ".join(clauses)}', params)
-    elif time_column is None and not has_time_filter:
+    else:
         if user_id is not None:
             cursor = conn.execute(f'DELETE FROM "{table}" WHERE "{user_id_column}" = ?', (user_id,))
         else:
             cursor = conn.execute(f'DELETE FROM "{table}"')
-    else:
-        # time_column is None but a time filter is set: skip (config data)
-        return 0
     return cursor.rowcount or 0
 
 
@@ -298,6 +415,8 @@ def _count_rows(
     time_column: str | None,
     before_date: str | None,
     after_date: str | None = None,
+    user_id: str | None = None,
+    user_id_column: str | None = None,
 ) -> int:
     """Count rows from *table* that match the same time filter used by deletion.
 
@@ -313,8 +432,12 @@ def _count_rows(
         return 0
 
     has_time_filter = before_date is not None or after_date is not None
-    if time_column is not None and has_time_filter:
-        columns = {col["name"] for col in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    columns = {col["name"] for col in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if user_id is not None and (not user_id_column or user_id_column not in columns):
+        return 0
+    if has_time_filter:
+        if time_column is None:
+            return 0
         if time_column not in columns:
             return 0
         clauses: list[str] = []
@@ -325,15 +448,21 @@ def _count_rows(
         if before_date is not None:
             clauses.append(f'"{time_column}" < ?')
             params.append(before_date)
+        if user_id is not None:
+            clauses.append(f'"{user_id_column}" = ?')
+            params.append(user_id)
         count_row = conn.execute(
             f'SELECT COUNT(*) AS c FROM "{table}" WHERE {" AND ".join(clauses)}',
             params,
         ).fetchone()
-    elif time_column is None and not has_time_filter:
-        count_row = conn.execute(f'SELECT COUNT(*) AS c FROM "{table}"').fetchone()
     else:
-        # time_column is None but a time filter is set: skip (config data)
-        return 0
+        if user_id is not None:
+            count_row = conn.execute(
+                f'SELECT COUNT(*) AS c FROM "{table}" WHERE "{user_id_column}" = ?',
+                (user_id,),
+            ).fetchone()
+        else:
+            count_row = conn.execute(f'SELECT COUNT(*) AS c FROM "{table}"').fetchone()
     return count_row["c"] if count_row else 0
 
 
@@ -350,10 +479,11 @@ def count_data(
     across all matching tables (and across all users when *user_id* is ``None``
     in admin mode).
     """
-    categories = get_tool_categories(tool_id)
-    if not categories:
+    all_categories = get_tool_categories(tool_id)
+    if not all_categories:
         return 0
 
+    categories = all_categories
     if category is not None:
         categories = [c for c in categories if c.name == category]
         if not categories:
@@ -364,6 +494,8 @@ def count_data(
         categories = [c for c in categories if c.time_column is not None]
         if not categories:
             return 0
+    else:
+        categories = _expand_cascade_categories(all_categories, categories)
 
     total = 0
     user_tool_cats = [c for c in categories if c.storage == "user_tool_db"]
@@ -377,7 +509,7 @@ def count_data(
                 total += _count_user_tool_data(tool_id, uid, user_tool_cats, before_date, after_date)
 
     if platform_cats:
-        total += _count_platform_data(tool_id, platform_cats, before_date, after_date)
+        total += _count_platform_data(tool_id, platform_cats, before_date, after_date, user_id)
 
     return total
 
@@ -391,14 +523,19 @@ def _count_user_tool_data(
 ) -> int:
     """Count matching rows from a single user's per-tool database."""
     total = 0
-    try:
-        conn = get_user_tool_connection(user_id, tool_id)
-    except Exception:
+    if not get_user_tool_db_path(user_id, tool_id).exists():
         return 0
+    conn = get_user_tool_connection(user_id, tool_id)
     try:
         for cat in categories:
             for table in cat.tables:
-                total += _count_rows(conn, table, cat.time_column, before_date, after_date)
+                total += _count_rows(
+                    conn,
+                    table,
+                    _table_time_column(cat, table),
+                    before_date,
+                    after_date,
+                )
     finally:
         conn.close()
     return total
@@ -409,6 +546,7 @@ def _count_platform_data(
     categories: list[DataCategory],
     before_date: str | None,
     after_date: str | None = None,
+    user_id: str | None = None,
 ) -> int:
     """Count matching rows from the shared platform database."""
     total = 0
@@ -416,7 +554,15 @@ def _count_platform_data(
     try:
         for cat in categories:
             for table in cat.tables:
-                total += _count_rows(conn, table, cat.time_column, before_date, after_date)
+                total += _count_rows(
+                    conn,
+                    table,
+                    _table_time_column(cat, table),
+                    before_date,
+                    after_date,
+                    user_id if cat.user_id_column else None,
+                    cat.user_id_column,
+                )
     finally:
         conn.close()
     return total
@@ -438,33 +584,32 @@ def get_data_usage_by_category(tool_id: str, user_id: str | None = None) -> list
     if not categories:
         return []
 
-    # Determine the list of (user_id, db_path) pairs to query.
-    if user_id is not None:
-        db_path = get_user_tool_db_path(user_id, tool_id)
-        if not db_path.exists():
-            return []
-        user_dbs: list[tuple[str, Path]] = [(user_id, db_path)]
-    else:
-        user_dbs = list_user_tool_dbs(tool_id)
-        if not user_dbs:
-            return []
-
-    # Aggregate row counts across all user DBs.
     cat_totals: dict[str, int] = {c.name: 0 for c in categories}
     cat_tables: dict[str, dict[str, int]] = {c.name: {} for c in categories}
-    total_db_size = 0
+    cat_db_bytes: dict[str, int] = {c.name: 0 for c in categories}
+    user_categories = [c for c in categories if c.storage == "user_tool_db"]
+    platform_categories = [c for c in categories if c.storage == "platform_db"]
+
+    # Aggregate per-user databases independently from the platform database.
+    if user_id is not None:
+        db_path = get_user_tool_db_path(user_id, tool_id)
+        user_dbs: list[tuple[str, Path]] = [(user_id, db_path)] if db_path.exists() else []
+    else:
+        user_dbs = list_user_tool_dbs(tool_id)
 
     for uid, db_path in user_dbs:
         try:
-            total_db_size += db_path.stat().st_size
+            db_size = db_path.stat().st_size
         except OSError:
-            pass
+            db_size = 0
+        for cat in user_categories:
+            cat_db_bytes[cat.name] += db_size
         try:
             conn = get_user_tool_connection(uid, tool_id)
         except Exception:
             continue
         try:
-            for cat in categories:
+            for cat in user_categories:
                 for table in cat.tables:
                     row = conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -480,6 +625,35 @@ def get_data_usage_by_category(tool_id: str, user_id: str | None = None) -> list
         finally:
             conn.close()
 
+    if platform_categories:
+        platform_path = get_settings().platform_db_path
+        try:
+            platform_size = platform_path.stat().st_size
+        except OSError:
+            platform_size = 0
+        for cat in platform_categories:
+            cat_db_bytes[cat.name] = platform_size
+
+        conn = get_connection()
+        try:
+            for cat in platform_categories:
+                for table in cat.tables:
+                    count = _count_rows(
+                        conn,
+                        table,
+                        _table_time_column(cat, table),
+                        None,
+                        None,
+                        user_id if cat.user_id_column else None,
+                        cat.user_id_column,
+                    )
+                    if count <= 0:
+                        continue
+                    cat_totals[cat.name] += count
+                    cat_tables[cat.name][table] = count
+        finally:
+            conn.close()
+
     result: list[dict[str, Any]] = []
     for cat in categories:
         table_details = [
@@ -491,12 +665,9 @@ def get_data_usage_by_category(tool_id: str, user_id: str | None = None) -> list
             "description": cat.description,
             "timeColumn": cat.time_column,
             "totalRows": cat_totals[cat.name],
+            "dbBytes": cat_db_bytes[cat.name],
             "tables": table_details,
         })
-
-    # Attach aggregated file size
-    for cat in result:
-        cat["dbBytes"] = total_db_size
     return result
 
 

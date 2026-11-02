@@ -52,6 +52,7 @@ register_tool_categories(TOOL_ID, [
         time_column=None,
         description="配置数据（服务器、权限、模板、资源所有权）",
         storage="platform_db",
+        cascade_categories=["df_cache", "resource_cache"],
     ),
     DataCategory(
         name="df_cache",

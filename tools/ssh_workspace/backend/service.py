@@ -216,6 +216,7 @@ register_tool_categories(TOOL_ID, [
         time_column=None,
         description="配置数据（服务器、命令模板、定时任务、终端标签）",
         storage="user_tool_db",
+        cascade_categories=["history", "screen_sessions", "task_runs"],
     ),
     DataCategory(
         name="history",

@@ -328,7 +328,14 @@ def init_database(user_id: str) -> None:
 
 
 register_tool_categories(TOOL_ID, [
-    DataCategory(name="config", tables=["tpm_servers", "tpm_tasks"], time_column=None, description="服务器和监控任务配置", storage="user_tool_db"),
+    DataCategory(
+        name="config",
+        tables=["tpm_servers", "tpm_tasks", "tpm_tb_sessions"],
+        time_column=None,
+        description="服务器、监控任务和 TensorBoard 会话配置",
+        storage="user_tool_db",
+        cascade_categories=["reports", "file_cache"],
+    ),
     DataCategory(name="reports", tables=["tpm_reports", "tpm_run_samples"], time_column="reported_at", description="TensorBoard 进度报表", storage="user_tool_db"),
     DataCategory(name="file_cache", tables=["tpm_event_files"], time_column="last_seen_at", description="远端 event 文件状态缓存", storage="user_tool_db"),
 ])

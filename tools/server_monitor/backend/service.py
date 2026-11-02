@@ -237,6 +237,7 @@ register_tool_categories(TOOL_ID, [
         time_column=None,
         description="服务器配置（服务器连接信息、白名单）",
         storage="user_tool_db",
+        cascade_categories=["samples", "directory_cache"],
     ),
     DataCategory(
         name="samples",

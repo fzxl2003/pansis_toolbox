@@ -703,7 +703,7 @@ pre.yaml{margin:0;padding:18px;max-height:calc(100vh - 150px);overflow:auto;back
 @media(max-width:720px){.hero{padding:25px}.subscription-access{width:100%}.hero-actions{flex:1}.summary-card b{font-size:19px}.summary-time{font-size:13px}.table-wrap{margin:0 -20px}.modal{width:calc(100vw - 20px)}.user-agent{max-width:220px}}
 @media(prefers-color-scheme:dark){:root{--line:#28324a;--muted:#94a3b8;--panel:#111827;--bg:#080d19;--text:#e6eaf3}th{background:#0f172a}.chip{background:#1e293b;color:#bfdbfe}.button{background:#e2e8f0}.latency.good,.status.ok{background:#14532d;color:#bbf7d0}.latency.warn{background:#78350f;color:#fde68a}.latency.bad,.status.bad{background:#7f1d1d;color:#fecaca}.latency.muted,.status.running{background:#1e293b;color:#cbd5e1}button.group-card,.provider-card{box-shadow:none}.modal-close{background:#1e293b;color:#e2e8f0}.provider-card{background:#0f172a}}
 '''
-    script = '''
+    script = r'''
 <script>
 (function(){
   if(typeof Intl !== "undefined" && Intl.DisplayNames){

@@ -373,6 +373,13 @@ def remove_rule_set(request: Request, rule_set_id: str) -> dict[str, bool]:
     service.delete_rule_set(rule_set_id, require_user(request)); return {"deleted": True}
 
 
+@router.post("/rule-sets/{rule_set_id}/copy")
+def copy_rule_set(request: Request, rule_set_id: str) -> dict[str, Any]:
+    user = require_user(request)
+    copied = service.copy_rule_set(rule_set_id, user)
+    return {"ruleSet": service.rule_set_summary(copied["id"], user)}
+
+
 @router.post("/rule-sets/import")
 def import_rule_set(request: Request, payload: RuleImportPayload) -> dict[str, Any]:
     user = require_user(request)

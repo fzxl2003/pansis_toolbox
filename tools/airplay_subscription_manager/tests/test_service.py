@@ -702,6 +702,33 @@ def test_rule_subscription_is_cached_with_generated_hidden_key_and_packaged_inli
     }
 
 
+def test_copy_rule_set_preserves_configuration_and_creates_independent_copies(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="rule-copy-user", username="rule-copy", display_name="Rule Copy")
+    source = service.save_rule_set({
+        "name": "内网规则",
+        "rules": ["IP-CIDR,172.17.0.0/16,DIRECT,no-resolve", "MATCH,内网"],
+        "groups": [{"name": "内网", "type": "select", "proxies": ["DIRECT"], "nodeGroups": ["lan-nodes"]}],
+        "providers": {"lan": {"type": "http", "behavior": "ipcidr", "url": "https://example.invalid/lan.yaml"}},
+        "importMeta": {"providerBindings": {"内网": ["lan-provider"]}, "fallbackStrategyName": "内网"},
+    }, user)
+
+    first_copy = service.copy_rule_set(source["id"], user)
+    second_copy = service.copy_rule_set(source["id"], user)
+    assert len({source["id"], first_copy["id"], second_copy["id"]}) == 3
+    assert first_copy["name"] == "内网规则（副本）"
+    assert second_copy["name"] == "内网规则（副本 2）"
+    for field in ("rules", "groups", "providers", "importMeta"):
+        assert first_copy[field] == second_copy[field] == source[field]
+    assert service.rule_set_summary(first_copy["id"], user)["providerCount"] == 1
+
+    service.save_rule_set({**first_copy, "rules": ["MATCH,DIRECT"]}, user, first_copy["id"])
+    assert service.get_rule_set(source["id"], user)["rules"] == source["rules"]
+
+
 def test_rule_set_provider_bindings_are_resolved_live_without_snapshot(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)

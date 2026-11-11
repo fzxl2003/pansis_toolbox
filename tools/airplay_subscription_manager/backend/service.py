@@ -2214,6 +2214,32 @@ def save_rule_set(data: dict[str, Any], user: User, rule_set_id: str | None = No
         return _rule_row(conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (rule_set_id,)).fetchone())
 
 
+def copy_rule_set(rule_set_id: str, user: User) -> dict[str, Any]:
+    init_database(user.id)
+    copy_id = _id()
+    with user_tool_connection_context(user.id, TOOL_ID) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute("SELECT name FROM csm_rule_sets WHERE id=?", (rule_set_id,)).fetchone()
+        if not source:
+            _not_found("规则组")
+        names = {row["name"] for row in conn.execute("SELECT name FROM csm_rule_sets")}
+        base = source["name"]
+        suffix = "（副本）"
+        copy_name = f"{base[:120 - len(suffix)]}{suffix}"
+        sequence = 2
+        while copy_name in names:
+            suffix = f"（副本 {sequence}）"
+            copy_name = f"{base[:120 - len(suffix)]}{suffix}"
+            sequence += 1
+
+        now = _now()
+        conn.execute("""INSERT INTO csm_rule_sets(
+          id,name,rules_json,providers_json,groups_json,import_meta_json,created_at,updated_at,group_name)
+          SELECT ?,?,rules_json,providers_json,groups_json,import_meta_json,?,?,group_name
+          FROM csm_rule_sets WHERE id=?""", (copy_id, copy_name, now, now, rule_set_id))
+        return _rule_row(conn.execute("SELECT * FROM csm_rule_sets WHERE id=?", (copy_id,)).fetchone())
+
+
 def import_rule_set(data: dict[str, Any], user: User) -> dict[str, Any]:
     """Import rules and groups without importing proxy nodes or storing Provider snapshots."""
     content = str(data.get("content") or "")

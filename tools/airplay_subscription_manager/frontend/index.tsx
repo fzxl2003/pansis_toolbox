@@ -443,6 +443,13 @@ export default function AirPlaySubscriptionManager() {
       },
     });
   }
+  function copyRuleSet(ruleSet: RuleSetSummary) {
+    void action(
+      `rule-copy-${ruleSet.id}`,
+      () => apiPost(`${API}/rule-sets/${ruleSet.id}/copy`, {}),
+      "规则组已复制",
+    );
+  }
   function removeRuleSet(ruleSet: RuleSetSummary) {
     confirm({
       title: "删除规则组",
@@ -747,8 +754,10 @@ export default function AirPlaySubscriptionManager() {
               <RulesView
                 ruleSets={ruleSets}
                 loading={loading}
+                pending={pending}
                 onCreate={() => void openRuleEditor("create")}
                 onEdit={(ruleSet) => void openRuleEditor("edit", ruleSet)}
+                onCopy={copyRuleSet}
                 onRemove={removeRuleSet}
               />
             ) : (
@@ -3954,14 +3963,18 @@ function RuleDomainTestModal({
 function RulesView({
   ruleSets,
   loading,
+  pending,
   onCreate,
   onEdit,
+  onCopy,
   onRemove,
 }: {
   ruleSets: RuleSetSummary[];
   loading: boolean;
+  pending: string;
   onCreate: () => void;
   onEdit: (rule: RuleSetSummary) => void;
+  onCopy: (rule: RuleSetSummary) => void;
   onRemove: (rule: RuleSetSummary) => void;
 }) {
   const [testingRule, setTestingRule] = useState<RuleSetSummary | null>(null);
@@ -4028,6 +4041,20 @@ function RulesView({
                       onClick={() => onEdit(rule)}
                     >
                       <Pencil size={13} />
+                    </button>
+                    <button
+                      className="csm-btn csm-btn-sm csm-btn-ghost"
+                      type="button"
+                      title="复制"
+                      aria-label={`复制规则组 ${rule.name}`}
+                      disabled={pending === `rule-copy-${rule.id}`}
+                      onClick={() => onCopy(rule)}
+                    >
+                      {pending === `rule-copy-${rule.id}` ? (
+                        <Spin size={13} />
+                      ) : (
+                        <Clipboard size={13} />
+                      )}
                     </button>
                     <button
                       className="csm-btn csm-btn-sm csm-btn-ghost csm-danger-text"

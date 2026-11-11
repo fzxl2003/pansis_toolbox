@@ -44,7 +44,7 @@ MAX_REDIRECTS = 5
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_SECONDS = 0.35
 PARSEABLE_URIS = {"ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic"}
-AIRPLAY_STRUCTURED_TYPES = {"http", "socks5", "snell", "wireguard"}
+AIRPLAY_STRUCTURED_TYPES = {"http", "socks5", "snell", "wireguard", "tailscale"}
 AIRPLAY_PROXY_TYPES = PARSEABLE_URIS | AIRPLAY_STRUCTURED_TYPES
 COMPATIBLE_GROUP_TYPES = {"select", "url-test", "fallback", "load-balance", "relay"}
 PROXY_COMMON_FIELDS = {"name", "type", "server", "port"}
@@ -58,6 +58,11 @@ PROXY_FIELDS: dict[str, set[str]] = {
     "hysteria2": {"password", "up", "down", "sni", "alpn", "skip-cert-verify", "obfs", "obfs-password", "ports", "hop-interval"},
     "tuic": {"uuid", "password", "ip", "sni", "alpn", "skip-cert-verify", "disable-sni", "reduce-rtt", "request-timeout", "udp-relay-mode", "congestion-controller", "heartbeat-interval", "max-udp-relay-packet-size"},
     "wireguard": {"ip", "ipv6", "private-key", "public-key", "pre-shared-key", "reserved", "udp", "mtu", "dns", "remote-dns", "allowed-ips"},
+    "tailscale": {
+        "hostname", "auth-key", "control-url", "state-dir", "ephemeral", "udp",
+        "accept-routes", "exit-node", "exit-node-allow-lan-access", "dialer-proxy",
+        "interface-name", "routing-mark", "ip-version",
+    },
     "http": {"username", "password", "tls", "skip-cert-verify", "sni"},
     "socks5": {"username", "password", "tls", "skip-cert-verify", "udp"},
     "snell": {"psk", "version", "obfs-opts"},
@@ -642,7 +647,13 @@ def _query_one(query: str, key: str) -> str:
 def _node(name: str, protocol: str, server: str, port: int | None, config: dict[str, Any], supported: bool = True) -> dict[str, Any]:
     protocol = protocol.lower()
     config = {k: v for k, v in config.items() if v not in (None, "", [], {})}
-    config.update({"name": name or f"{protocol}-{server}:{port or ''}", "type": protocol, "server": server, "port": port})
+    config.update({"name": name or f"{protocol}-{server}:{port or ''}", "type": protocol})
+    if protocol == "tailscale":
+        server, port = "", None
+        config.pop("server", None)
+        config.pop("port", None)
+    else:
+        config.update({"server": server, "port": port})
     identity = _hash({"protocol": protocol, "server": server.lower(), "port": port, "name": name})
     fingerprint = _hash({k: v for k, v in config.items() if k != "name"})
     return {"stable_identity": identity, "fingerprint": fingerprint, "name": config["name"], "protocol": protocol,
@@ -1110,6 +1121,8 @@ def _refresh_node_geoip(node_ids: list[str], user: User) -> tuple[list[dict[str,
 
         now = _now(); changed = False; pending: list[tuple[sqlite3.Row, str]] = []
         for row in rows:
+            if row["protocol"] == "tailscale":
+                continue
             ip, error = _resolve_node_ip(conn, row)
             if not ip:
                 if str(row["resolved_ip"] or "") or str(row["country_code"] or "") or str(row["geo_error"] or "") != error:
@@ -1224,6 +1237,8 @@ def _normalise_custom_node(content: str) -> dict[str, Any]:
         raise ToolboxError("CUSTOM_NODE_NAME_REQUIRED", "请输入自定义节点名称。", status_code=422)
     if protocol not in AIRPLAY_PROXY_TYPES:
         raise ToolboxError("INVALID_CUSTOM_NODE_TYPE", "节点协议不受 AirPlay 支持。", status_code=422)
+    if protocol == "tailscale":
+        return _node(name, protocol, "", None, value)
     if not server:
         raise ToolboxError("CUSTOM_NODE_SERVER_REQUIRED", "请输入自定义节点服务器地址。", status_code=422)
     raw_port = value.get("port")
@@ -2262,8 +2277,14 @@ def delete_rule_set(rule_set_id: str, user: User) -> None:
         if conn.execute("DELETE FROM csm_rule_sets WHERE id=?", (rule_set_id,)).rowcount == 0: _not_found("规则库")
 
 
+def _tailscale_dialer_proxy(row: sqlite3.Row) -> str:
+    if row["protocol"] != "tailscale":
+        return ""
+    return str(_loads(row["config_json"], {}).get("dialer-proxy") or "").strip()
+
+
 def _rule_referenced_nodes(conn: sqlite3.Connection, rule_set: dict[str, Any] | None) -> list[sqlite3.Row]:
-    """Return nodes explicitly used by strategy groups or direct rules."""
+    """Return nodes used by rules, strategy groups, or a Tailscale dialer."""
     if rule_set is None: return []
     references: list[str] = []
     for group in rule_set.get("groups") or []:
@@ -2278,7 +2299,17 @@ def _rule_referenced_nodes(conn: sqlite3.Connection, rule_set: dict[str, Any] | 
         for row in all_nodes:
             if reference == str(row["name"] or ""):
                 nodes_by_id[str(row["id"])] = row
-    return list(nodes_by_id.values())
+    group_names = {str(group["name"]) for group in rule_set["groups"] if group.get("name")}
+    selected = list(nodes_by_id.values())
+    for node in selected:
+        target = _tailscale_dialer_proxy(node)
+        if not target or target in group_names or target in {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"}:
+            continue
+        for row in all_nodes:
+            if row["id"] not in nodes_by_id and target in {row["name"], row["alias"]}:
+                nodes_by_id[row["id"]] = row
+                selected.append(row)
+    return selected
 
 
 def _profile_material(conn: sqlite3.Connection, profile_id: str) -> tuple[sqlite3.Row, list[sqlite3.Row], dict[str, Any] | None]:
@@ -2335,6 +2366,14 @@ def _validate_material(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set:
     groups = rule_set["groups"]; names = {str(group.get("name")) for group in groups if group.get("name")}
     _, node_references, ambiguous_references = _node_output_material(nodes)
     node_names = set(node_references) | set(ambiguous_references)
+    for item in nodes:
+        target = _tailscale_dialer_proxy(item)
+        if not target or target in names or target in {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"}:
+            continue
+        if target in ambiguous_references:
+            messages.append({"level": "error", "code": "AMBIGUOUS_DIALER_PROXY", "message": f"Tailscale 节点 {item['name']} 的拨号代理引用了重名节点：{target}。"})
+        elif target not in node_names:
+            messages.append({"level": "error", "code": "MISSING_DIALER_PROXY", "message": f"Tailscale 节点 {item['name']} 的拨号代理不存在：{target}。"})
     graph: dict[str, set[str]] = {}
     for group in groups:
         name = str(group.get("name") or "")
@@ -2394,14 +2433,18 @@ def validate_profile(profile_id: str, user: User) -> dict[str, Any]:
 
 
 def _proxy_output(config: dict[str, Any], protocol: str) -> dict[str, Any]:
-    allowed = PROXY_COMMON_FIELDS | PROXY_FIELDS.get(protocol, set())
+    common_fields = {"name", "type"} if protocol == "tailscale" else PROXY_COMMON_FIELDS
+    allowed = common_fields | PROXY_FIELDS.get(protocol, set())
     value = {key: item for key, item in config.items() if key in allowed and item not in (None, "", [], {})}
     return _normalise_proxy_option_types(value, protocol)
 
 
 def _normalise_proxy_option_types(value: dict[str, Any], protocol: str) -> dict[str, Any]:
     value = dict(value)
-    for key in {"tls", "udp", "skip-cert-verify", "disable-sni", "reduce-rtt"} & value.keys():
+    boolean_fields = {"tls", "udp", "skip-cert-verify", "disable-sni", "reduce-rtt"}
+    if protocol == "tailscale":
+        boolean_fields.update({"ephemeral", "accept-routes", "exit-node-allow-lan-access"})
+    for key in boolean_fields & value.keys():
         item = value[key]
         if not isinstance(item, bool):
             text = str(item).strip().lower()
@@ -2510,6 +2553,11 @@ def _build_config(profile: sqlite3.Row, nodes: list[sqlite3.Row], rule_set: dict
     if dns: config["dns"] = dns
     if rule_set:
         groups, rules = _rewrite_rule_material(rule_set, references)
+        group_names = {group["name"] for group in groups}
+        for proxy in proxies:
+            target = proxy.get("dialer-proxy")
+            if isinstance(target, str) and target.strip() in references and target.strip() not in group_names:
+                proxy["dialer-proxy"] = references[target.strip()]
         config["proxy-groups"] = groups
         config["rules"] = [rule for rule in rules if isinstance(rule, str)]
         providers = {key: output for key, provider in rule_set["providers"].items()
@@ -3263,7 +3311,13 @@ def probe_nodes(node_ids: list[str], user: User) -> list[dict[str, Any]]:
     if not ids: return []
     marks = ",".join("?" for _ in ids)
     with user_tool_connection_context(user.id, TOOL_ID) as conn:
-        nodes = [_node_dict(row) for row in conn.execute(f"SELECT * FROM csm_nodes WHERE id IN ({marks})", ids)]
+        nodes = [
+            _node_dict(row) for row in conn.execute(
+                f"SELECT * FROM csm_nodes WHERE id IN ({marks}) AND protocol <> 'tailscale'", ids
+            )
+        ]
+    if not nodes:
+        return []
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(20, len(nodes))) as executor:
         futures = [executor.submit(_probe_one, node) for node in nodes]

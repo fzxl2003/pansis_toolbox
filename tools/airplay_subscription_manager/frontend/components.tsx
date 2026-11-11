@@ -15,8 +15,8 @@ export function EmptyState({ icon, title, hint }: { icon?: ReactNode; title: str
   return <div className="csm-empty">{icon && <div>{icon}</div>}<strong>{title}</strong>{hint && <span>{hint}</span>}</div>;
 }
 
-export function Field({ label, children, full, style }: { label: ReactNode; children: ReactNode; full?: boolean; style?: CSSProperties }) {
-  return <div className={`csm-form-field${full ? ' csm-full-col' : ''}`} style={style}><label>{label}</label>{children}</div>;
+export function Field({ label, children, full, style, htmlFor }: { label: ReactNode; children: ReactNode; full?: boolean; style?: CSSProperties; htmlFor?: string }) {
+  return <div className={`csm-form-field${full ? ' csm-full-col' : ''}`} style={style}><label htmlFor={htmlFor}>{label}</label>{children}</div>;
 }
 
 export function Modal({ title, onClose, children, foot, width }: { title: string; onClose: () => void; children: ReactNode; foot?: ReactNode; width?: number }) {

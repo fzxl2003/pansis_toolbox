@@ -1,6 +1,6 @@
 import "./style.css";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -13,6 +13,7 @@ import {
   Crosshair,
   Eye,
   Globe2,
+  Network,
   ExternalLink,
   FileCode2,
   FolderOpen,
@@ -94,6 +95,11 @@ type Node = {
     checkedAt?: string;
   };
 };
+
+function nodeEndpoint(node: Node) {
+  return node.protocol === "tailscale" ? "—" : `${node.server}:${node.port ?? "—"}`;
+}
+
 type ProfileSettings = {
   mixedPort?: number;
   allowLan?: boolean;
@@ -266,7 +272,7 @@ export default function AirPlaySubscriptionManager() {
   >(false);
   const [addNodeOpen, setAddNodeOpen] = useState(false);
   const [qrImportOpen, setQrImportOpen] = useState(false);
-  const [customNodeModal, setCustomNodeModal] = useState<Node | null | false>(
+  const [customNodeModal, setCustomNodeModal] = useState<Node | "tailscale" | null | false>(
     false,
   );
   const [aliasNode, setAliasNode] = useState<Node | null>(null);
@@ -772,6 +778,10 @@ export default function AirPlaySubscriptionManager() {
             setAddNodeOpen(false);
             setCustomNodeModal(null);
           }}
+          onAddTailscale={() => {
+            setAddNodeOpen(false);
+            setCustomNodeModal("tailscale");
+          }}
           onImportQr={() => {
             setAddNodeOpen(false);
             setQrImportOpen(true);
@@ -815,7 +825,8 @@ export default function AirPlaySubscriptionManager() {
       )}
       {customNodeModal !== false && (
         <CustomNodeModal
-          node={customNodeModal}
+          node={customNodeModal === "tailscale" ? null : customNodeModal}
+          tailscale={customNodeModal === "tailscale" || customNodeModal?.protocol === "tailscale"}
           onClose={() => setCustomNodeModal(false)}
           onSaved={async (text) => {
             setCustomNodeModal(false);
@@ -1506,6 +1517,7 @@ function NodesView({
       nodes
         .filter(
           (node) =>
+            node.protocol !== "tailscale" &&
             (!node.country || node.geoError) &&
             !geoAttemptedRef.current.has(node.id),
         )
@@ -1572,14 +1584,14 @@ function NodesView({
       (node) => !node.isCustom && node.sourceIds.includes(sourceId),
     );
   const customNodes = filtered.filter((node) => node.isCustom);
-  const visibleNodeIds = Array.from(
-    new Set([
-      ...sources.flatMap((source) =>
-        nodesForSource(source.id).map((node) => node.id),
-      ),
-      ...customNodes.map((node) => node.id),
-    ]),
-  );
+  const probeableIds = (items: Node[]) =>
+    items.filter((node) => node.protocol !== "tailscale").map((node) => node.id);
+  const probeIds = selected.length
+    ? probeableIds(nodes.filter((node) => selected.includes(node.id)))
+    : Array.from(new Set(probeableIds([
+      ...sources.flatMap((source) => nodesForSource(source.id)),
+      ...customNodes,
+    ])));
   const recentProbe = (node: Node) => {
     if (!node.tcp?.checkedAt) return false;
     const checkedAt = new Date(node.tcp.checkedAt).valueOf();
@@ -1687,7 +1699,9 @@ function NodesView({
                 </button>
               </td>
               <td className="csm-node-probe-col">
-                {recentProbe(node) && node.tcp ? (
+                {node.protocol === "tailscale" ? (
+                  <span className="csm-muted">不适用</span>
+                ) : recentProbe(node) && node.tcp ? (
                   <small
                     className={`csm-probe-feedback ${node.tcp.reachable ? "reachable" : "failed"}`}
                     title={node.tcp.error || undefined}
@@ -1711,7 +1725,7 @@ function NodesView({
               </td>
               <td>
                 <code className="csm-code">
-                  {node.server}:{node.port ?? "—"}
+                  {nodeEndpoint(node)}
                 </code>
               </td>
               <td>
@@ -1793,18 +1807,16 @@ function NodesView({
               type="button"
               disabled={
                 pending === "nodes-probe" ||
-                (!selected.length && !visibleNodeIds.length)
+                !probeIds.length
               }
-              onClick={() =>
-                onProbe(selected.length ? selected : visibleNodeIds)
-              }
+              onClick={() => onProbe(probeIds)}
             >
               {pending === "nodes-probe" ? (
                 <Spin size={14} />
               ) : (
                 <Activity size={14} />
               )}
-              探测{selected.length ? `（${selected.length}）` : "当前结果"}
+              探测{selected.length ? `（${probeIds.length}）` : "当前结果"}
             </button>
             <button
               className="csm-btn csm-btn-primary"
@@ -1955,7 +1967,7 @@ function NodesView({
       )}
       <p className="csm-footnote">
         同一节点属于多个订阅源时会显示在对应的每个分组中。别名用于最终输出；规则组同时接受节点原名和别名。系统每
-        2 分钟自动探测全部节点，探测结果会在节点名称下短暂显示；TCP
+        2 分钟自动探测具有服务器和端口的节点，探测结果会在节点名称下短暂显示；TCP
         可达仅表示目标地址和端口能够建立连接。
       </p>
     </div>
@@ -1966,11 +1978,13 @@ function AddNodeModal({
   onClose,
   onAddSource,
   onAddCustom,
+  onAddTailscale,
   onImportQr,
 }: {
   onClose: () => void;
   onAddSource: () => void;
   onAddCustom: () => void;
+  onAddTailscale: () => void;
   onImportQr: () => void;
 }) {
   return (
@@ -1988,6 +2002,12 @@ function AddNodeModal({
               <FileCode2 size={24} />
             </span>
             <span><strong>添加自定义节点</strong><small>直接编写一个 AirPlay 节点，可随时编辑或删除。</small></span>
+          </button>
+          <button type="button" onClick={onAddTailscale}>
+            <span className="csm-add-node-icon">
+              <Network size={24} />
+            </span>
+            <span><strong>添加 Tailscale 节点</strong><small>填写设备名、登录密钥或出口节点，将 Tailscale 加入节点池。</small></span>
           </button>
         </div>
         <button className="csm-qr-import-option" type="button" onClick={onImportQr}>
@@ -2061,12 +2081,73 @@ tls: true
 servername: example.com
 network: tcp`;
 
+const TAILSCALE_TEXT_FIELDS = [
+  { name: "name", label: "节点名称", placeholder: "我的 Tailscale 节点", required: true },
+  { name: "hostname", label: "设备名称（hostname）", placeholder: "mihomo" },
+  { name: "auth-key", label: "登录密钥（auth-key）", type: "password", placeholder: "tskey-auth-…" },
+  { name: "control-url", label: "控制服务器（control-url）", type: "url", placeholder: "https://controlplane.tailscale.com" },
+  { name: "state-dir", label: "状态目录（state-dir）", placeholder: "tailscale" },
+  { name: "exit-node", label: "出口节点（exit-node）", placeholder: "节点 IP 或 auto:any" },
+  { name: "dialer-proxy", label: "拨号代理（dialer-proxy）", placeholder: "节点或策略组名称" },
+  { name: "interface-name", label: "出站网卡（interface-name）" },
+  { name: "routing-mark", label: "Linux 路由标记（routing-mark）", type: "number" },
+];
+
+const TAILSCALE_BOOLEAN_FIELDS = {
+  ephemeral: "临时节点（ephemeral）",
+  udp: "启用 UDP（udp）",
+  "accept-routes": "接受子网路由（accept-routes）",
+  "exit-node-allow-lan-access": "出口节点允许访问本地局域网",
+};
+
+function TailscaleFields({ config = {} }: { config?: Node["config"] }) {
+  const id = useId();
+  return (
+    <div className="csm-form-grid">
+      {TAILSCALE_TEXT_FIELDS.map(({ name, label, placeholder, required, type }) => (
+        <Field key={name} label={label} htmlFor={`${id}-${name}`}>
+          <input
+            className="csm-input"
+            id={`${id}-${name}`}
+            name={name}
+            type={type || "text"}
+            required={required}
+            maxLength={name === "name" ? 120 : undefined}
+            autoComplete={type === "password" ? "new-password" : undefined}
+            defaultValue={String(config[name] ?? "")}
+            placeholder={placeholder}
+          />
+        </Field>
+      ))}
+      <Field label="IP 版本（ip-version）" htmlFor={`${id}-ip-version`}>
+        <select className="csm-select" id={`${id}-ip-version`} name="ip-version" defaultValue={String(config["ip-version"] ?? "")}>
+          <option value="">使用 Mihomo 默认值</option>
+          {["dual", "ipv4", "ipv6", "ipv4-prefer", "ipv6-prefer"].map((version) => (
+            <option key={version}>{version}</option>
+          ))}
+        </select>
+      </Field>
+      {Object.entries(TAILSCALE_BOOLEAN_FIELDS).map(([name, label]) => (
+        <Field key={name} label={label} htmlFor={`${id}-${name}`}>
+          <select className="csm-select" id={`${id}-${name}`} name={name} defaultValue={String(config[name] ?? "")}>
+            <option value="">使用 Mihomo 默认值</option>
+            <option value="true">启用</option>
+            <option value="false">停用</option>
+          </select>
+        </Field>
+      ))}
+    </div>
+  );
+}
+
 function CustomNodeModal({
   node,
+  tailscale,
   onClose,
   onSaved,
 }: {
   node: Node | null;
+  tailscale: boolean;
   onClose: () => void;
   onSaved: (message: string) => Promise<void>;
 }) {
@@ -2076,12 +2157,26 @@ function CustomNodeModal({
   const [alias, setAlias] = useState(node?.alias ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  async function save() {
+  const formId = useId();
+  async function save(form: HTMLFormElement) {
     setSaving(true);
     setError("");
     try {
-      if (node) await apiPut(`${API}/nodes/${node.id}`, { content, alias });
-      else await apiPost(`${API}/nodes`, { content, alias });
+      let configContent = content;
+      if (tailscale) {
+        const config: Node["config"] = { ...node?.config, type: "tailscale" };
+        new FormData(form).forEach((rawValue, key) => {
+          const value = String(rawValue).trim();
+          if (!value) delete config[key];
+          else if (Object.hasOwn(TAILSCALE_BOOLEAN_FIELDS, key)) config[key] = value === "true";
+          else if (key === "routing-mark") config[key] = Number(value);
+          else config[key] = value;
+        });
+        configContent = JSON.stringify(config);
+      }
+      const payload = { content: configContent, alias };
+      if (node) await apiPut(`${API}/nodes/${node.id}`, payload);
+      else await apiPost(`${API}/nodes`, payload);
       await onSaved(node ? "自定义节点已更新" : "自定义节点已添加");
     } catch (caught) {
       setError(message(caught));
@@ -2089,9 +2184,10 @@ function CustomNodeModal({
       setSaving(false);
     }
   }
+  const nodeType = tailscale ? " Tailscale 节点" : "自定义节点";
   return (
     <Modal
-      title={node ? `编辑自定义节点：${node.name}` : "添加自定义节点"}
+      title={node ? `编辑${nodeType}：${node.name}` : `添加${nodeType}`}
       width={760}
       onClose={() => !saving && onClose()}
       foot={
@@ -2106,9 +2202,9 @@ function CustomNodeModal({
           </button>
           <button
             className="csm-btn csm-btn-primary"
-            type="button"
+            type="submit"
+            form={formId}
             disabled={saving}
-            onClick={() => void save()}
           >
             {saving ? (
               <>
@@ -2122,16 +2218,41 @@ function CustomNodeModal({
         </>
       }
     >
-      <div className="csm-stack">
+      <form
+        id={formId}
+        className="csm-stack"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!saving) void save(event.currentTarget);
+        }}
+      >
         {error && <Alert type="error">{error}</Alert>}
-        <Alert type="info">
-          填写一个 AirPlay <code>proxies</code> 列表中的节点对象，支持 YAML
-          或 JSON。必须包含 <code>name</code>、<code>type</code>、
-          <code>server</code> 和 <code>port</code>。
-        </Alert>
-        <Field label="节点别名（可选）">
+        {tailscale ? (
+          <>
+            <Alert type="info">
+              只有节点名称必填。留空登录密钥时，首次连接的登录链接会出现在 Mihomo 日志中。{" "}
+              <a
+                className="csm-link-button"
+                href="https://wiki.metacubex.one/en/config/proxies/tailscale/"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Mihomo 配置文档
+              </a>
+            </Alert>
+            <TailscaleFields config={node?.config} />
+          </>
+        ) : (
+          <Alert type="info">
+            填写一个 AirPlay <code>proxies</code> 列表中的节点对象，支持 YAML
+            或 JSON。填写 <code>name</code> 和 <code>type</code>，普通代理还需要填写{" "}
+            <code>server</code> 和 <code>port</code>。
+          </Alert>
+        )}
+        <Field label="节点别名（可选）" htmlFor={`${formId}-alias`}>
           <input
             className="csm-input"
+            id={`${formId}-alias`}
             value={alias}
             maxLength={120}
             onChange={(event) => setAlias(event.target.value)}
@@ -2141,16 +2262,19 @@ function CustomNodeModal({
             别名用于最终输出，规则组仍可使用配置原名。
           </small>
         </Field>
-        <Field label="节点配置">
-          <textarea
-            className="csm-textarea csm-code-editor csm-custom-node-editor"
-            rows={18}
-            spellCheck={false}
-            value={content}
-            onChange={(event) => setContent(event.target.value)}
-          />
-        </Field>
-        {!node && (
+        {!tailscale && (
+          <Field label="节点配置" htmlFor={`${formId}-config`}>
+            <textarea
+              className="csm-textarea csm-code-editor csm-custom-node-editor"
+              id={`${formId}-config`}
+              rows={18}
+              spellCheck={false}
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+            />
+          </Field>
+        )}
+        {!tailscale && !node && (
           <div className="csm-custom-node-help">
             <span>
               当前已填入 VLESS 示例，可直接修改；也可以粘贴 AirPlay YAML
@@ -2165,7 +2289,7 @@ function CustomNodeModal({
             </button>
           </div>
         )}
-      </div>
+      </form>
     </Modal>
   );
 }
@@ -2251,7 +2375,7 @@ function NodeAliasModal({
         <Field label="服务器">
           <input
             className="csm-input csm-code-editor"
-            value={`${node.server}:${node.port ?? "—"}`}
+            value={nodeEndpoint(node)}
             disabled
           />
         </Field>
@@ -3621,7 +3745,7 @@ function NodeGroupModal({
                     <strong>{node.displayName || node.name}</strong>
                     {node.alias && <small>原名：{node.name}</small>}
                     <small>
-                      {node.protocol} · {node.server}:{node.port ?? "—"}
+                      {node.protocol} · {nodeEndpoint(node)}
                       {node.country
                         ? ` · ${node.countryLabel ?? node.country}`
                         : ""}
@@ -5253,7 +5377,7 @@ function StrategyGroupModal({
                       <strong>{node.displayName || value}</strong>
                       {node.alias && <small>原名：{node.name}</small>}
                       <small>
-                        {node.protocol} · {node.server}:{node.port ?? "—"}
+                        {node.protocol} · {nodeEndpoint(node)}
                         {disabled ? " · AirPlay 不支持" : ""}
                         {inGroup ? " · 由节点分组带入" : ""}
                       </small>

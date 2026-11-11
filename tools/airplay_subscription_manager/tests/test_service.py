@@ -895,6 +895,62 @@ password: local-pass
     assert all(node["id"] != created["id"] for node in service.list_nodes(user))
 
 
+def test_tailscale_custom_node_is_saved_and_published_with_its_dialer(tmp_path, monkeypatch) -> None:
+    settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(database, "get_settings", lambda: settings)
+    service._initialized.clear()
+    user = User(id="tailscale-user", username="tailscale", display_name="Tailscale")
+
+    node = service.create_custom_node("name: Tailnet\ntype: tailscale", user)
+    assert node["supportedOutput"] and node["isCustom"]
+    assert node["server"] == "" and node["port"] is None
+    assert node["config"] == {"name": "Tailnet", "type": "tailscale"}
+    assert service.probe_nodes([node["id"]], user) == []
+    assert service.refresh_node_geoip([node["id"]], user)[0]["geoError"] == ""
+
+    service.create_custom_node(
+        "name: Outbound\ntype: socks5\nserver: example.org\nport: 1080",
+        user,
+        alias="Dialer",
+    )
+    options = {
+        "hostname": "mihomo",
+        "auth-key": "test-key",
+        "control-url": "https://headscale.example.org",
+        "state-dir": "tailscale-state",
+        "ephemeral": False,
+        "udp": True,
+        "accept-routes": False,
+        "exit-node": "auto:any",
+        "exit-node-allow-lan-access": False,
+        "dialer-proxy": "Dialer",
+        "interface-name": "eth0",
+        "routing-mark": 6666,
+        "ip-version": "ipv4-prefer",
+    }
+    config = {**node["config"], **options}
+    updated = service.update_custom_node(node["id"], json.dumps(config), user)
+    assert updated["config"] == config
+    imported, unsupported = service.parse_subscription(yaml.safe_dump({"proxies": [config]}))
+    assert unsupported == 0 and imported[0]["config"] == config
+
+    rules = service.save_rule_set({"name": "Tailnet rules", "rules": ["MATCH,Tailnet"]}, user)
+    profile = service.create_profile({
+        "name": "Tailnet profile", "ruleSetId": rules["id"], "passwordRequired": False,
+    }, user)
+    assert service.validate_profile(profile["id"], user)["valid"]
+    document = yaml.safe_load(service.preview_profile(profile["id"], user)["yaml"])
+    assert document["rules"] == ["MATCH,Tailnet"]
+    proxies = {proxy["name"]: proxy for proxy in document["proxies"]}
+    assert proxies["Tailnet"] == {**config, "dialer-proxy": "Dialer-Outbound"}
+    assert proxies["Dialer-Outbound"]["type"] == "socks5"
+    published = service.publish_profile(profile["id"], user)
+    subscription = service.public_subscription(published["subscriptionToken"])
+    assert subscription is not None
+    assert yaml.safe_load(subscription[0]) == document
+
+
 def test_node_geoip_resolution_cache_failures_and_region_groups(tmp_path, monkeypatch) -> None:
     settings = Settings(storage_dir=tmp_path / "storage", platform_db_path=tmp_path / "storage" / "platform.db", session_secret="test-secret")
     monkeypatch.setattr(service, "get_settings", lambda: settings)

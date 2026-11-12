@@ -116,6 +116,7 @@ class SetUserPermsPayload(BaseModel):
     userId: str
     # 服务器可见性
     server_visible: bool = False
+    auto_update: bool = False
     # 镜像权限
     img_use: bool = False           # 是否有权使用（查看/访问）镜像（资源角色查看者的前提条件）
     img_pull: bool = False

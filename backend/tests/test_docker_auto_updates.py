@@ -18,7 +18,7 @@ from backend.app.core.errors import ToolboxError, toolbox_error_handler
 from backend.app.db.database import get_connection, init_database
 from backend.app.services import ssh_server_service
 from backend.app.services.auth_service import User
-from tools.docker_manager.backend import auto_updates as updates, base, update_remote as remote
+from tools.docker_manager.backend import auto_updates as updates, base, servers, update_remote as remote
 from tools.docker_manager.backend import router as docker_router
 from tools.docker_manager.backend.update_spec import UpdateRuleInput, parse_run, rule_target
 
@@ -132,6 +132,52 @@ def test_auto_update_api_enforces_permissions_and_queues_work(server, monkeypatc
     [run] = client.get(f"{path}/runs", headers=headers).json()["runs"]
     assert run["id"] == response.json()["runId"]
     assert run["status"] == "queued"
+
+
+def test_delegated_auto_update_requires_separate_grant_and_full_permissions(server, monkeypatch):
+    server_id, _, admin, viewer = server
+    full = dict.fromkeys(base._FULL_DOCKER_OPERATION_PERMS, True)
+    app = FastAPI()
+    app.add_exception_handler(ToolboxError, toolbox_error_handler)
+    app.include_router(docker_router.router, prefix="/api/tools/docker-manager")
+    monkeypatch.setattr(docker_router, "require_user", lambda request: admin if request.headers.get("x-admin") else viewer)
+    client = TestClient(app)
+    path = f"/api/tools/docker-manager/servers/{server_id}"
+    headers = {"x-admin": "1"}
+    partial = {**full, "vol_copy": False, "auto_update": True, "userId": viewer.id}
+    response = client.put(f"{path}/user-perms", json=partial, headers=headers)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "AUTO_UPDATE_REQUIRES_FULL_DOCKER_PERMISSIONS"
+    payload = {**full, "userId": viewer.id}
+    assert client.put(f"{path}/user-perms", json=payload, headers=headers).status_code == 200
+    assert not servers.list_servers(viewer)[0]["canManageAutoUpdates"]
+    assert client.get(f"{path}/auto-updates").status_code == 403
+
+    payload["auto_update"] = True
+    assert client.put(f"{path}/user-perms", json=payload).status_code == 403
+    granted = client.put(f"{path}/user-perms", json=payload, headers=headers)
+    assert granted.status_code == 200
+    assert granted.json()["perms"]["auto_update"]
+    assert servers.list_servers(viewer)[0]["canManageAutoUpdates"]
+    rule = client.post(f"{path}/auto-updates", json=RULE.model_dump()).json()["rule"]
+    assert client.post(f"{path}/auto-updates/{rule['id']}/check").status_code == 202
+
+    # A stale grant in persisted data must not allow execution after a prerequisite changes.
+    with get_connection() as conn:
+        conn.execute("UPDATE docker_user_perms SET vol_copy=0 WHERE server_id=? AND user_id=?", (server_id, viewer.id))
+    assert not servers.list_servers(viewer)[0]["canManageAutoUpdates"]
+    assert client.get(f"{path}/auto-updates").status_code == 403
+    updates.process_updates()
+    [run] = updates.list_runs(server_id, admin, rule["id"])
+    assert run["stage"] == "permission_revoked"
+    assert updates.list_rules(server_id, admin)[0]["pauseReason"]
+
+    # The Docker grant is scoped to a server the recipient can actually access over SSH.
+    assert client.put(f"{path}/user-perms", json=payload, headers=headers).status_code == 200
+    with get_connection() as conn:
+        conn.execute("DELETE FROM platform_ssh_server_user_access WHERE server_id=? AND user_id=?", (server_id, viewer.id))
+    assert servers.list_servers(viewer) == []
+    assert client.get(f"{path}/auto-updates").status_code == 403
 
 
 class Connection:

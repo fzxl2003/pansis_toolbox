@@ -128,8 +128,10 @@ def require_server(server_id: str, user: User) -> sqlite3.Row:
     base.init_docker_database()
     with get_connection() as conn:
         server = base._get_server_row(conn, server_id)
-        base._require_server_visible(conn, server_id, user)
-    ssh_server_service.get_server(server_id, user, require_manage=True)
+        ssh_server = ssh_server_service.get_server(server_id, user)
+        perms = base._get_user_perms(conn, server_id, user)
+    if not base._can_manage_auto_updates(ssh_server, perms):
+        raise error("AUTO_UPDATE_PERMISSION_DENIED", "您没有在此服务器管理自动更新的权限。", 403)
     return server
 
 

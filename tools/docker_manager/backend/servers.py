@@ -117,7 +117,7 @@ def list_servers(user: User) -> list[dict[str, Any]]:
             srv = _public_server(row)
             srv.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
             srv["serverVisible"] = True
-            srv["canManageAutoUpdates"] = selected["canManage"]
+            srv["canManageAutoUpdates"] = _can_manage_auto_updates(selected, perms)
             srv["perms"] = perms
             result.append(srv)
     return result
@@ -170,7 +170,9 @@ def get_server(server_id: str, user: User) -> dict[str, Any]:
         selected = ssh_server_service.get_server(server_id, user)
         srv = _public_server(row)
         srv.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
-        srv["perms"] = _get_user_perms(conn, server_id, user)
+        perms = _get_user_perms(conn, server_id, user)
+        srv["perms"] = perms
+        srv["canManageAutoUpdates"] = _can_manage_auto_updates(selected, perms)
     return srv
 
 
@@ -245,6 +247,13 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
             raise ToolboxError("USER_NOT_FOUND", "目标用户不存在", status_code=404, tool_id=TOOL_ID)
         if target["role"] == "admin":
             raise ToolboxError("ADMIN_IMMUTABLE", "管理员权限不可修改", status_code=400, tool_id=TOOL_ID)
+        if perms.get("auto_update") and not _has_full_docker_permissions(perms):
+            raise ToolboxError(
+                "AUTO_UPDATE_REQUIRES_FULL_DOCKER_PERMISSIONS",
+                "授予自动更新权限前，须授予该服务器的全部 Docker 操作权限。",
+                status_code=422,
+                tool_id=TOOL_ID,
+            )
 
         def b(k: str) -> int:
             return 1 if perms.get(k, False) else 0
@@ -258,7 +267,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
         conn.execute(
             """
             INSERT INTO docker_user_perms (
-                server_id, user_id, server_visible,
+                server_id, user_id, server_visible, auto_update,
                 img_use, img_pull, img_view_all, img_manage_all, img_copy, img_quota_gb,
                 ctr_use, ctr_view_all,
                 ctr_create, ctr_create_template,
@@ -268,7 +277,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 cuda_gpu_indices,
                 updated_at
             ) VALUES (
-                ?, ?, ?,
+                ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
@@ -280,6 +289,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
             )
             ON CONFLICT(server_id, user_id) DO UPDATE SET
                 server_visible = excluded.server_visible,
+                auto_update = excluded.auto_update,
                 img_use = excluded.img_use,
                 img_pull = excluded.img_pull,
                 img_view_all = excluded.img_view_all,
@@ -306,7 +316,7 @@ def set_user_perms(server_id: str, target_user_id: str, perms: dict[str, Any], u
                 updated_at = excluded.updated_at
             """,
             (
-                server_id, target_user_id, b("server_visible"),
+                server_id, target_user_id, b("server_visible"), b("auto_update"),
                 b("img_use"), b("img_pull"), b("img_view_all"), b("img_manage_all"), b("img_copy"), img_quota_gb,
                 b("ctr_use"), b("ctr_view_all"),
                 b("ctr_create"), b("ctr_create_template"),

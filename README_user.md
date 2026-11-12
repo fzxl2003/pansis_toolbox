@@ -106,6 +106,7 @@ npm run frontend
 
 平台管理员和拥有目标服务器管理权限及 Docker 可见权限的服务器所有者，可以在「Docker 多租户管理 → 自动更新」中为现有容器配置规则。输入原 `docker run` 命令（包含 `--name`），或填写原 Compose 项目名、服务名和已解析变量的独立 YAML。规则跟踪镜像标签，例如 `stable`，默认每 15 分钟检查一次。新规则保存后可手动检查或启用定时更新。
 
+- 管理员可以在目标服务器的权限配置弹窗中为用户单独授予「管理自动更新」。该用户须拥有「管理」预设覆盖的全部 Docker 操作权限，并能访问这台 SSH 服务器。撤掉任一前置权限后，自动更新授权失效。
 - 远程 Linux 服务器需要 Docker、Buildx、GNU Screen、Bash、`flock` 和 `timeout`。Compose 规则还需要 Docker Compose 插件。私有仓库沿用执行更新的 SSH 用户已有的 Docker 登录配置。
 - 启用规则和准备重建时，Toolbox 会在 `screen` 中启动一次无副作用的 Docker 查询，断开启动它的 SSH 连接后验证查询结果。服务器的登录策略需要允许后台会话在断开后继续运行。
 - Toolbox 自更新需先从目标镜像仓库的标签部署 Toolbox，然后用相同的端口、`/app/storage` 挂载及 `SESSION_SECRET` 建立规则。宿主机接手后独立完成替换和健康检查，必要时恢复旧镜像。SSH 断开期间可在宿主机用 `screen -ls` 查找 `toolbox-update-<运行ID>`，结果保存在该用户的 `~/.local/state/pansis-toolbox/docker-updates/` 下，直到 Toolbox 收到结果并清理已完成任务。

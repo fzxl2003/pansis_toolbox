@@ -4,6 +4,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState } from 'react';
+import type { SetStateAction } from 'react';
 import {
   Box,
   CheckCircle,
@@ -35,6 +36,8 @@ import { TemplateEditorModal, TemplateRolesModal } from './TemplatesPanel';
 import { API, containerStateClass, useErrorMsg } from './utils';
 import {
   DEFAULT_PERMS,
+  FULL_DOCKER_OPERATION_PERMS,
+  hasFullDockerPermissions,
   type DmServer,
   type ResourceRoles,
   type ServerPermEntry,
@@ -225,7 +228,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   const [perms, setPerms] = useState<ServerPermEntry[]>([]);
   // 细粒度权限编辑弹窗
   const [permsEditTarget, setPermsEditTarget] = useState<ServerPermEntry | null>(null);
-  const [permsForm, setPermsForm] = useState<UserPerms>(DEFAULT_PERMS);
+  const [permsForm, setPermsDraft] = useState<UserPerms>(DEFAULT_PERMS);
   const [permsPathStr, setPermsPathStr] = useState('');
   const [savingPerms, setSavingPerms] = useState(false);
 
@@ -466,6 +469,15 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   }
 
   // ─── 权限编辑 ─────────────────────────────────────────────
+  const canGrantAutoUpdate = hasFullDockerPermissions(permsForm);
+
+  function setPermsForm(update: SetStateAction<UserPerms>) {
+    setPermsDraft((previous) => {
+      const next = typeof update === 'function' ? update(previous) : update;
+      return next.auto_update && !hasFullDockerPermissions(next) ? { ...next, auto_update: false } : next;
+    });
+  }
+
   function openPermsEdit(entry: ServerPermEntry) {
     setPermsEditTarget(entry);
     const p = entry.perms ?? DEFAULT_PERMS;
@@ -506,7 +518,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
   //   none  = 无任何权限
   //   view  = 能看到服务器、查看资源（使用 img_use/ctr_use/vol_use）
   //   use   = 能查看 + 创建资源、使用模板
-  //   manage= 全部权限
+  //   manage= 全部 Docker 操作权限
   function applyPreset(preset: 'none' | 'view' | 'use' | 'manage') {
     const none = { ...DEFAULT_PERMS };
     if (preset === 'none') { setPermsForm(none); return; }
@@ -537,22 +549,12 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
       return;
     }
     if (preset === 'manage') {
-      setPermsForm({
-        server_visible: true,
-        // 镜像：全权限
-        img_use: true, img_pull: true, img_view_all: true, img_manage_all: true, img_copy: true, img_quota_gb: 0,
-        // 容器：全权限
-        ctr_use: true, ctr_view_all: true,
-        ctr_manage_all: true,
-        ctr_create: true, ctr_create_template: true,
-        ctr_path_whitelist: [], ctr_quota_num: 0,
-        // 卷：全权限
-        vol_use: true, vol_view_all: true, vol_create: true, vol_manage_all: true, vol_copy: true, vol_quota_gb: 0,
-        // 模板：全权限
-        tpl_use: true, tpl_create: true, tpl_edit: true,
-        // CUDA：不在预设中设置（保留当前值）
-        cuda_gpu_indices: permsForm.cuda_gpu_indices,
-      });
+      setPermsForm((previous) => ({
+        ...none,
+        ...FULL_DOCKER_OPERATION_PERMS,
+        auto_update: previous.auto_update,
+        cuda_gpu_indices: previous.cuda_gpu_indices,
+      }));
     }
   }
 
@@ -569,7 +571,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
     const useFlags = [p.img_pull, p.img_copy, p.ctr_create, p.ctr_create_template, p.vol_create, p.vol_copy, p.tpl_create];
     const viewFlags = [p.img_use, p.img_view_all, p.ctr_use, p.ctr_view_all, p.vol_use, p.vol_view_all, p.tpl_use];
     if (manageFlags.some(Boolean)) {
-      return { color: '#166534', bg: '#dcfce7', label: '管理' };
+      return { color: '#166534', bg: '#dcfce7', label: p.auto_update && hasFullDockerPermissions(p) ? '管理 · 自动更新' : '管理' };
     }
     if (useFlags.some(Boolean)) {
       return { color: '#1e40af', bg: '#dbeafe', label: '使用' };
@@ -1184,7 +1186,7 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 { key: 'none', label: '无权限', desc: '无任何权限' },
                 { key: 'view', label: '查看', desc: '可查看资源，不可创建/操作' },
                 { key: 'use', label: '使用', desc: '可查看 + 创建资源' },
-                { key: 'manage', label: '管理', desc: '全部权限' },
+                { key: 'manage', label: '管理', desc: '全部 Docker 操作权限' },
               ] as const).map(({ key, label, desc }) => (
                 <button
                   key={key}
@@ -1209,6 +1211,23 @@ export function AdminServersPanel({ onRefresh }: { onRefresh: () => void }) {
                 label="可见该服务器"
                 tooltip="用户能在服务器列表中看到此服务器，是所有功能的前提"
               />
+            </div>
+          </div>
+
+          <div className="dm-perm-section">
+            <div className="dm-perm-section-title">
+              <RefreshCw size={13} /> 自动更新权限
+              <CapsuleSwitch
+                checked={permsForm.auto_update}
+                onChange={(checked) => setPermsForm((previous) => ({ ...previous, auto_update: checked }))}
+                disabled={!canGrantAutoUpdate}
+                label="管理自动更新"
+              />
+            </div>
+            <div className="dm-muted-note">
+              {canGrantAutoUpdate
+                ? '授予后，用户可以配置规则、手动触发更新和查看运行记录。'
+                : '先选择「管理」预设或授予全部 Docker 操作权限，再单独开启。'}
             </div>
           </div>
 

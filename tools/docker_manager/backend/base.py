@@ -152,6 +152,7 @@ def init_docker_database() -> None:
                     user_id TEXT NOT NULL,
                     -- 服务器可见性（是否能看到/访问此服务器）
                     server_visible INTEGER NOT NULL DEFAULT 0,
+                    auto_update INTEGER NOT NULL DEFAULT 0,
                     -- 镜像权限
                     img_use INTEGER NOT NULL DEFAULT 0,      -- 是否有权使用（查看/访问）镜像
                     img_pull INTEGER NOT NULL DEFAULT 0,     -- 拉取新镜像
@@ -341,6 +342,8 @@ def init_docker_database() -> None:
             )
             # 迁移：为已有数据库添加新列
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(docker_user_perms)").fetchall()}
+            if "auto_update" not in existing_cols:
+                conn.execute("ALTER TABLE docker_user_perms ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0")
             if "vol_view_all" not in existing_cols:
                 conn.execute("ALTER TABLE docker_user_perms ADD COLUMN vol_view_all INTEGER NOT NULL DEFAULT 0")
             # vol_manage_all 迁移：新列取代旧的 vol_delete_all
@@ -521,6 +524,7 @@ def _require_admin(user: User) -> None:
 
 _PERMS_DEFAULTS: dict[str, Any] = {
     "server_visible": False,
+    "auto_update": False,
     # 镜像权限
     "img_use": False,           # 是否有权使用（查看/访问）镜像
     "img_pull": False,          # 拉取新镜像
@@ -551,6 +555,25 @@ _PERMS_DEFAULTS: dict[str, Any] = {
     "cuda_gpu_indices": [],
 }
 
+_FULL_DOCKER_OPERATION_PERMS = (
+    "server_visible",
+    "img_use", "img_pull", "img_view_all", "img_manage_all", "img_copy",
+    "ctr_use", "ctr_view_all", "ctr_create", "ctr_create_template", "ctr_manage_all",
+    "vol_use", "vol_view_all", "vol_create", "vol_manage_all", "vol_copy",
+    "tpl_use", "tpl_create", "tpl_edit",
+)
+
+
+def _has_full_docker_permissions(perms: dict[str, Any]) -> bool:
+    return all(perms.get(key) for key in _FULL_DOCKER_OPERATION_PERMS)
+
+
+def _can_manage_auto_updates(ssh_server: dict[str, Any], perms: dict[str, Any]) -> bool:
+    return bool(perms["server_visible"]) and (
+        bool(ssh_server["canManage"]) or bool(perms["auto_update"]) and _has_full_docker_permissions(perms)
+    )
+
+
 # 管理员拥有所有权限的完整集合
 _ADMIN_PERMS: dict[str, Any] = {k: (True if isinstance(v, bool) else ([] if isinstance(v, list) else 999.0)) for k, v in _PERMS_DEFAULTS.items()}
 _ADMIN_PERMS["ctr_path_whitelist"] = []   # 管理员路径不受限
@@ -573,6 +596,7 @@ def _row_to_perms(row: sqlite3.Row) -> dict[str, Any]:
 
     return {
         "server_visible": _b("server_visible"),
+        "auto_update": _b("auto_update"),
         # 镜像
         "img_use": _b("img_use"),
         "img_pull": _b("img_pull"),

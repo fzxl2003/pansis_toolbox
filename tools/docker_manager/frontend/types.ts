@@ -30,6 +30,7 @@ export type DmServer = {
 // img_use/ctr_use/vol_use 控制「是否能使用（看到+访问）该类资源」
 export type UserPerms = {
   server_visible: boolean;
+  auto_update: boolean;
   // 镜像权限
   img_use: boolean;         // 是否有权使用（查看/访问）镜像
   img_pull: boolean;        // 拉取新镜像
@@ -62,6 +63,7 @@ export type UserPerms = {
 
 export const DEFAULT_PERMS: UserPerms = {
   server_visible: false,
+  auto_update: false,
   img_use: false, img_pull: false, img_view_all: false, img_manage_all: false, img_copy: false, img_quota_gb: 0,
   ctr_use: false, ctr_view_all: false,
   ctr_manage_all: false,
@@ -71,6 +73,19 @@ export const DEFAULT_PERMS: UserPerms = {
   tpl_use: false, tpl_create: false, tpl_edit: false,
   cuda_gpu_indices: [],
 };
+
+export const FULL_DOCKER_OPERATION_PERMS = {
+  server_visible: true,
+  img_use: true, img_pull: true, img_view_all: true, img_manage_all: true, img_copy: true,
+  ctr_use: true, ctr_view_all: true, ctr_create: true, ctr_create_template: true, ctr_manage_all: true,
+  vol_use: true, vol_view_all: true, vol_create: true, vol_manage_all: true, vol_copy: true,
+  tpl_use: true, tpl_create: true, tpl_edit: true,
+} as const satisfies Partial<UserPerms>;
+
+export function hasFullDockerPermissions(perms: UserPerms) {
+  const keys = Object.keys(FULL_DOCKER_OPERATION_PERMS) as (keyof typeof FULL_DOCKER_OPERATION_PERMS)[];
+  return keys.every((key) => perms[key]);
+}
 
 export type ServerPermEntry = {
   userId: string;

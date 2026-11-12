@@ -71,6 +71,19 @@ register_tool_categories(TOOL_ID, [
         description="容器资源关联缓存",
         storage="platform_db",
     ),
+    DataCategory(
+        name="auto_update_rules",
+        tables=["docker_update_rules"],
+        time_column=None,
+        description="Docker 自动更新规则",
+        cascade_categories=["auto_update_history"],
+    ),
+    DataCategory(
+        name="auto_update_history",
+        tables=["docker_update_runs"],
+        time_column="finished_at",
+        description="Docker 自动更新运行与邮件记录",
+    ),
 ])
 
 

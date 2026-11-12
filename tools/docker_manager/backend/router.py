@@ -9,6 +9,8 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from backend.app.core.security import require_user
+from tools.docker_manager.backend import auto_updates
+from tools.docker_manager.backend.update_spec import UpdateRuleInput
 
 from tools.docker_manager.backend.service import (
     add_server,
@@ -61,6 +63,45 @@ from tools.docker_manager.backend.service import (
 )
 
 router = APIRouter()
+update_routes = APIRouter(prefix="/servers/{server_id}/auto-updates")
+
+
+@update_routes.get("")
+def list_auto_update_rules(request: Request, server_id: str) -> dict:
+    return {"rules": auto_updates.list_rules(server_id, require_user(request))}
+
+
+@update_routes.post("", status_code=201)
+def create_auto_update_rule(request: Request, server_id: str, payload: UpdateRuleInput) -> dict:
+    return {"rule": auto_updates.save_rule(server_id, require_user(request), payload)}
+
+
+@update_routes.get("/{rule_id}")
+def get_auto_update_rule(request: Request, server_id: str, rule_id: str) -> dict:
+    return {"rule": auto_updates.get_rule(server_id, require_user(request), rule_id)}
+
+
+@update_routes.put("/{rule_id}")
+def edit_auto_update_rule(request: Request, server_id: str, rule_id: str, payload: UpdateRuleInput) -> dict:
+    return {"rule": auto_updates.save_rule(server_id, require_user(request), payload, rule_id)}
+
+
+@update_routes.delete("/{rule_id}", status_code=204)
+def delete_auto_update_rule(request: Request, server_id: str, rule_id: str) -> None:
+    auto_updates.delete_rule(server_id, require_user(request), rule_id)
+
+
+@update_routes.post("/{rule_id}/check", status_code=202)
+def check_auto_update_rule(request: Request, server_id: str, rule_id: str) -> dict:
+    return {"runId": auto_updates.request_run(server_id, require_user(request), rule_id)}
+
+
+@update_routes.get("/{rule_id}/runs")
+def list_auto_update_runs(request: Request, server_id: str, rule_id: str) -> dict:
+    return {"runs": auto_updates.list_runs(server_id, require_user(request), rule_id)}
+
+
+router.include_router(update_routes)
 
 
 # ==============================================================

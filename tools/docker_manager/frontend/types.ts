@@ -15,6 +15,7 @@ export type DmServer = {
   port: number;
   sshUsername: string;
   serverVisible: boolean;
+  canManageAutoUpdates?: boolean;
   createdAt: string;
   // CUDA 信息
   cudaAvailable?: boolean;
@@ -326,7 +327,7 @@ export type BasicUser = { id: string; username: string; displayName: string };
 
 export type CreateMode = 'run' | 'compose' | 'template';
 
-export type TabId = 'servers' | 'images' | 'containers' | 'templates' | 'volumes' | 'my_resources' | 'admin_servers' | 'admin_templates';
+export type TabId = 'servers' | 'images' | 'containers' | 'templates' | 'volumes' | 'auto_updates' | 'my_resources' | 'admin_servers' | 'admin_templates';
 
 // 服务器资源概览（用户侧）
 export type ServerResourceOverview = {

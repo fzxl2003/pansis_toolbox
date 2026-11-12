@@ -12,6 +12,7 @@ import {
   HardDrive,
   Image,
   Layers,
+  RefreshCw,
   Server,
   Shield,
 } from 'lucide-react';
@@ -30,6 +31,7 @@ import { ContainersPanel } from './ContainersPanel';
 import { TemplatesPanel, MyResourcesPanel } from './TemplatesPanel';
 import { VolumesPanel } from './VolumesPanel';
 import { AdminServersPanel, AdminTemplatesPanel } from './AdminPanel';
+import { AutoUpdatesPanel } from './AutoUpdatesPanel';
 
 // ---- Tab 配置 ----
 
@@ -39,6 +41,7 @@ const TAB_LABELS: { id: TabId; label: string; icon: ReactNode; adminOnly?: boole
   { id: 'containers',       label: '容器',      icon: <Box size={14} /> },
   { id: 'templates',        label: '模板',      icon: <ClipboardList size={14} /> },
   { id: 'volumes',          label: '卷',        icon: <Database size={14} /> },
+  { id: 'auto_updates',     label: '自动更新',   icon: <RefreshCw size={14} /> },
   { id: 'my_resources',     label: '资源管理',  icon: <HardDrive size={14} />, userOnly: true },
   { id: 'admin_servers',    label: '服务器管理',icon: <Shield size={14} />, adminOnly: true },
   { id: 'admin_templates',  label: '模板管理',  icon: <Layers size={14} />, adminOnly: true },
@@ -97,7 +100,9 @@ export default function DockerManagerTool() {
   }
 
   const isAdmin = me.role === 'admin';
+  const updateServers = servers.filter((server) => server.canManageAutoUpdates);
   const visibleTabs = TAB_LABELS.filter((t) => {
+    if (t.id === 'auto_updates') return updateServers.length > 0;
     if (t.adminOnly) return isAdmin;
     if (t.userOnly) return !isAdmin;
     return true;
@@ -145,6 +150,9 @@ export default function DockerManagerTool() {
         )}
         {activeTab === 'volumes' && (
           <VolumesPanel servers={servers} me={me} />
+        )}
+        {activeTab === 'auto_updates' && updateServers.length > 0 && (
+          <AutoUpdatesPanel servers={updateServers} />
         )}
         {activeTab === 'my_resources' && !isAdmin && (
           <MyResourcesPanel me={me} />

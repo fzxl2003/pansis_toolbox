@@ -102,6 +102,15 @@ npm run frontend
 - 数据存储在个人目录中，其他用户不可见
 - 支持上传、列表查看、详情查看和删除
 
+### Docker 镜像自动更新
+
+平台管理员和拥有目标服务器管理权限及 Docker 可见权限的服务器所有者，可以在「Docker 多租户管理 → 自动更新」中为现有容器配置规则。输入原 `docker run` 命令（包含 `--name`），或填写原 Compose 项目名、服务名和已解析变量的独立 YAML。规则跟踪镜像标签，例如 `stable`，默认每 15 分钟检查一次。新规则保存后可手动检查或启用定时更新。
+
+- 远程 Linux 服务器需要 Docker、Buildx、Bash、`flock`、`timeout` 和可用的 systemd 用户服务。Compose 规则还需要 Docker Compose 插件。私有仓库沿用执行更新的 SSH 用户已有的 Docker 登录配置。
+- 用 `loginctl show-user "$USER" -p Linger` 确认该 SSH 用户的 linger 为 `yes`。如果需要，服务器管理员可以一次性执行 `sudo loginctl enable-linger <SSH用户名>`。任务执行期间由该用户直接访问 Docker。
+- Toolbox 自更新需先从目标镜像仓库的标签部署 Toolbox，然后用相同的端口、`/app/storage` 挂载及 `SESSION_SECRET` 建立规则。宿主机接手后独立完成替换和健康检查，必要时恢复旧镜像。SSH 断开期间可用运行 ID 在宿主机查询 `systemctl --user status toolbox-update-<运行ID>`，结果保存在该用户的 `~/.local/state/pansis-toolbox/docker-updates/` 下，直到 Toolbox 收到结果并清理已完成任务。
+- 填写收件人后，Toolbox 通过「设置 → 邮件配置」发送开始和结果邮件。自更新期间产生的结果邮件在 Toolbox 恢复后补发。页面可查看每次更新、回滚和邮件投递状态。
+
 ### Git 博客
 
 拥有工具权限的用户可绑定自己的 GitHub 仓库，将 Markdown 同步为公开博客。博客管理页在工具箱内，公开页面为 `/blog/{blogSlug}`；仅带有 `published: true`（或由博客默认配置继承为发布状态）的文章会公开。

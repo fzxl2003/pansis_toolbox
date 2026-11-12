@@ -117,6 +117,7 @@ def list_servers(user: User) -> list[dict[str, Any]]:
             srv = _public_server(row)
             srv.update({key: selected[key] for key in ("name", "host", "port", "sshUsername")})
             srv["serverVisible"] = True
+            srv["canManageAutoUpdates"] = selected["canManage"]
             srv["perms"] = perms
             result.append(srv)
     return result

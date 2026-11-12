@@ -1,266 +1,245 @@
-import { useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
+import {
+  Box, CircleCheck, CirclePause, Clock3, History, Layers3, Pencil, Play,
+  Plus, RefreshCw, Server, Trash2, TriangleAlert,
+} from 'lucide-react';
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../../../frontend/src/api/client';
-import { Alert } from './components';
 import type { DmServer } from './types';
-import { API } from './utils';
+import { ConfirmUpdateDialog, RuleEditorDialog, RunHistoryDialog, UpdateFeedback, UpdateEmpty, UpdateLoading } from './AutoUpdateDialogs';
+import { formatUpdateTime, ruleName, updateRulesPath, useUpdateResource } from './autoUpdates';
+import type { UpdateRule, UpdateRuleInput } from './autoUpdates';
 
-type RuleInput = {
-  mode: 'run' | 'compose';
-  recipe: string;
-  project: string;
-  service: string;
-  intervalMinutes: number;
-  recipients: string[];
-  selfUpdate: boolean;
-  enabled: boolean;
-};
-
-type Rule = Omit<RuleInput, 'recipe'> & {
-  id: string;
-  target: string;
-  image: string;
-  nextAt: string;
-  pauseReason: string;
-};
-
-type Run = {
-  id: string;
-  status: string;
-  message: string;
-  createdAt: string;
-  finishedAt: string | null;
-  oldImage: string;
-  newImage: string;
-  digest: string;
-  startMail: string;
-  finishMail: string;
-};
-
-const initialRule: RuleInput = {
-  mode: 'run', recipe: '', project: '', service: '', intervalMinutes: 15,
-  recipients: [], selfUpdate: false, enabled: false,
-};
-
-const statusLabels: Record<string, string> = {
-  queued: '排队中', checking: '检查中', handoff: '宿主机执行中', no_change: '镜像未变更',
-  skipped: '已跳过', succeeded: '成功', failed: '失败', rolled_back: '已回滚', needs_review: '待人工核对',
-};
-
-const mailLabels: Record<string, string> = {
-  skipped: '未安排', pending: '待发送', sending: '发送中', sent: '已发送', failed: '发送失败', unknown: '投递状态未知',
-};
-
-function formatTime(value: string) {
-  return new Date(value).toLocaleString();
-}
+type RuleAction = 'check' | 'enable' | 'pause' | 'delete';
+type OpenPanel =
+  | { kind: 'edit'; rule?: UpdateRule }
+  | { kind: 'history'; rule: UpdateRule; queuedRunId?: string }
+  | { kind: 'confirm'; rule: UpdateRule; action: Exclude<RuleAction, 'pause'> };
 
 export function AutoUpdatesPanel({ servers }: { servers: DmServer[] }) {
-  const [selectedServer, setSelectedServer] = useState('');
-  const server = servers.find((item) => item.id === selectedServer) ?? servers[0];
+  const [selected, setSelected] = useState('');
+  const restoreServerFocus = useRef(false);
+  const server = servers.find((item) => item.id === selected) ?? servers[0];
   if (!server) return null;
-
-  return (
-    <section className="dm-form-field">
-      <label htmlFor="auto-update-server">目标服务器</label>
-      <select id="auto-update-server" value={server.id} onChange={(event) => setSelectedServer(event.target.value)}>
-        {servers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-      </select>
-      <ServerUpdates key={server.id} server={server} />
-    </section>
-  );
+  return <ServerUpdates key={server.id} server={server} servers={servers} restoreServerFocus={restoreServerFocus}
+    onSelect={(id) => {
+      restoreServerFocus.current = true;
+      setSelected(id);
+    }} />;
 }
 
-function ServerUpdates({ server }: { server: DmServer }) {
-  const path = `${API}/servers/${encodeURIComponent(server.id)}/auto-updates`;
-  const [rules, setRules] = useState<Rule[]>([]);
-  const [editor, setEditor] = useState<{ id?: string; rule: RuleInput } | null>(null);
-  const [history, setHistory] = useState<Rule | null>(null);
-  const [runs, setRuns] = useState<Run[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [loadError, setLoadError] = useState('');
+function ServerUpdates({ server, servers, onSelect, restoreServerFocus }: {
+  server: DmServer;
+  servers: DmServer[];
+  onSelect: (id: string) => void;
+  restoreServerFocus: RefObject<boolean>;
+}) {
+  const path = updateRulesPath(server.id);
+  const { data, loading, error, reload } = useUpdateResource<{ rules: UpdateRule[] }>(path, true);
+  const rules = data?.rules ?? [];
+  const [panel, setPanel] = useState<OpenPanel | null>(null);
+  const [actionError, setActionError] = useState<Error | null>(null);
   const [notice, setNotice] = useState('');
-  const historyId = history?.id;
+  const [pausing, setPausing] = useState<string | null>(null);
+  const createButton = useRef<HTMLButtonElement>(null);
+  const serverSelect = useRef<HTMLSelectElement>(null);
+  const serverField = useId();
+  const title = useId();
+  const listTitle = useId();
 
-  async function loadRules() {
-    const result = await apiGet<{ rules: Rule[] }>(path);
-    setRules(result.rules);
+  useLayoutEffect(() => {
+    if (restoreServerFocus.current) {
+      serverSelect.current?.focus();
+      restoreServerFocus.current = false;
+    }
+  }, [restoreServerFocus]);
+
+  function open(next: OpenPanel) {
+    setNotice('');
+    setActionError(null);
+    setPanel(next);
   }
 
-  async function act(action: () => Promise<void>) {
-    setBusy(true);
-    setError('');
+  async function act(rule: UpdateRule, action: RuleAction) {
+    const rulePath = `${path}/${encodeURIComponent(rule.id)}`;
+    if (action === 'check') {
+      const result = await apiPost<{ runId: string }>(`${rulePath}/check`, {});
+      setPanel({ kind: 'history', rule, queuedRunId: result.runId });
+      return;
+    }
+    if (action === 'delete') {
+      await apiDelete(rulePath);
+      setNotice('规则和运行记录已删除。');
+    } else {
+      const { rule: current } = await apiGet<{ rule: UpdateRule & UpdateRuleInput }>(rulePath);
+      await apiPut(rulePath, { ...current, enabled: action === 'enable' });
+      setNotice(action === 'enable' ? '规则已启用。' : '规则已停用。');
+    }
+    if (action !== 'pause') setPanel(null);
+    const refreshed = reload(true);
+    if (action === 'delete') {
+      void refreshed.then(() => window.requestAnimationFrame(() => {
+        if (document.activeElement === document.body) createButton.current?.focus();
+      }));
+    }
+  }
+
+  async function pause(rule: UpdateRule) {
+    if (pausing) return;
+    setPausing(rule.id);
+    setActionError(null);
     setNotice('');
     try {
-      await action();
+      await act(rule, 'pause');
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '操作失败');
+      setActionError(failure instanceof Error ? failure : new Error('停用规则失败，请重试。'));
     } finally {
-      setBusy(false);
+      setPausing(null);
     }
-  }
-
-  useEffect(() => {
-    let active = true;
-    async function refresh() {
-      try {
-        const result = await apiGet<{ rules: Rule[] }>(path);
-        if (active) {
-          setRules(result.rules);
-          setLoadError('');
-        }
-        if (historyId) {
-          const historyResult = await apiGet<{ runs: Run[] }>(`${path}/${historyId}/runs`);
-          if (active) setRuns(historyResult.runs);
-        }
-      } catch (failure) {
-        if (active) setLoadError(failure instanceof Error ? failure.message : '读取更新记录失败');
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-    void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 5000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [path, historyId]);
-
-  async function edit(rule: Rule) {
-    const result = await apiGet<{ rule: Rule & { recipe: string } }>(`${path}/${rule.id}`);
-    setEditor({ id: rule.id, rule: result.rule });
-  }
-
-  async function toggle(rule: Rule) {
-    const { rule: current } = await apiGet<{ rule: Rule & { recipe: string } }>(`${path}/${rule.id}`);
-    await apiPut(`${path}/${rule.id}`, { ...current, enabled: !current.enabled });
-    await loadRules();
-  }
-
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!editor) return;
-    const addresses = new FormData(event.currentTarget).get('recipients')?.toString() ?? '';
-    const rule = { ...editor.rule, recipients: addresses.split(/[,，]/).map((item) => item.trim()).filter(Boolean) };
-    await act(async () => {
-      if (editor.id) {
-        await apiPut(`${path}/${editor.id}`, rule);
-      } else {
-        await apiPost(path, rule);
-      }
-      setEditor(null);
-      await loadRules();
-    });
-  }
-
-  function changeRule(changes: Partial<RuleInput>) {
-    setEditor((current) => current && { ...current, rule: { ...current.rule, ...changes } });
-  }
-
-  function showHistory(rule: Rule) {
-    if (historyId !== rule.id) setRuns([]);
-    setHistory(rule);
   }
 
   return (
-    <>
-      {(error || loadError) && <div role="alert"><Alert type="error">{error || loadError}</Alert></div>}
-      {notice && <div role="status"><Alert type="success">{notice}</Alert></div>}
-      <div className="dm-card-actions">
-        <button type="button" className="btn primary" disabled={busy} onClick={() => setEditor({ rule: initialRule })}>新增规则</button>
-      </div>
-      {editor && (
-        <form key={editor.id ?? 'new'} className="dm-card dm-form-field" onSubmit={save}>
-          <h3>{editor.id ? '编辑更新规则' : '新增更新规则'}</h3>
-          <div className="dm-form-grid">
-            <label>
-              部署方式
-              <select value={editor.rule.mode} disabled={!!editor.id} onChange={(event) => changeRule({ mode: event.target.value as RuleInput['mode'] })}>
-                <option value="run">docker run</option>
-                <option value="compose">Docker Compose</option>
+    <section className="dm-au" aria-labelledby={title}>
+      <header className="dm-au-heading">
+        <div>
+          <h2 id={title}>自动更新</h2>
+          <p>跟踪镜像标签，在检测到新版本时重建容器或 Compose 服务。</p>
+        </div>
+        <button ref={createButton} type="button" className="primary-button dm-au-button"
+          onClick={() => open({ kind: 'edit' })}>
+          <Plus size={16} aria-hidden="true" />新增规则
+        </button>
+      </header>
+
+      <section className="dm-au-panel" aria-labelledby={listTitle}>
+        <header className="dm-au-toolbar">
+          <div className="dm-au-panel-heading">
+            <h3 id={listTitle}>更新规则</h3>
+            {data && <span>{rules.length} 条</span>}
+          </div>
+          <div className="dm-au-toolbar-controls">
+            <label htmlFor={serverField}>目标服务器</label>
+            <div className="dm-au-select-wrap">
+              <Server size={15} aria-hidden="true" />
+              <select id={serverField} ref={serverSelect} className="dm-au-input" value={server.id}
+                onChange={(event) => onSelect(event.target.value)}>
+                {servers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
-            </label>
-            <label>
-              检查间隔（分钟）
-              <input type="number" required min={1} max={1440} value={editor.rule.intervalMinutes || ''} onChange={(event) => changeRule({ intervalMinutes: Number(event.target.value) })} />
-            </label>
-            {editor.rule.mode === 'compose' && (
-              <>
-                <label>原项目名<input required readOnly={!!editor.id} value={editor.rule.project} onChange={(event) => changeRule({ project: event.target.value })} /></label>
-                <label>服务名<input required readOnly={!!editor.id} value={editor.rule.service} onChange={(event) => changeRule({ service: event.target.value })} /></label>
-              </>
-            )}
-          </div>
-          <label htmlFor="auto-update-recipe">{editor.rule.mode === 'run' ? '原 docker run 命令（含 --name）' : '已解析变量的独立 Compose YAML'}</label>
-          <textarea id="auto-update-recipe" className="mono" required rows={8} maxLength={128000} spellCheck={false} value={editor.rule.recipe} onChange={(event) => changeRule({ recipe: event.target.value })} />
-          <label>
-            邮件收件人（逗号分隔，可选）
-            <input name="recipients" defaultValue={editor.rule.recipients.join(', ')} />
-          </label>
-          <label className="dm-form-check">
-            <input type="checkbox" checked={editor.rule.selfUpdate} onChange={(event) => changeRule({ selfUpdate: event.target.checked })} />
-            更新 Toolbox 自身
-          </label>
-          <div className="dm-card-actions">
-            <button type="button" className="btn" onClick={() => setEditor(null)}>取消</button>
-            <button className="btn primary" type="submit" disabled={busy}>保存</button>
-          </div>
-        </form>
-      )}
-      {loading && <p role="status">正在加载规则…</p>}
-      {!loading && rules.length === 0 && <p className="dm-empty">暂无自动更新规则</p>}
-      <div className="dm-card-grid">
-        {rules.map((rule) => (
-          <article className="dm-card" key={rule.id}>
-            <h3 className="dm-card-title">{rule.target}</h3>
-            <div className="dm-card-meta">{rule.image} · {rule.enabled ? `每 ${rule.intervalMinutes} 分钟检查` : '已停用'}</div>
-            {rule.pauseReason && <p>{rule.pauseReason}</p>}
-            <div className="dm-card-actions">
-              <button type="button" className="btn" disabled={busy} onClick={() => void act(() => edit(rule))}>编辑</button>
-              <button type="button" className="btn" disabled={busy} onClick={() => void act(() => toggle(rule))}>{rule.enabled ? '停用' : '启用'}</button>
-              <button type="button" className="btn" disabled={busy} onClick={() => void act(async () => {
-                await apiPost(`${path}/${rule.id}/check`, {});
-                showHistory(rule);
-                setNotice('已提交检查，检测到新镜像后将自动更新。');
-              })}>立即检查并更新</button>
-              <button type="button" className="btn" onClick={() => showHistory(rule)}>运行记录</button>
-              <button type="button" className="btn" disabled={busy} onClick={() => {
-                if (!window.confirm(`删除 ${rule.target} 的规则和运行记录？`)) return;
-                void act(async () => {
-                  await apiDelete(`${path}/${rule.id}`);
-                  if (historyId === rule.id) setHistory(null);
-                  if (editor?.id === rule.id) setEditor(null);
-                  await loadRules();
-                });
-              }}>删除</button>
             </div>
-          </article>
-        ))}
-      </div>
-      {history && (
-        <section className="dm-card">
-          <div className="dm-card-header">
-            <h3 className="dm-card-title">{history.target} · 运行记录</h3>
-            <button type="button" className="btn" onClick={() => setHistory(null)}>关闭</button>
+            <button type="button" className="secondary-button dm-au-button" disabled={loading}
+              onClick={() => void reload()}>
+              <RefreshCw size={14} className={loading ? 'dm-au-spin' : undefined} aria-hidden="true" />刷新
+            </button>
           </div>
-          {runs.length === 0 && <p className="dm-empty">暂无运行记录</p>}
-          {runs.map((run) => (
-            <details key={run.id}>
-              <summary>{formatTime(run.createdAt)} · {statusLabels[run.status] ?? run.status}{run.message && ` · ${run.message}`}</summary>
-              <dl>
-                <dt>运行 ID</dt><dd><code>{run.id}</code></dd>
-                {run.finishedAt && <><dt>结束时间</dt><dd>{formatTime(run.finishedAt)}</dd></>}
-                {run.oldImage && <><dt>旧镜像 ID</dt><dd className="break-all"><code>{run.oldImage}</code></dd></>}
-                {run.newImage && <><dt>新镜像 ID</dt><dd className="break-all"><code>{run.newImage}</code></dd></>}
-                {run.digest && <><dt>仓库镜像摘要</dt><dd className="break-all"><code>{run.digest}</code></dd></>}
-                <dt>开始邮件</dt><dd>{mailLabels[run.startMail] ?? run.startMail}</dd>
-                <dt>结果邮件</dt><dd>{mailLabels[run.finishMail] ?? run.finishMail}</dd>
-              </dl>
-            </details>
-          ))}
-        </section>
-      )}
-    </>
+        </header>
+
+        {(error || actionError || notice) && <div className="dm-au-feedback-region">
+          {error && <UpdateFeedback error={error} onRetry={() => void reload()} />}
+          {actionError && <UpdateFeedback error={actionError} />}
+          {notice && <UpdateFeedback message={notice} />}
+        </div>}
+
+        {!data && loading && <UpdateLoading text="正在读取更新规则…" />}
+        {data && rules.length === 0 && <UpdateEmpty
+          title="还没有更新规则"
+          description="为这台服务器上的容器或 Compose 服务新增规则，即可开始跟踪镜像。"
+          icon={<RefreshCw size={22} aria-hidden="true" />}
+        />}
+        {rules.length > 0 && (
+          <table className="dm-au-table" role="table" aria-label="自动更新规则">
+            <thead role="rowgroup"><tr role="row">
+              <th scope="col">部署目标</th><th scope="col">跟踪镜像</th>
+              <th scope="col">状态与计划</th><th scope="col">操作</th>
+            </tr></thead>
+            <tbody role="rowgroup">
+              {rules.map((rule) => {
+                const name = ruleName(rule);
+                const ModeIcon = rule.mode === 'compose' ? Layers3 : Box;
+                const StatusIcon = rule.enabled ? CircleCheck : rule.pauseReason ? TriangleAlert : CirclePause;
+                const status = rule.enabled ? '已启用' : rule.pauseReason ? '已暂停' : '已停用';
+                const tagStart = rule.image.lastIndexOf(':');
+                const hasTag = tagStart > rule.image.lastIndexOf('/');
+                return (
+                  <tr key={rule.id} role="row">
+                    <td role="cell" data-cell="target">
+                      <div className="dm-au-target">
+                        <span className="dm-au-target-icon"><ModeIcon size={17} aria-hidden="true" /></span>
+                        <div className="dm-au-cell-stack">
+                          <strong title={name}>{name}</strong>
+                          <small title={rule.mode === 'compose' ? rule.project : undefined}>
+                            {rule.mode === 'compose' ? `Compose · 项目 ${rule.project}` : 'docker run'}
+                          </small>
+                        </div>
+                      </div>
+                    </td>
+                    <td role="cell" data-cell="image">
+                      <span className="dm-au-mobile-label">跟踪镜像</span>
+                      <code className="dm-au-image" title={rule.image}>
+                        <span>{hasTag ? rule.image.slice(0, tagStart) : rule.image}</span>
+                        {hasTag && <span className="dm-au-image-tag">{rule.image.slice(tagStart)}</span>}
+                      </code>
+                    </td>
+                    <td role="cell" data-cell="schedule">
+                      <span className="dm-au-mobile-label">状态与计划</span>
+                      <div className="dm-au-cell-stack">
+                        <div className="dm-au-rule-state">
+                          <span className={`dm-au-badge ${rule.enabled ? 'success' : rule.pauseReason ? 'warning' : 'neutral'}`}>
+                            <StatusIcon size={12} aria-hidden="true" />{status}
+                          </span>
+                          <button type="button" className="dm-au-link" aria-label={`${rule.enabled ? '停用' : '启用'} ${name}`}
+                            disabled={!!pausing} onClick={() => rule.enabled
+                              ? void pause(rule)
+                              : open({ kind: 'confirm', rule, action: 'enable' })}>
+                            {pausing === rule.id ? '停用中…' : rule.enabled ? '停用' : '启用'}
+                          </button>
+                        </div>
+                        {rule.enabled && <small className="dm-au-schedule" title={`下次检查 ${formatUpdateTime(rule.nextAt)}`}>
+                          <Clock3 size={12} aria-hidden="true" />每 {rule.intervalMinutes} 分钟
+                          <span className="dm-au-sr-only">，下次检查 {formatUpdateTime(rule.nextAt)}</span>
+                        </small>}
+                        {rule.pauseReason && <small className="dm-au-pause" title={rule.pauseReason}>{rule.pauseReason}</small>}
+                      </div>
+                    </td>
+                    <td role="cell" data-cell="actions">
+                      <div className="dm-au-row-actions">
+                        <button type="button" className="dm-au-row-button" aria-label={`检查更新 ${name}`} title="立即检查并更新"
+                          onClick={() => open({ kind: 'confirm', rule, action: 'check' })}>
+                          <Play size={14} aria-hidden="true" />检查更新
+                        </button>
+                        <button type="button" className="dm-au-row-button" aria-label={`查看 ${name} 的运行记录`} title="运行记录"
+                          onClick={() => open({ kind: 'history', rule })}>
+                          <History size={15} aria-hidden="true" />记录
+                        </button>
+                        <button type="button" className="dm-au-row-button dm-au-icon-button"
+                          aria-label={`编辑 ${name}`} title="编辑规则" onClick={() => open({ kind: 'edit', rule })}>
+                          <Pencil size={15} aria-hidden="true" />
+                        </button>
+                        <button type="button" className="dm-au-row-button dm-au-row-danger" aria-label={`删除 ${name}`} title="删除规则"
+                          onClick={() => open({ kind: 'confirm', rule, action: 'delete' })}>
+                          <Trash2 size={15} aria-hidden="true" />删除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {panel?.kind === 'edit' && <RuleEditorDialog path={path} serverName={server.name} rule={panel.rule}
+        onClose={() => setPanel(null)} returnFocus={createButton}
+        onSaved={() => {
+          setPanel(null);
+          setNotice(panel.rule ? '规则已保存。' : '规则已创建，可以手动检查或启用定时更新。');
+          void reload(true);
+        }} />}
+      {panel?.kind === 'history' && <RunHistoryDialog path={path} rule={panel.rule} queuedRunId={panel.queuedRunId}
+        onClose={() => setPanel(null)} returnFocus={createButton} />}
+      {panel?.kind === 'confirm' && <ConfirmUpdateDialog rule={panel.rule} action={panel.action}
+        onClose={() => setPanel(null)} returnFocus={createButton} onConfirm={() => act(panel.rule, panel.action)} />}
+    </section>
   );
 }

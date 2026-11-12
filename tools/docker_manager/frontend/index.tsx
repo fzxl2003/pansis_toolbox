@@ -3,7 +3,7 @@
 // ============================================================
 
 import './style.css';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Box,
@@ -55,6 +55,7 @@ export default function DockerManagerTool() {
   const [activeTab, setActiveTab] = useState<TabId>('servers');
   const [servers, setServers] = useState<DmServer[]>([]);
   const [serversLoading, setServersLoading] = useState(false);
+  const autoUpdateTab = useRef<HTMLButtonElement>(null);
 
   async function loadMe() {
     try {
@@ -82,6 +83,20 @@ export default function DockerManagerTool() {
 
   useEffect(() => { void loadMe(); }, []);
   useEffect(() => { if (me) void loadServers(); }, [me]);
+  useEffect(() => {
+    const tab = autoUpdateTab.current;
+    const nav = tab?.parentElement;
+    if (activeTab !== 'auto_updates' || !tab || !nav) return;
+    const revealTab = () => {
+      if (nav.scrollWidth > nav.clientWidth) {
+        tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    };
+    revealTab();
+    const observer = new ResizeObserver(revealTab);
+    observer.observe(nav);
+    return () => observer.disconnect();
+  }, [activeTab]);
 
   if (loading) {
     return (
@@ -122,11 +137,13 @@ export default function DockerManagerTool() {
       </div>
 
       {/* Navigation Tabs */}
-      <nav className="dm-nav">
+      <nav className="dm-nav" aria-label="Docker 工具模块">
         {visibleTabs.map((t) => (
           <button
             key={t.id}
-            className={`dm-nav-tab${activeTab === t.id ? ' active' : ''}${t.adminOnly ? ' admin-tab' : ''}`}
+            ref={t.id === 'auto_updates' ? autoUpdateTab : undefined}
+            aria-current={activeTab === t.id ? 'page' : undefined}
+            className={`dm-nav-tab${activeTab === t.id ? ' active' : ''}${t.adminOnly ? ' admin-tab' : ''}${t.id === 'auto_updates' ? ' dm-au-tab' : ''}`}
             onClick={() => setActiveTab(t.id)}
           >
             {t.icon} {t.label}

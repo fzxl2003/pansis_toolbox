@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A transient user service owns this operation, including rollback.
+# A detached host session owns this operation, including rollback.
 set -u
 umask 077
 cd -- "$1" || exit 1

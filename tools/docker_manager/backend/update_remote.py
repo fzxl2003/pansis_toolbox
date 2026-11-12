@@ -92,19 +92,55 @@ def remote_json(client: Any, args: list[str], stage: str) -> Any:
 
 def preflight(client: Any, compose: bool) -> str:
     script = """
-set -eu
-command -v flock timeout systemd-run loginctl >/dev/null
-[ "$(loginctl show-user "$(id -u)" -p Linger --value)" = yes ]
-engine=$(docker info --format '{{.ID}}')
-[ -n "$engine" ]
-unit_engine=$(systemd-run --user --quiet --wait --pipe --property=Type=exec \
-    docker info --format '{{.ID}}')
-[ "$engine" = "$unit_engine" ]
-docker buildx version >/dev/null
-if [ "$1" = compose ]; then docker compose version >/dev/null; fi
-printf '%s' "$engine"
+command -v screen >/dev/null || { printf screen_missing; exit 0; }
+command -v flock >/dev/null && command -v timeout >/dev/null || { printf worker_tools_missing; exit 0; }
+engine=$(docker info --format '{{.ID}}') && [ -n "$engine" ] || { printf docker_unavailable; exit 0; }
+docker buildx version >/dev/null || { printf buildx_missing; exit 0; }
+if [ "$1" = compose ]; then
+    docker compose version >/dev/null || { printf compose_missing; exit 0; }
+fi
+printf 'ready %s' "$engine"
 """
-    return shell(client, script, "compose" if compose else "run", stage="preflight")
+    response = shell(client, script, "compose" if compose else "run", stage="preflight")
+    if response.startswith("ready "):
+        return response.removeprefix("ready ")
+    raise RemoteUpdateError(response)
+
+
+def start_detach_probe(client: Any, probe_id: str, path: str) -> None:
+    probe = """
+for ((attempt=0; attempt<150; attempt++)); do
+    if [ -f "$1/disconnected" ]; then
+        sleep 1
+        docker info --format '{{.ID}}' > "$1/engine.tmp" && mv -- "$1/engine.tmp" "$1/engine"
+        exit
+    fi
+    sleep 0.1
+done
+"""
+    create_work_dir(client, path, stage="screen_detach")
+    execute(client, [
+        "screen", "-c", "/dev/null", "-dmS", f"toolbox-{probe_id}",
+        "timeout", "-k", "2s", "20s", "/bin/bash", "-c", probe, "toolbox-screen-probe", path,
+    ], "screen_detach")
+
+
+def verify_detach_probe(client: Any, path: str, engine: str) -> None:
+    script = """
+set -eu
+umask 077
+touch -- "$1/disconnected"
+for ((attempt=0; attempt<60; attempt++)); do
+    if [ -f "$1/engine" ]; then
+        cat -- "$1/engine"
+        exit
+    fi
+    sleep 0.1
+done
+exit 1
+"""
+    if shell(client, script, path, stage="screen_detach") != engine:
+        raise RemoteUpdateError("docker_context")
 
 
 def work_dir(client: Any, run_id: str) -> str:
@@ -114,9 +150,12 @@ def work_dir(client: Any, run_id: str) -> str:
     return posixpath.join(home, SPOOL, run_id)
 
 
+def create_work_dir(client: Any, path: str, *, stage: str) -> None:
+    shell(client, 'umask 077; mkdir -p -- "$1" && chmod -- 700 "${1%/*}" "$1"', path, stage=stage)
+
+
 def upload(client: Any, path: str, files: dict[str, str]) -> None:
-    shell(client, 'umask 077; mkdir -p -- "$1" && chmod 700 -- "${1%/*}" "$1"',
-          path, stage="remote_directory")
+    create_work_dir(client, path, stage="remote_directory")
     try:
         with client.open_sftp() as sftp:
             for name, content in files.items():
@@ -355,26 +394,26 @@ def stage_worker(client: Any, run_id: str, path: str, payload: UpdateRuleInput, 
 
 def launch(client: Any, run_id: str, path: str) -> None:
     execute(client, [
-        "systemd-run", "--user", "--quiet", f"--unit=toolbox-update-{run_id}",
-        "--property=Type=exec", "--property=RuntimeMaxSec=35min",
-        "/bin/bash", f"{path}/worker.sh", path,
+        "screen", "-c", "/dev/null", "-dmS", f"toolbox-update-{run_id}",
+        "timeout", "-k", "5s", "35m", "/bin/bash", f"{path}/worker.sh", path,
     ], "handoff")
 
 
 def outcome(client: Any, run_id: str, path: str) -> tuple[str, str, dict[str, str]] | None:
-    script = """
+    script = r"""
 if [ -f "$1/result" ]; then
     cat -- "$1/result"
-else
-    systemctl --user show -p Version >/dev/null || exit 1
-    state=$(systemctl --user show "$2" -p ActiveState --value 2>/dev/null || true)
-    case "$state" in
-        active|activating|reloading|deactivating) printf running ;;
-        *)
-            if [ -f "$1/result" ]; then cat -- "$1/result"; else printf missing; fi
-            ;;
-    esac
+    exit
 fi
+command -v screen >/dev/null || exit 1
+sessions=$(LC_ALL=C screen -ls "$2" 2>&1) || true
+while read -r session state; do
+    if [[ "$session" =~ ^[0-9]+[.] && "$session" == *."$2" && "$state" =~ \((Attached|Detached)\) ]]; then
+        printf running
+        exit
+    fi
+done <<< "$sessions"
+if [ -f "$1/result" ]; then cat -- "$1/result"; else printf missing; fi
 """
     result = shell(client, script, path, f"toolbox-update-{run_id}", stage="read_result").split()
     if result == ["running"]:

@@ -14,6 +14,7 @@ from backend.app.core.errors import ToolboxError
 from backend.app.db.database import get_connection, list_user_tool_dbs, user_tool_connection_context
 from backend.app.services import email_service, ssh_server_service, tool_access_service
 from backend.app.services.auth_service import User, user_from_row
+from backend.app.services.ssh_connection_service import SSHConnectionPool
 
 from . import base, update_remote as remote
 from .update_spec import UpdateRuleInput, rule_target
@@ -22,7 +23,13 @@ logger = logging.getLogger(__name__)
 TOOL_ID = base.TOOL_ID
 ACTIVE = ("queued", "checking", "handoff")
 STAGES = {
-    "preflight": "目标服务器需要可用的 Docker、Buildx 和 systemd 用户服务（已启用 linger）。Compose 规则还需要 Compose 插件。",
+    "preflight": "无法检查目标服务器的更新环境。",
+    "screen_missing": "目标服务器缺少 GNU Screen，请为 SSH 用户安装或配置 screen。",
+    "worker_tools_missing": "目标服务器缺少 flock 或 timeout 命令。",
+    "docker_unavailable": "目标服务器的 SSH 用户无法直接访问 Docker。",
+    "buildx_missing": "目标服务器的 SSH 用户无法运行 Docker Buildx。",
+    "compose_missing": "目标服务器的 SSH 用户无法运行 Docker Compose。",
+    "screen_detach": "SSH 断开后未收到 screen 测试结果，请检查宿主机是否在退出登录时清理后台进程。",
     "target_missing": "找不到目标容器或 Compose 服务。",
     "target_not_running": "目标容器或服务副本当前未全部运行。",
     "compose_config": "目标服务器无法解析 Compose 配置。",
@@ -179,10 +186,31 @@ def get_rule(server_id: str, user: User, rule_id: str) -> dict:
     return {**_public(row, owner), "recipe": _config(row).recipe}
 
 
+def _verify_detached_runner(server: sqlite3.Row, client, engine: str) -> None:
+    probe_id = f"probe-{base._new_id()}"
+    path = remote.work_dir(client, probe_id)
+    try:
+        # Use a separate pool so the test closes its transport without
+        # holding two leases from the same server's shared pool.
+        with SSHConnectionPool().borrow_client(base._ssh_spec(server)) as probe_client:
+            try:
+                remote.start_detach_probe(probe_client, probe_id, path)
+            finally:
+                # Returning a lease to the pool would leave the SSH transport open.
+                probe_client.invalidate()
+        remote.verify_detach_probe(client, path, engine)
+    finally:
+        try:
+            remote.clean(client, path)
+        except remote.RemoteUpdateError:
+            logger.warning("Could not clean Docker screen probe %s", probe_id)
+
+
 def _validate_remote(server: sqlite3.Row, payload: UpdateRuleInput, image: str) -> None:
     try:
         with base._ssh_connect(server) as client:
             engine = remote.preflight(client, payload.mode == "compose")
+            _verify_detached_runner(server, client, engine)
             path = remote.work_dir(client, f"validate-{base._new_id()}")
             try:
                 remote.snapshot(client, payload, image, path, engine)
@@ -365,6 +393,7 @@ def _prepare(owner: str, rule: sqlite3.Row, run: sqlite3.Row) -> None:
                 if not run["manual"] and candidate.manifest == rule["failed_digest"]:
                     _finish(owner, rule, run, "skipped", "previous_failure")
                     return
+                _verify_detached_runner(server, client, engine)
                 remote.stage_worker(client, run["id"], path, payload, rule["target"], current, candidate)
                 require_server(rule["server_id"], _get_user(owner))
                 _record_handoff(owner, run["id"], path, current, candidate, payload.recipients)

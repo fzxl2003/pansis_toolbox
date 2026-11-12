@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -153,6 +156,7 @@ def test_unchanged_and_handoff_recovery(server, monkeypatch):
     monkeypatch.setattr(remote, "work_dir", lambda _, run_id: f"/spool/{run_id}")
     monkeypatch.setattr(remote, "snapshot", lambda *_: snapshot())
     monkeypatch.setattr(remote, "clean", lambda *_: None)
+    monkeypatch.setattr(updates, "_verify_detached_runner", lambda *_: None)
     monkeypatch.setattr(remote, "stage_worker", lambda *_: None)
     monkeypatch.setattr(remote, "candidate_image", lambda *_: remote.Candidate("app@" + MANIFEST, MANIFEST, OLD_IMAGE))
     updates.request_run(server_id, owner, rule["id"])
@@ -185,6 +189,83 @@ def test_unchanged_and_handoff_recovery(server, monkeypatch):
         assert conn.execute("SELECT is_public FROM docker_containers_meta WHERE container_ref=?", (NEW[:12],)).fetchone()[0]
         assert not conn.execute("SELECT 1 FROM docker_resource_roles WHERE resource_ref=?", (OLD[:12],)).fetchone()
         assert conn.execute("SELECT 1 FROM docker_resource_roles WHERE resource_ref=?", (NEW[:12],)).fetchone()
+
+
+def test_screen_probe_closes_ssh_transport_before_requesting_result(monkeypatch):
+    events = []
+
+    class ProbeLease(Connection):
+        def invalidate(self):
+            events.append("disconnected")
+
+    class ProbePool:
+        def borrow_client(self, spec):
+            assert spec == "ssh-config"
+            return ProbeLease()
+
+    monkeypatch.setattr(base, "_ssh_spec", lambda _: "ssh-config")
+    monkeypatch.setattr(updates, "SSHConnectionPool", ProbePool)
+    monkeypatch.setattr(remote, "work_dir", lambda _, probe_id: f"/spool/{probe_id}")
+    monkeypatch.setattr(remote, "start_detach_probe", lambda *_: events.append("started"))
+    monkeypatch.setattr(remote, "verify_detach_probe", lambda *_: events.append("verified"))
+    monkeypatch.setattr(remote, "clean", lambda *_: events.append("cleaned"))
+    updates._verify_detached_runner(None, Connection(), "docker-id")
+    assert events == ["started", "disconnected", "verified", "cleaned"]
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU Screen is unavailable")
+def test_screen_launch_survives_launcher_exit_and_reports_result(tmp_path, monkeypatch):
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    for name, content in {
+        "docker": "#!/bin/bash\nprintf 'docker-id\\n'\n",
+        "timeout": '#!/bin/bash\nshift 3\nexec "$@"\n',
+        "flock": "#!/bin/bash\nexit 0\n",
+    }.items():
+        executable = binaries / name
+        executable.write_text(content)
+        executable.chmod(0o700)
+    env = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
+
+    def local_execute(_client, args, stage, timeout=30):
+        completed = subprocess.run(args, env=env, text=True, capture_output=True, timeout=timeout)
+        if completed.returncode:
+            raise remote.RemoteUpdateError(stage)
+        return completed.stdout.strip()
+
+    monkeypatch.setattr(remote, "execute", local_execute)
+    run_id = uuid.uuid4().hex[:12]
+    probe_id = f"probe-{run_id}"
+    probe = str(tmp_path / probe_id)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "worker.sh").write_text("""\
+for ((i=0; i<50; i++)); do
+    if [ -f "$1/release" ]; then
+        echo 'failed pull_failed' > "$1/result.tmp"
+        mv "$1/result.tmp" "$1/result"
+        exit
+    fi
+    sleep 0.1
+done
+""")
+    try:
+        assert remote.preflight(None, compose=True) == "docker-id"
+        remote.start_detach_probe(None, probe_id, probe)
+        assert not (tmp_path / probe_id / "engine").exists()
+        remote.verify_detach_probe(None, probe, "docker-id")
+        remote.launch(None, run_id, str(work))
+        assert remote.outcome(None, run_id, str(work)) is None
+        (work / "release").touch()
+        for _ in range(30):
+            result = remote.outcome(None, run_id, str(work))
+            if result is not None:
+                break
+            time.sleep(0.1)
+        assert result == ("failed", "pull_failed", {})
+    finally:
+        for session in (f"toolbox-{probe_id}", f"toolbox-update-{run_id}"):
+            subprocess.run(["screen", "-S", session, "-X", "quit"], env=env, capture_output=True, timeout=5)
 
 
 def test_manifest_uses_target_platform_digest(monkeypatch):

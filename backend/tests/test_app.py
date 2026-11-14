@@ -564,19 +564,22 @@ def test_server_monitor_parse_gpu_processes() -> None:
 
 def test_server_monitor_default_visibility_and_snapshot(monkeypatch) -> None:
     _cleanup_monitor_test_data()
-    monkeypatch.setattr(monitor_service, "_run_ssh", lambda row, command, timeout=20: _monitor_output())
-    monkeypatch.setattr(monitor_service, "_run_ssh_cached", lambda row, command: _monitor_output())
+    commands = []
+
+    def ssh(row, command, timeout=20):
+        commands.append(command)
+        if command.startswith("kill -TERM"):
+            return "killed"
+        return _monitor_output() if len(commands) > 1 else _monitor_output_with_processes()
+
+    monkeypatch.setattr(monitor_service, "_run_ssh", ssh)
     auth = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
     cookies = auth.cookies
+    ssh_server_id = _monitor_test_ssh_server(cookies, True)
     created = client.post(
         "/api/tools/server-monitor/servers",
         json={
-            "name": "Default Monitor Test",
-            "host": "127.0.0.1",
-            "port": 22,
-            "sshUsername": "root",
-            "sshPassword": "secret",
-            "isDefault": True,
+            "serverId": ssh_server_id,
             "directoryWhitelist": ["/data"],
             "directoryRefreshSeconds": 60,
         },
@@ -594,6 +597,25 @@ def test_server_monitor_default_visibility_and_snapshot(monkeypatch) -> None:
     snapshot = client.get(f"/api/tools/server-monitor/servers/{server['id']}/snapshot?force=true", cookies=cookies)
     assert snapshot.status_code == 200
     assert snapshot.json()["sample"]["gpus"][0]["name"] == "NVIDIA A100"
+    assert snapshot.json()["sample"]["disks"][0]["mountPath"] == "/"
+    assert snapshot.json()["sample"]["gpus"][0]["processes"][0]["pid"] == 1234
+    endpoint = f"/api/tools/server-monitor/servers/{server['id']}"
+    assert client.get(f"{endpoint}/snapshot", cookies=cookies).json() == snapshot.json()
+    assert len(commands) == 1
+    history = client.get(f"/api/tools/server-monitor/servers/{server['id']}/history?hours=24", cookies=cookies)
+    assert history.status_code == 200
+    assert history.json()["bucketSeconds"] == 300
+    assert len(history.json()["samples"]) == 288
+    assert history.json()["samples"][-1]["cpuPercent"] == {"avg": 40, "max": 40}
+    assert history.json()["samples"][-1]["memoryPercent"] == {"avg": 25, "max": 25}
+    assert "disks" not in history.json()["samples"][-1]
+    assert "processes" not in history.json()["samples"][-1]["gpus"][0]
+    killed = client.post(f"{endpoint}/processes/kill", json={"pid": 1234}, cookies=cookies)
+    assert killed.status_code == 200 and killed.json()["killed"]
+    refreshed = client.get(f"{endpoint}/snapshot?force=true", cookies=cookies)
+    assert refreshed.json()["sample"]["gpus"][0]["processes"] == []
+    assert commands[1] == "kill -TERM -- 1234 && echo killed"
+    assert len(commands) == 3
     _cleanup_monitor_test_data()
 
 
@@ -616,15 +638,11 @@ def test_server_monitor_private_visibility_and_directory_whitelist(monkeypatch) 
     user_auth = client.post("/api/auth/login", json={"username": username, "password": "pw123"})
     assert user_auth.status_code == 200
 
+    ssh_server_id = _monitor_test_ssh_server(user_auth.cookies, False)
     private_server = client.post(
         "/api/tools/server-monitor/servers",
         json={
-            "name": "Private Monitor Test",
-            "host": "10.0.0.8",
-            "port": 22,
-            "sshUsername": "ops",
-            "sshPassword": "secret",
-            "isDefault": False,
+            "serverId": ssh_server_id,
             "directoryWhitelist": ["/data"],
             "directoryRefreshSeconds": 60,
         },
@@ -659,6 +677,22 @@ def test_server_monitor_private_visibility_and_directory_whitelist(monkeypatch) 
     _cleanup_monitor_test_data()
 
 
+def _monitor_test_ssh_server(cookies, shared: bool) -> str:
+    response = client.post(
+        "/api/settings/ssh-servers",
+        cookies=cookies,
+        json={
+            "name": "Default Monitor Test" if shared else "Private Monitor Test",
+            "host": "127.0.0.1",
+            "sshUsername": "ops",
+            "sshPassword": "secret",
+            "isPublic": shared,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["server"]["id"]
+
+
 def _monitor_output() -> str:
     return """__CPU__
 cpu  100 0 100 800 0 0 0 0 0 0
@@ -678,6 +712,11 @@ __GPU__
 def _cleanup_monitor_test_data() -> None:
     # Clean up platform-level default servers table
     with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM platform_ssh_server_user_access WHERE server_id IN "
+            "(SELECT id FROM platform_ssh_servers WHERE name IN ('Default Monitor Test', 'Private Monitor Test'))"
+        )
+        connection.execute("DELETE FROM platform_ssh_servers WHERE name IN ('Default Monitor Test', 'Private Monitor Test')")
         # Check if monitor_default_servers table exists before trying to delete
         table_exists = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='monitor_default_servers'"

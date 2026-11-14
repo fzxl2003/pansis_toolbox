@@ -8,8 +8,10 @@ import secrets
 import shlex
 import sqlite3
 import time
+from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
+from threading import Lock
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -18,7 +20,6 @@ from backend.app.core.config import get_settings
 from backend.app.core.errors import ToolboxError
 from backend.app.db.database import (
     get_connection,
-    get_user_tool_connection,
     list_user_tool_dbs,
     user_tool_connection_context,
 )
@@ -28,19 +29,27 @@ from backend.app.services import ssh_connection_service
 from backend.app.services import ssh_server_service
 from backend.app.services.ssh_connection_service import SSHConnectionSpec
 
+from tools.server_monitor.backend.migrate_history import compact_history_database, migrate_history_schema
+from tools.server_monitor.backend.trends import (
+    RETENTION_DAYS,
+    SAMPLE_SECONDS,
+    SAMPLES_SCHEMA,
+    SAMPLES_TIME_INDEX,
+    read_history,
+    store_sample,
+)
+
 logger = logging.getLogger(__name__)
 
 TOOL_ID = "server_monitor"
-SAMPLE_SECONDS = 30
-RETENTION_DAYS = 30
 DEFAULT_DIRECTORY_REFRESH_SECONDS = 300
 
 # Module-level init flag: track which user DBs have been initialized
 _initialized_dbs: set[str] = set()
 
-# In-memory SSH result cache: host -> (timestamp, raw_output)
-# Avoids redundant SSH calls when multiple users monitor the same default server
-_ssh_result_cache: dict[str, tuple[float, str]] = {}
+_snapshot_lock = Lock()
+_snapshots: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_snapshot_requests: dict[tuple[str, str], Future[dict[str, Any]]] = {}
 
 
 # ============================================================
@@ -52,8 +61,9 @@ def init_monitor_database(user_id: str) -> None:
     if user_id in _initialized_dbs:
         return
     with user_tool_connection_context(user_id, TOOL_ID) as connection:
+        migrate_history_schema(connection, datetime.now(timezone.utc))
         connection.executescript(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS monitor_servers (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -70,21 +80,8 @@ def init_monitor_database(user_id: str) -> None:
                 updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS monitor_samples (
-                id TEXT PRIMARY KEY,
-                server_id TEXT NOT NULL,
-                collected_at TEXT NOT NULL,
-                cpu_percent REAL,
-                memory_total_bytes INTEGER,
-                memory_used_bytes INTEGER,
-                disks_json TEXT NOT NULL DEFAULT '[]',
-                gpus_json TEXT NOT NULL DEFAULT '[]',
-                error TEXT,
-                FOREIGN KEY(server_id) REFERENCES monitor_servers(id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_monitor_samples_server_time
-                ON monitor_samples(server_id, collected_at);
+            {SAMPLES_SCHEMA};
+            {SAMPLES_TIME_INDEX};
 
             CREATE TABLE IF NOT EXISTS monitor_directory_cache (
                 id TEXT PRIMARY KEY,
@@ -101,9 +98,9 @@ def init_monitor_database(user_id: str) -> None:
             );
             """
         )
-    _initialized_dbs.add(user_id)
     _migrate_legacy_default_servers()
     _migrate_legacy_servers(user_id)
+    _initialized_dbs.add(user_id)
 
 
 # ============================================================
@@ -243,7 +240,7 @@ register_tool_categories(TOOL_ID, [
         name="samples",
         tables=["monitor_samples"],
         time_column="collected_at",
-        description="监控采样记录（CPU、内存、磁盘、GPU）",
+        description="监控采样记录（CPU、内存、GPU 负载和显存）",
         storage="user_tool_db",
     ),
     DataCategory(
@@ -393,37 +390,43 @@ def collect_snapshot(server_id: str, user: User | None, force: bool = False) -> 
     if user is None:
         raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
-    latest = _latest_sample(user.id, server_id)
-    if latest and not force and _age_seconds(latest["collected_at"]) < SAMPLE_SECONDS:
-        return _sample_payload(row, latest)
-    sample = _collect_and_store(user.id, row)
-    _prune_history(user.id)
-    return _sample_payload(row, sample)
+    return {"server": _public_server(row), "sample": _snapshot(user.id, row, force=force)}
 
 
-def _latest_sample(user_id: str, server_id: str) -> sqlite3.Row | None:
-    with user_tool_connection_context(user_id, TOOL_ID) as connection:
-        return connection.execute(
-            "SELECT * FROM monitor_samples WHERE server_id = ? ORDER BY collected_at DESC LIMIT 1",
-            (server_id,),
-        ).fetchone()
+def _snapshot(user_id: str, row: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    key = (user_id, row["id"])
+    with _snapshot_lock:
+        pending = _snapshot_requests.get(key)
+        cached = _snapshots.get(key)
+        if pending is None:
+            if cached is not None and not force and time.monotonic() - cached[0] < SAMPLE_SECONDS:
+                return cached[1]
+            request: Future[dict[str, Any]] = Future()
+            _snapshot_requests[key] = request
+    if pending is not None:
+        return pending.result()
+
+    try:
+        sample = _collect_and_store(user_id, row)
+    except BaseException as exc:
+        with _snapshot_lock:
+            _snapshot_requests.pop(key)
+            request.set_exception(exc)
+        raise
+    with _snapshot_lock:
+        _snapshots[key] = (time.monotonic(), sample)
+        _snapshot_requests.pop(key)
+        request.set_result(sample)
+    return sample
 
 
 def history(server_id: str, user: User | None, hours: int = 24) -> dict[str, Any]:
     if user is None:
         raise ToolboxError("LOGIN_REQUIRED", "请先登录", status_code=401, tool_id=TOOL_ID)
     row = get_server(server_id, user)
-    since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * RETENTION_DAYS)))
     with user_tool_connection_context(user.id, TOOL_ID) as connection:
-        rows = connection.execute(
-            """
-            SELECT * FROM monitor_samples
-            WHERE server_id = ? AND collected_at >= ?
-            ORDER BY collected_at ASC
-            """,
-            (server_id, since.isoformat()),
-        ).fetchall()
-    return {"server": _public_server(row), "samples": [_history_sample(item) for item in rows]}
+        trends = read_history(connection, datetime.now(timezone.utc), server_id, hours)
+    return {"server": _public_server(row), **trends}
 
 
 # ============================================================
@@ -487,6 +490,14 @@ def kill_gpu_process(server_id: str, pid: int, user: User) -> dict[str, Any]:
     if pid <= 0:
         raise ToolboxError("INVALID_PID", "进程号不合法", status_code=400, tool_id=TOOL_ID)
     output = _run_ssh(row, f"kill -TERM -- {int(pid)} && echo killed", timeout=10)
+    key = (user.id, server_id)
+    with _snapshot_lock:
+        pending = _snapshot_requests.get(key)
+    if pending is not None:
+        # The process has already been signalled even if the snapshot fails.
+        pending.exception()
+    with _snapshot_lock:
+        _snapshots.pop(key, None)
     return {"killed": True, "pid": pid, "output": output.strip()}
 
 
@@ -495,50 +506,59 @@ def kill_gpu_process(server_id: str, pid: int, user: User) -> dict[str, Any]:
 # ============================================================
 
 def collect_due_servers() -> None:
-    """Called by scheduler to collect samples for all servers across all users.
-
-    Uses an in-memory SSH result cache to avoid redundant SSH calls when
-    multiple users have the same default server in their databases.
-    """
+    users = {user.id: user for user in list_users()}
     for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
-        init_monitor_database(user_id)
+        scheduler_user = users.get(user_id)
+        if scheduler_user is None:
+            continue
         try:
+            init_monitor_database(user_id)
             with user_tool_connection_context(user_id, TOOL_ID) as connection:
-                rows = connection.execute(
-                    "SELECT * FROM monitor_servers WHERE enabled = 1"
-                ).fetchall()
+                rows = connection.execute("SELECT id FROM monitor_servers WHERE enabled = 1").fetchall()
         except Exception:
             logger.exception("Failed to read servers for user %s", user_id)
             continue
 
-        scheduler_user = next((item for item in list_users() if item.id == user_id), None)
-        if scheduler_user is None:
-            continue
         for binding in rows:
             try:
                 row = get_server(binding["id"], scheduler_user)
-                latest = _latest_sample(user_id, row["id"])
-                if latest is None or _age_seconds(latest["collected_at"]) >= SAMPLE_SECONDS:
-                    _collect_and_store(user_id, row)
+                _snapshot(user_id, row)
                 _refresh_due_directories(user_id, row)
             except Exception:
-                logger.exception("Failed to collect data for server %s (user %s)", row["id"], user_id)
+                logger.exception("Failed to collect data for server %s (user %s)", binding["id"], user_id)
 
+    with _snapshot_lock:
+        cutoff = time.monotonic() - 2 * SAMPLE_SECONDS
+        for key, (updated_at, _) in list(_snapshots.items()):
+            if updated_at < cutoff:
+                del _snapshots[key]
+
+
+def upgrade_history_databases() -> None:
+    now = datetime.now(timezone.utc)
+    for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
         try:
-            _prune_history(user_id)
-        except Exception:
+            with user_tool_connection_context(user_id, TOOL_ID) as connection:
+                # Background maintenance can retry a busy database on the next tick.
+                connection.execute("PRAGMA busy_timeout = 1000")
+                if migrate_history_schema(connection, now):
+                    logger.info("Migrated monitor history for user %s", user_id)
+                if compact_history_database(connection):
+                    logger.info("Compacted monitor history for user %s", user_id)
+        except (sqlite3.Error, ValueError, RuntimeError):
+            logger.exception("Monitor history upgrade will be retried for user %s", user_id)
+
+
+def prune_history() -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+    for user_id, _db_path in list_user_tool_dbs(TOOL_ID):
+        try:
+            with user_tool_connection_context(user_id, TOOL_ID) as connection:
+                columns = connection.execute("PRAGMA table_info(monitor_samples)").fetchall()
+                if any(column["name"] == "sample_slot" for column in columns):
+                    connection.execute("DELETE FROM monitor_samples WHERE collected_at < ?", (cutoff,))
+        except sqlite3.Error:
             logger.exception("Failed to prune history for user %s", user_id)
-
-    # Clean up stale SSH cache entries
-    _cleanup_ssh_cache()
-
-
-def _cleanup_ssh_cache() -> None:
-    """Remove SSH cache entries older than 2x SAMPLE_SECONDS."""
-    cutoff = time.time() - (SAMPLE_SECONDS * 2)
-    stale = [host for host, (ts, _) in _ssh_result_cache.items() if ts < cutoff]
-    for host in stale:
-        _ssh_result_cache.pop(host, None)
 
 
 # ============================================================
@@ -604,38 +624,24 @@ def decrypt_secret(value: str) -> str:
 # Internal helpers — data collection
 # ============================================================
 
-def _collect_and_store(user_id: str, row: sqlite3.Row) -> sqlite3.Row:
+def _collect_and_store(user_id: str, row: dict[str, Any]) -> dict[str, Any]:
     error = None
     parsed = {"cpuPercent": None, "memoryTotalBytes": None, "memoryUsedBytes": None, "disks": [], "gpus": []}
     try:
-        output = _run_ssh_cached(row, _monitor_command())
-        parsed = parse_monitor_output(output)
+        parsed = parse_monitor_output(_run_ssh(row, _monitor_command()))
     except Exception as exc:  # noqa: BLE001 - each server records its own collection error.
         error = str(exc)
-    sample_id = secrets.token_hex(12)
-    with user_tool_connection_context(user_id, TOOL_ID) as connection:
-        connection.execute(
-            """
-            INSERT INTO monitor_samples (
-                id, server_id, collected_at, cpu_percent, memory_total_bytes, memory_used_bytes,
-                disks_json, gpus_json, error
+    collected_at = datetime.now(timezone.utc)
+    if error is None:
+        with user_tool_connection_context(user_id, TOOL_ID) as connection:
+            store_sample(
+                connection, row["id"], collected_at, parsed["cpuPercent"],
+                parsed["memoryTotalBytes"], parsed["memoryUsedBytes"], parsed["gpus"],
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                sample_id,
-                row["id"],
-                now_iso(),
-                parsed["cpuPercent"],
-                parsed["memoryTotalBytes"],
-                parsed["memoryUsedBytes"],
-                json.dumps(parsed["disks"], ensure_ascii=False),
-                json.dumps(parsed["gpus"], ensure_ascii=False),
-                error,
-            ),
-        )
-        connection.commit()
-        return connection.execute("SELECT * FROM monitor_samples WHERE id = ?", (sample_id,)).fetchone()
+    return {
+        "id": secrets.token_hex(12), "serverId": row["id"],
+        "collectedAt": collected_at.isoformat(), **parsed, "error": error,
+    }
 
 
 def _collect_directory(user_id: str, row: sqlite3.Row, path: str, cache_user_id: str) -> sqlite3.Row:
@@ -677,22 +683,6 @@ def _run_ssh(row: sqlite3.Row, command: str, timeout: int = 20) -> str:
     error = error.strip()
     if error and not output:
         raise ToolboxError("SSH_COMMAND_FAILED", error[:300], status_code=502, tool_id=TOOL_ID)
-    return output
-
-
-def _run_ssh_cached(row: sqlite3.Row, command: str) -> str:
-    """Run SSH with an in-memory cache to avoid redundant calls for shared servers.
-
-    Cache key is the server host (since the same default server may appear in
-    multiple users' databases). Cache TTL is SAMPLE_SECONDS.
-    """
-    cache_key = row["host"]
-    now_ts = time.time()
-    cached = _ssh_result_cache.get(cache_key)
-    if cached and (now_ts - cached[0]) < SAMPLE_SECONDS:
-        return cached[1]
-    output = _run_ssh(row, command)
-    _ssh_result_cache[cache_key] = (now_ts, output)
     return output
 
 
@@ -942,24 +932,6 @@ def _public_server(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _sample_payload(server: sqlite3.Row, sample: sqlite3.Row) -> dict[str, Any]:
-    return {"server": _public_server(server), "sample": _history_sample(sample)}
-
-
-def _history_sample(sample: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": sample["id"],
-        "serverId": sample["server_id"],
-        "collectedAt": sample["collected_at"],
-        "cpuPercent": sample["cpu_percent"],
-        "memoryTotalBytes": sample["memory_total_bytes"],
-        "memoryUsedBytes": sample["memory_used_bytes"],
-        "disks": json.loads(sample["disks_json"]),
-        "gpus": json.loads(sample["gpus_json"]),
-        "error": sample["error"],
-    }
-
-
 def _directory_payload(server: sqlite3.Row, cache: sqlite3.Row) -> dict[str, Any]:
     return {
         "server": _public_server(server),
@@ -1035,13 +1007,6 @@ def _float_or_none(value: str) -> float | None:
 def _fernet() -> Fernet:
     digest = hashlib.sha256(get_settings().session_secret.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
-
-
-def _prune_history(user_id: str) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
-    with user_tool_connection_context(user_id, TOOL_ID) as connection:
-        connection.execute("DELETE FROM monitor_samples WHERE collected_at < ?", (cutoff.isoformat(),))
-        connection.commit()
 
 
 def now_iso() -> str:

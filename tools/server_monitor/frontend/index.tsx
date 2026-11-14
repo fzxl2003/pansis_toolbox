@@ -1,5 +1,5 @@
 import './style.css';
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Activity,
@@ -67,6 +67,7 @@ type Gpu = {
 };
 type Sample = {
   id: string;
+  serverId: string;
   collectedAt: string;
   cpuPercent: number | null;
   memoryTotalBytes: number | null;
@@ -75,6 +76,21 @@ type Sample = {
   gpus: Gpu[];
   error: string | null;
 };
+type TrendValue = { avg: number; max: number } | null;
+type TrendGpu = {
+  index: number;
+  uuid: string | null;
+  utilizationPercent: TrendValue;
+  memoryPercent: TrendValue;
+};
+type TrendBucket = {
+  collectedAt: string;
+  cpuPercent: TrendValue;
+  memoryPercent: TrendValue;
+  gpus: TrendGpu[];
+};
+type History = { samples: TrendBucket[]; bucketSeconds: number };
+
 type DirectoryUsage = {
   path: string;
   totalBytes: number | null;
@@ -114,7 +130,9 @@ export default function ServerMonitorTool() {
   const [servers, setServers] = useState<MonitorServer[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [sample, setSample] = useState<Sample | null>(null);
-  const [history, setHistory] = useState<Sample[]>([]);
+  const [trend, setTrend] = useState<{ serverId: string; data?: History; error?: string } | null>(null);
+  const historyRequest = useRef<AbortController | null>(null);
+  const snapshotRequest = useRef<AbortController | null>(null);
   const [directories, setDirectories] = useState<DirectoryUsage[]>([]);
   const [visibleMounts, setVisibleMounts] = useState<Record<string, string[]>>({});
   const [modulePreferences, setModulePreferences] = useState<Record<string, ModulePreference[]>>({});
@@ -125,13 +143,10 @@ export default function ServerMonitorTool() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // 跟踪当前选中的服务器 ID，用于防御异步竞态：
-  // 切换服务器时，旧服务器的 loadSnapshot/loadHistory/loadDirectories 请求可能仍在飞行中，
-  // 返回后若直接 setState 会短暂显示旧服务器数据（下次轮询才恢复）。
-  // 通过 ref 检查响应的 serverId 是否仍为当前选中的服务器，避免过期响应污染状态。
-  const activeServerIdRef = useRef<string>('');
-
+  const activeServerIdRef = useRef('');
   const selected = servers.find((serverItem) => serverItem.id === selectedId) ?? servers[0];
+  const serverId = selected?.id;
+  const activeTrend = trend?.serverId === serverId ? trend : null;
   const isAdmin = me?.role === 'admin';
   const canEditSelected = Boolean(me && selected && (!selected.ownerUserId || selected.ownerUserId === me.id || isAdmin));
   const visibleDiskKeys = selected ? visibleMounts[selected.id] : undefined;
@@ -167,22 +182,29 @@ export default function ServerMonitorTool() {
   }, [me?.id]);
 
   useEffect(() => {
-    if (!selected) return;
-    // 同步更新 ref：在发起任何请求之前先标记当前服务器，
-    // 这样旧服务器的飞行中请求返回时 ref 已指向新服务器，guard 检查会丢弃过期响应。
-    activeServerIdRef.current = selected.id;
-    setSelectedId(selected.id);
-    void refreshSelected(selected.id);
-    const gpuTimer = window.setInterval(() => void loadSnapshot(selected.id, true), 5000);
-    const historyTimer = window.setInterval(() => {
-      void loadHistory(selected.id);
-      void loadDirectories(selected.id);
-    }, 30000);
+    if (!serverId) return;
+    activeServerIdRef.current = serverId;
+    setSelectedId(serverId);
+    setSample(null);
+    setError(null);
+    setTrend(null);
+    setDirectories([]);
+    setActiveGpuIndex(null);
+    void refreshSelected(serverId);
+    const snapshotTimer = window.setInterval(() => void loadSnapshot(serverId), 5000);
+    const historyTimer = window.setInterval(() => void loadHistory(serverId), 60000);
+    const directoryTimer = window.setInterval(() => void loadDirectories(serverId), 30000);
     return () => {
-      window.clearInterval(gpuTimer);
+      activeServerIdRef.current = '';
+      snapshotRequest.current?.abort();
+      snapshotRequest.current = null;
+      historyRequest.current?.abort();
+      historyRequest.current = null;
+      window.clearInterval(snapshotTimer);
       window.clearInterval(historyTimer);
+      window.clearInterval(directoryTimer);
     };
-  }, [selected?.id]);
+  }, [serverId]);
 
   async function refreshSelected(serverId: string, force = false) {
     await Promise.all([loadSnapshot(serverId, force), loadHistory(serverId), loadDirectories(serverId)]);
@@ -199,24 +221,40 @@ export default function ServerMonitorTool() {
   }
 
   async function loadSnapshot(serverId: string, force = false) {
+    if (activeServerIdRef.current !== serverId || (snapshotRequest.current && !force)) return;
+    snapshotRequest.current?.abort();
+    const controller = new AbortController();
+    snapshotRequest.current = controller;
     try {
-      const payload = await apiGet<{ sample: Sample }>(`/api/tools/server-monitor/servers/${serverId}/snapshot${force ? '?force=true' : ''}`);
-      // 防御异步竞态：若用户已切换到其他服务器，丢弃该过期响应
-      if (activeServerIdRef.current !== serverId) return;
+      const payload = await apiGet<{ sample: Sample }>(
+        `/api/tools/server-monitor/servers/${serverId}/snapshot${force ? '?force=true' : ''}`, controller.signal,
+      );
+      if (controller.signal.aborted) return;
       setSample(payload.sample);
-      setActiveGpuIndex((current) => current ?? payload.sample.gpus[0]?.index ?? null);
+      setActiveGpuIndex((current) => payload.sample.gpus.some((gpu) => gpu.index === current) ? current : payload.sample.gpus[0]?.index ?? null);
     } catch (err) {
-      if (activeServerIdRef.current === serverId) handleError(err);
+      if (!controller.signal.aborted) handleError(err);
+    } finally {
+      if (snapshotRequest.current === controller) snapshotRequest.current = null;
     }
   }
 
   async function loadHistory(serverId: string) {
+    if (activeServerIdRef.current !== serverId || historyRequest.current) return;
+    const controller = new AbortController();
+    historyRequest.current = controller;
     try {
-      const payload = await apiGet<{ samples: Sample[] }>(`/api/tools/server-monitor/servers/${serverId}/history?hours=24`);
-      if (activeServerIdRef.current !== serverId) return;
-      setHistory(payload.samples);
+      const data = await apiGet<History>(
+        `/api/tools/server-monitor/servers/${serverId}/history?hours=24`, controller.signal,
+      );
+      if (!controller.signal.aborted) setTrend({ serverId, data });
     } catch (err) {
-      if (activeServerIdRef.current === serverId) handleError(err);
+      if (!controller.signal.aborted) {
+        const error = err instanceof Error ? err.message : '趋势加载失败';
+        setTrend((current) => ({ serverId, data: current?.serverId === serverId ? current.data : undefined, error }));
+      }
+    } finally {
+      if (historyRequest.current === controller) historyRequest.current = null;
     }
   }
 
@@ -315,7 +353,7 @@ export default function ServerMonitorTool() {
       await apiDelete(`/api/tools/server-monitor/servers/${selected.id}`);
       setSelectedId('');
       setSample(null);
-      setHistory([]);
+      setTrend(null);
       setDirectories([]);
       await loadServers();
     } catch (err) {
@@ -391,33 +429,23 @@ export default function ServerMonitorTool() {
 
       <ServerStrip servers={servers} selectedId={selected?.id ?? ''} onSelect={setSelectedId} onEdit={openEdit} canEdit={canEditSelected} />
 
-      {selected && sample ? (
+      {selected ? (
         <>
-          {sample.error && <div className="error-box">采集失败：{sample.error}</div>}
+          {sample?.serverId === selected.id && sample.error && <div className="error-box">采集失败：{sample.error}</div>}
           {selectedModules.filter((item) => item.visible).map((module) => {
-            if (module.id === 'summary') return <MetricGrid key={module.id} sample={sample} disks={displayedDisks} />;
-            if (module.id === 'trends') {
-              return (
-                <section className="monitor-section" key={module.id}>
-                  <div className="result-header">
-                    <span>24 小时趋势</span>
-                    <span className="muted">{history.length} 个采样点</span>
-                  </div>
-                  <div className="chart-grid">
-                    <LineChart title="CPU %" samples={history} getValue={(item) => item.cpuPercent} />
-                    <LineChart title="内存 %" samples={history} getValue={(item) => percent(item.memoryUsedBytes, item.memoryTotalBytes)} />
-                  </div>
-                </section>
-              );
-            }
-            if (module.id === 'disks') return <DiskPanel key={module.id} displayedDisks={displayedDisks} />;
+            if (module.id === 'trends') return <TrendsPanel key={module.id} data={activeTrend?.data} error={activeTrend?.error} />;
             if (module.id === 'directories') return <DirectoryCards key={module.id} directories={directories} />;
+            if (!sample || sample.serverId !== selected.id) {
+              return module.id === 'summary' ? <div className="empty-state" key={module.id}>实时快照加载中…</div> : null;
+            }
+            if (module.id === 'summary') return <MetricGrid key={module.id} sample={sample} disks={displayedDisks} />;
+            if (module.id === 'disks') return <DiskPanel key={module.id} displayedDisks={displayedDisks} />;
             return (
               <GpuPanel
                 key={module.id}
                 gpus={sample.gpus}
                 activeGpu={activeGpu}
-                history={history}
+                history={activeTrend?.data}
                 layout={gpuLayout}
                 serverUsername={selected.sshUsername}
                 canKill={canEditSelected}
@@ -568,23 +596,48 @@ function MetricCard({ icon, label, value, detail }: { icon: ReactNode; label: st
   );
 }
 
-function LineChart({ title, samples, getValue }: { title: string; samples: Sample[]; getValue: (sample: Sample) => number | null }) {
-  const chartPoints = samples
-    .filter((s) => getValue(s) !== null)
-    .map((s) => ({
-      x: s.collectedAt,
-      y: getValue(s) as number,
-    }));
-  const lastVal = chartPoints.at(-1)?.y ?? null;
+const percentDomain = [0, 100] as const;
+
+const TrendsPanel = memo(function TrendsPanel({ data, error }: { data?: History; error?: string }) {
+  return (
+    <section className="monitor-section" aria-label="24 小时趋势">
+      <div className="result-header">
+        <span>24 小时趋势</span>
+        {data && <span className="muted">每 {data.bucketSeconds / 60} 分钟汇总</span>}
+      </div>
+      {error && <div className="error-box">{error}</div>}
+      {data ? (
+        <div className="chart-grid">
+          <LineChart title="CPU %" samples={data.samples} getValue={(bucket) => bucket.cpuPercent} />
+          <LineChart title="内存 %" samples={data.samples} getValue={(bucket) => bucket.memoryPercent} />
+        </div>
+      ) : !error && <div className="empty-state">趋势加载中…</div>}
+    </section>
+  );
+});
+
+function LineChart({ title, samples, getValue }: { title: string; samples: TrendBucket[]; getValue: (sample: TrendBucket) => TrendValue }) {
+  const points = samples.map((bucket) => {
+    const value = getValue(bucket);
+    return {
+      x: bucket.collectedAt,
+      y: value?.avg ?? null,
+      tooltipDetail: value ? `峰值 ${value.max.toFixed(1)}%` : undefined,
+    };
+  });
+  const lastValue = points.at(-1)?.y ?? null;
   return (
     <ScatterChart
       title={title}
-      subLabel={lastVal !== null ? formatPercent(lastVal) : '--'}
-      points={chartPoints}
-      yLabel="%"
+      subLabel={lastValue === null ? '--' : formatPercent(lastValue)}
+      points={points}
       timeAxis
-      formatY={(v) => `${Math.round(v)}%`}
-      formatTooltipY={(v) => `${v.toFixed(1)}%`}
+      timePresets={[]}
+      showDots={false}
+      yDomain={percentDomain}
+      yGridLines={5}
+      formatY={(value) => `${value}%`}
+      formatTooltipY={(value) => `均值 ${value.toFixed(1)}%`}
     />
   );
 }
@@ -656,7 +709,7 @@ function DirectoryCards({ directories }: { directories: DirectoryUsage[] }) {
 function GpuPanel(props: {
   gpus: Gpu[];
   activeGpu: Gpu | null;
-  history: Sample[];
+  history?: History;
   layout: GpuLayout;
   serverUsername: string;
   canKill: boolean;
@@ -732,21 +785,28 @@ function GpuOverview(props: { gpus: Gpu[]; canKill: boolean; serverUsername: str
   );
 }
 
-function GpuDetail(props: { activeGpu: Gpu; history: Sample[]; canKill: boolean; serverUsername: string; onKill: (pid: number) => void }) {
+function GpuDetail(props: { activeGpu: Gpu; history?: History; canKill: boolean; serverUsername: string; onKill: (pid: number) => void }) {
   return (
     <div className="gpu-detail">
-      <div className="chart-grid">
-        <LineChart title={`GPU #${props.activeGpu.index} 利用率`} samples={props.history} getValue={(item) => item.gpus.find((gpu) => gpu.index === props.activeGpu.index)?.utilizationPercent ?? null} />
-        <LineChart title={`GPU #${props.activeGpu.index} 显存`} samples={props.history} getValue={(item) => {
-          const gpu = item.gpus.find((entry) => entry.index === props.activeGpu.index);
-          return gpu ? percent(gpu.memoryUsedMiB, gpu.memoryTotalMiB) : null;
-        }} />
-      </div>
+      {props.history && <GpuTrends history={props.history} index={props.activeGpu.index} uuid={props.activeGpu.uuid} />}
       <div className="result-header"><span>当前挂载进程</span><span className="muted">{props.activeGpu.processes.length} 个</span></div>
       <ProcessTable processes={props.activeGpu.processes} canKill={props.canKill} serverUsername={props.serverUsername} onKill={props.onKill} />
     </div>
   );
 }
+
+const GpuTrends = memo(function GpuTrends({ history, index, uuid }: { history: History; index: number; uuid?: string }) {
+  const findGpu = (bucket: TrendBucket) => {
+    const exact = uuid ? bucket.gpus.find((gpu) => gpu.uuid === uuid) : undefined;
+    return exact ?? bucket.gpus.find((gpu) => gpu.index === index && (!uuid || !gpu.uuid));
+  };
+  return (
+    <div className="chart-grid">
+      <LineChart title={`GPU #${index} 利用率`} samples={history.samples} getValue={(item) => findGpu(item)?.utilizationPercent ?? null} />
+      <LineChart title={`GPU #${index} 显存`} samples={history.samples} getValue={(item) => findGpu(item)?.memoryPercent ?? null} />
+    </div>
+  );
+});
 
 type GpuLayout = 'stacked' | 'split' | 'overview';
 type ProcessWithGpu = GpuProcess & { gpuIndex?: number };

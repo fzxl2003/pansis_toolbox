@@ -8,7 +8,9 @@ export type ChartPoint = {
   /** X value: number or ISO timestamp string */
   x: number | string;
   /** Y value */
-  y: number;
+  y: number | null;
+  /** Optional extra value shown with the hovered point */
+  tooltipDetail?: string;
   /** Optional label shown in tooltip */
   label?: string;
 };
@@ -59,6 +61,8 @@ export type ScatterChartProps = {
   showDots?: boolean;
   /** Approximate number of Y grid lines (default: 4) */
   yGridLines?: number;
+  /** Optional fixed Y axis bounds */
+  yDomain?: readonly [number, number];
   /** Chart height in CSS pixels (default: 160) */
   height?: number;
 };
@@ -158,6 +162,7 @@ export function ScatterChart({
   showLine = true,
   showDots = true,
   yGridLines = 4,
+  yDomain,
   height = CHART_H,
 }: ScatterChartProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -201,14 +206,16 @@ export function ScatterChart({
   }, [points, timeAxis, timeRange, maxXTime]);
 
   const filteredX = useMemo(() => filteredPoints.map((p) => toNumericX(p.x)), [filteredPoints]);
-  const filteredY = useMemo(() => filteredPoints.map((p) => p.y), [filteredPoints]);
+  const filteredY = useMemo(() => filteredPoints.flatMap((p) => p.y === null ? [] : [p.y]), [filteredPoints]);
 
   const xMin = useMemo(() => (filteredX.length ? Math.min(...filteredX) : 0), [filteredX]);
   const xMax = useMemo(() => (filteredX.length ? Math.max(...filteredX) : 1), [filteredX]);
   const yMin = useMemo(() => (filteredY.length ? Math.min(...filteredY) : 0), [filteredY]);
   const yMax = useMemo(() => (filteredY.length ? Math.max(...filteredY) : 1), [filteredY]);
 
-  const yScale = useMemo(() => niceScale(yMin, yMax, yGridLines), [yMin, yMax, yGridLines]);
+  const yScale = useMemo(() => yDomain
+    ? { min: yDomain[0], max: yDomain[1], step: (yDomain[1] - yDomain[0]) / (yGridLines - 1) }
+    : niceScale(yMin, yMax, yGridLines), [yDomain, yMin, yMax, yGridLines]);
   const xRangeMs = xMax - xMin;
 
   // ── Coordinate transforms (pixels) ───────────────────────
@@ -264,9 +271,11 @@ export function ScatterChart({
     if (filteredPoints.length < 2) return '';
     return filteredPoints
       .map((p, i) => {
+        if (p.y === null) return '';
         const sx = toSvgX(toNumericX(p.x));
         const sy = toSvgY(p.y);
-        return `${i === 0 ? 'M' : 'L'} ${sx.toFixed(1)} ${sy.toFixed(1)}`;
+        const command = i === 0 || filteredPoints[i - 1].y === null ? 'M' : 'L';
+        return `${command} ${sx.toFixed(1)} ${sy.toFixed(1)}`;
       })
       .join(' ');
   }, [filteredPoints, toSvgX, toSvgY]);
@@ -300,6 +309,10 @@ export function ScatterChart({
       });
 
       const nearestPoint = filteredPoints[nearestIdx];
+      if (nearestPoint.y === null) {
+        setTooltip(null);
+        return;
+      }
       const sx = toSvgX(toNumericX(nearestPoint.x));
       const sy = toSvgY(nearestPoint.y);
       setTooltip({ x: sx, y: sy, point: nearestPoint });
@@ -309,12 +322,13 @@ export function ScatterChart({
 
   const handleMouseLeave = useCallback(() => setTooltip(null), []);
 
+  const activeTooltip = tooltip && filteredPoints.includes(tooltip.point) ? tooltip : null;
   // ── Tooltip positioning (% of wrapper div) ────────────────
-  const tooltipSide = tooltip && tooltip.x > svgW / 2 ? 'left' : 'right';
-  const tooltipXPct = tooltip ? (tooltip.x / svgW) * 100 : 0;
-  const tooltipYPct = tooltip ? (tooltip.y / svgH) * 100 : 0;
+  const tooltipSide = activeTooltip && activeTooltip.x > svgW / 2 ? 'left' : 'right';
+  const tooltipXPct = activeTooltip ? (activeTooltip.x / svgW) * 100 : 0;
+  const tooltipYPct = activeTooltip ? (activeTooltip.y / svgH) * 100 : 0;
 
-  const isEmpty = filteredPoints.length === 0;
+  const isEmpty = filteredY.length === 0;
 
   return (
     <div className={`scatter-chart${className ? ` ${className}` : ''}`}>
@@ -464,10 +478,15 @@ export function ScatterChart({
               )}
 
               {/* Dots */}
-              {showDots && filteredPoints.map((p, i) => {
+              {filteredPoints.map((p, i) => {
+                if (p.y === null) return null;
+                const isHovered = activeTooltip?.point === p;
+                const isolated = showLine
+                  && (i === 0 || filteredPoints[i - 1].y === null)
+                  && (i === filteredPoints.length - 1 || filteredPoints[i + 1].y === null);
+                if (!showDots && !isHovered && !isolated) return null;
                 const sx = toSvgX(toNumericX(p.x));
                 const sy = toSvgY(p.y);
-                const isHovered = tooltip !== null && tooltip.point === p;
                 return (
                   <circle
                     key={i}
@@ -481,11 +500,11 @@ export function ScatterChart({
               })}
 
               {/* Crosshair */}
-              {tooltip && (
+              {activeTooltip && (
                 <line
-                  x1={tooltip.x}
+                  x1={activeTooltip.x}
                   y1={PAD_TOP}
-                  x2={tooltip.x}
+                  x2={activeTooltip.x}
                   y2={PAD_TOP + plotH}
                   stroke="var(--accent, #1a73e8)"
                   strokeWidth={CROSSHAIR_STROKE}
@@ -497,7 +516,7 @@ export function ScatterChart({
           )}
 
           {/* Floating tooltip */}
-          {tooltip && (
+          {activeTooltip && (
             <div
               className={`scatter-tooltip ${tooltipSide}`}
               style={{
@@ -506,12 +525,13 @@ export function ScatterChart({
                 top: `${Math.min(tooltipYPct, 70)}%`,
               }}
             >
-              <span className="tooltip-y">{fmtTooltipY(tooltip.point.y)}</span>
+              <span className="tooltip-y">{activeTooltip.point.y !== null && fmtTooltipY(activeTooltip.point.y)}</span>
+              {activeTooltip.point.tooltipDetail && <span className="tooltip-x">{activeTooltip.point.tooltipDetail}</span>}
               {timeAxis ? (
-                <span className="tooltip-x">{formatFullTimestamp(toNumericX(tooltip.point.x))}</span>
+                <span className="tooltip-x">{formatFullTimestamp(toNumericX(activeTooltip.point.x))}</span>
               ) : (
                 <span className="tooltip-x">
-                  {tooltip.point.label ?? (xLabel ? `${xLabel}: ${toNumericX(tooltip.point.x)}` : String(toNumericX(tooltip.point.x)))}
+                  {activeTooltip.point.label ?? (xLabel ? `${xLabel}: ${toNumericX(activeTooltip.point.x)}` : String(toNumericX(activeTooltip.point.x)))}
                 </span>
               )}
             </div>

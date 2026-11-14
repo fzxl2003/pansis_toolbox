@@ -12,8 +12,8 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  return requestJson<T>(path);
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return requestJson<T>(path, { signal });
 }
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {

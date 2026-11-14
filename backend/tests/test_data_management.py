@@ -253,3 +253,64 @@ def test_platform_usage_and_cleanup_work_without_user_database(
 
     global_result = data_management.delete_data(tool_id, category="public")
     assert global_result["deleted"] == {"public": {"public_items": 1}}
+
+
+def test_database_space_reclaim_preserves_rows_and_respects_account_scope(monkeypatch, tmp_path):
+    from contextlib import closing
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import routes_settings
+    from backend.app.core.errors import ToolboxError, toolbox_error_handler
+
+    paths = {owner: tmp_path / f"{owner}.db" for owner in ("self", "other", "shared")}
+    for path in paths.values():
+        with closing(sqlite3.connect(path)) as db, db:
+            db.executescript("""
+                CREATE TABLE records (id INTEGER PRIMARY KEY, payload BLOB);
+                INSERT INTO records VALUES (1, 'keep'), (2, zeroblob(524288));
+                DELETE FROM records WHERE id = 2;
+            """)
+    shared_path = paths["shared"]
+    monkeypatch.setattr(data_management, "get_settings", lambda: SimpleNamespace(platform_db_path=shared_path))
+    monkeypatch.setattr(data_management, "list_user_tool_dbs", lambda _: [
+        (owner, paths[owner]) for owner in ("self", "other")
+    ])
+    monkeypatch.setattr(data_management, "get_tool_categories", lambda _: [
+        DataCategory("records", ["records"], None, "Records", storage="user_tool_db"),
+        DataCategory("shared", ["records"], None, "Shared", storage="platform_db"),
+    ])
+    monkeypatch.setattr(routes_settings.tool_registry, "get", lambda _: SimpleNamespace(tool_id="tool"))
+    user = SimpleNamespace(id="self", role="user")
+    monkeypatch.setattr(routes_settings, "require_user", lambda _: user)
+
+    app = FastAPI()
+    app.add_exception_handler(ToolboxError, toolbox_error_handler)
+    app.include_router(routes_settings.router)
+    client = TestClient(app)
+    endpoint = "/settings/database-space"
+    before = {key: path.stat().st_size for key, path in paths.items()}
+
+    preview = client.post(endpoint, json={"toolId": "tool", "preview": True})
+    assert preview.status_code == 200
+    assert preview.json()["estimatedBytes"] >= 524288
+    assert paths["self"].stat().st_size == before["self"]
+    assert client.post(endpoint, json={"toolId": "tool", "userId": "other"}).status_code == 403
+    assert client.post(endpoint, json={"toolId": "tool", "allUsers": True}).status_code == 403
+
+    result = client.post(endpoint, json={"toolId": "tool"})
+    assert result.status_code == 200
+    assert result.json()["compacted"] == 1
+    assert result.json()["reclaimedBytes"] == before["self"] - paths["self"].stat().st_size > 0
+    assert paths["other"].stat().st_size == before["other"]
+    assert shared_path.stat().st_size == before["shared"]
+
+    user.role = "admin"
+    result = client.post(endpoint, json={"toolId": "tool", "allUsers": True})
+    assert result.status_code == 200
+    assert result.json()["compacted"] == 2
+    for owner, path in paths.items():
+        assert path.stat().st_size < before[owner]
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute("SELECT * FROM records").fetchall() == [(1, "keep")]

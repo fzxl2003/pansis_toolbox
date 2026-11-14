@@ -46,6 +46,7 @@ import {
   fetchDataCount,
   fetchDataUsage,
   deleteData,
+  reclaimDatabaseSpace,
   type DataCategoryUsage,
   type DataDeletionResult,
   type ToolDataCategories,
@@ -312,7 +313,7 @@ function PersonalTab({
         onSuccess={onSuccess}
         storageMap={storageMap}
         totalBytes={myStorage?.totalBytes ?? 0}
-        onAfterDelete={() => void loadMyStorage()}
+        onAfterDelete={loadMyStorage}
       />
     </>
   );
@@ -682,7 +683,7 @@ function ToolDataTab({
         storageMap={storageMap}
         totalBytes={usage?.grandTotal ?? 0}
         users={users}
-        onAfterDelete={() => void loadUsage()}
+        onAfterDelete={loadUsage}
       />
     </>
   );
@@ -1210,6 +1211,7 @@ function DataCleanupPanel({
   const [usage, setUsage] = useState<DataCategoryUsage[]>([]);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [reclaiming, setReclaiming] = useState(false);
   const [catState, setCatState] = useState<Record<string, CategoryState>>({});
   const [globalRange, setGlobalRange] = useState<{ start: string; end: string }>({ start: '', end: '' });
   const [donutFocusTool, setDonutFocusTool] = useState<string | null>(null);
@@ -1477,6 +1479,39 @@ function DataCleanupPanel({
     }
   }
 
+  async function handleReclaim() {
+    setReclaiming(true);
+    const allUsers = isAdminMode && targetUserId === null;
+    const scope = {
+      toolId: selectedTool === ALL_TOOLS ? undefined : selectedTool,
+      userId: targetUserId,
+      allUsers,
+    };
+    try {
+      const preview = await reclaimDatabaseSpace({ ...scope, preview: true });
+      if (preview.estimatedBytes === 0) {
+        if (preview.failed) onError(null, '部分数据库暂时无法检查，请稍后再试');
+        else onSuccess('所选范围没有可回收的数据库空间');
+        return;
+      }
+      const toolName = tools.find((tool) => tool.toolId === selectedTool)?.toolName ?? '全部工具';
+      const owner = allUsers ? '全部用户及适用的共享库'
+        : users?.find((user) => user.userId === targetUserId)?.displayName ?? '我的数据';
+      if (!window.confirm(`回收「${toolName}」中「${owner}」的数据库空间？预计可回收 ${formatBytes(preview.estimatedBytes)}。`)) return;
+      const result = await reclaimDatabaseSpace(scope);
+      await onAfterDelete?.();
+      if (result.failed) {
+        onError(null, `已回收 ${formatBytes(result.reclaimedBytes)}，${result.failed} 个数据库暂未完成，请稍后重试`);
+      } else {
+        onSuccess(`已回收 ${formatBytes(result.reclaimedBytes)} 数据库空间`);
+      }
+    } catch (err) {
+      onError(err, '回收数据库空间失败');
+    } finally {
+      setReclaiming(false);
+    }
+  }
+
   const selectedToolData = tools.find((t) => t.toolId === selectedTool);
   const selectedCount = selectedToolData
     ? selectedToolData.categories.filter((c) => catState[c.name]?.selected).length
@@ -1720,7 +1755,15 @@ function DataCleanupPanel({
             <button
               className="chip"
               type="button"
-              disabled={deleting || tools.length === 0}
+              disabled={deleting || reclaiming || loading || tools.length === 0}
+              onClick={() => void handleReclaim()}
+            >
+              <Database size={14} />{reclaiming ? '处理中…' : '回收数据库空间'}
+            </button>
+            <button
+              className="chip"
+              type="button"
+              disabled={deleting || reclaiming || tools.length === 0}
               onClick={() => void handleDelete()}
               style={{ color: 'var(--danger)' }}
             >

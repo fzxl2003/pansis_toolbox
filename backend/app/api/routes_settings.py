@@ -16,6 +16,7 @@ from backend.app.services.data_management import (
     delete_data,
     get_data_usage_by_category,
     get_tool_categories,
+    reclaim_database_space,
 )
 from backend.app.services.email_service import get_email_config, save_email_config, send_email
 from backend.app.services import ssh_server_service
@@ -280,6 +281,31 @@ def data_count_route(request: Request, payload: DataCountPayload) -> dict:
             after_date=after_date,
         )
     return {"toolId": payload.toolId, "counts": counts}
+
+
+class DatabaseReclaimPayload(BaseModel):
+    toolId: str | None = None
+    userId: str | None = None
+    allUsers: bool = False
+    preview: bool = False
+
+
+@router.post("/settings/database-space")
+def database_space_route(request: Request, payload: DatabaseReclaimPayload) -> dict:
+    user = require_user(request)
+    if user.role != "admin" and (payload.userId is not None or payload.allUsers):
+        raise ToolboxError("FORBIDDEN", "只能回收自己的数据库空间", status_code=403)
+    if payload.userId is not None and payload.allUsers:
+        raise ToolboxError("INVALID_SCOPE", "请选择单个用户或全部用户", status_code=422)
+
+    if payload.toolId is None:
+        tool_ids = [tool.tool_id for tool in tool_registry.all()]
+    else:
+        if tool_registry.get(payload.toolId) is None:
+            raise ToolboxError("TOOL_NOT_FOUND", "工具不存在", status_code=404, tool_id=payload.toolId)
+        tool_ids = [payload.toolId]
+    target_user_id = None if payload.allUsers else (payload.userId or user.id)
+    return reclaim_database_space(tool_ids, target_user_id, preview=payload.preview)
 
 
 @router.delete("/settings/data")

@@ -15,13 +15,17 @@ The framework provides unified APIs for:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Iterator
 
 from backend.app.core.config import get_settings
+from backend.app.core.errors import ToolboxError
 from backend.app.db.database import (
     get_connection,
     get_user_tool_db_path,
@@ -566,6 +570,61 @@ def _count_platform_data(
     finally:
         conn.close()
     return total
+
+
+_space_reclaim_lock = Lock()
+logger = logging.getLogger(__name__)
+
+
+def reclaim_database_space(
+    tool_ids: list[str], user_id: str | None, *, preview: bool,
+) -> dict[str, int]:
+    """Inspect or compact existing databases within the caller's authorized scope."""
+    if not preview and not _space_reclaim_lock.acquire(blocking=False):
+        raise ToolboxError("RECLAIM_IN_PROGRESS", "已有数据库空间回收任务在运行，请稍后再试", status_code=409)
+    try:
+        paths: set[Path] = set()
+        for tool_id in tool_ids:
+            categories = get_tool_categories(tool_id)
+            if any(category.storage == "user_tool_db" for category in categories):
+                paths.update(
+                    path for owner_id, path in list_user_tool_dbs(tool_id)
+                    if user_id is None or owner_id == user_id
+                )
+            if user_id is None and any(category.storage == "platform_db" for category in categories):
+                paths.add(get_settings().platform_db_path)
+
+        result = {"estimatedBytes": 0, "reclaimedBytes": 0, "compacted": 0, "failed": 0}
+        for path in sorted(paths):
+            try:
+                with closing(sqlite3.connect(path.resolve().as_uri() + ("?mode=ro" if preview else "?mode=rw"), uri=True, timeout=1)) as db:
+                    free_pages = db.execute("PRAGMA freelist_count").fetchone()[0]
+                    page_size = db.execute("PRAGMA page_size").fetchone()[0]
+                    result["estimatedBytes"] += free_pages * page_size
+                    if preview or not free_pages:
+                        continue
+                    before = _database_file_bytes(path)
+                    db.execute("VACUUM")
+                    if db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+                        db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    result["compacted"] += 1
+                    result["reclaimedBytes"] += max(0, before - _database_file_bytes(path))
+            except (OSError, sqlite3.Error):
+                result["failed"] += 1
+                logger.exception("Could not reclaim database space for %s", path)
+        return result
+    finally:
+        if not preview:
+            _space_reclaim_lock.release()
+
+
+def _database_file_bytes(path: Path) -> int:
+    wal = path.with_name(path.name + "-wal")
+    try:
+        wal_bytes = wal.stat().st_size
+    except FileNotFoundError:
+        wal_bytes = 0
+    return path.stat().st_size + wal_bytes
 
 
 # ============================================================

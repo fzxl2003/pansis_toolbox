@@ -206,3 +206,15 @@ export function fetchDataCount(payload: {
 }) {
   return apiPost<DataCountResult>('/api/settings/data-count', payload);
 }
+
+
+export function reclaimDatabaseSpace(payload: {
+  toolId?: string;
+  userId?: string | null;
+  allUsers: boolean;
+  preview?: boolean;
+}) {
+  return apiPost<{ estimatedBytes: number; reclaimedBytes: number; compacted: number; failed: number }>(
+    '/api/settings/database-space', payload,
+  );
+}

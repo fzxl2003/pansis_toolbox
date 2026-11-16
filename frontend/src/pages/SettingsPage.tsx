@@ -882,8 +882,8 @@ function EmailTab({
         </span>
       </div>
       {emailConfigLoaded && (
-        <form className="monitor-form settings-email-form" onSubmit={(e) => void handleSaveEmailConfig(e)}>
-          <div className="responsive-grid settings-email-host-port">
+        <form className="settings-email-form" onSubmit={(e) => void handleSaveEmailConfig(e)}>
+          <div className="responsive-grid two">
             <SettingField label="SMTP 服务器地址" required>
               <input
                 className="text-input"

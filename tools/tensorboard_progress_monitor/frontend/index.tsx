@@ -328,7 +328,7 @@ export default function TensorBoardProgressMonitor() {
   }
   if (!me)
     return (
-      <div className="tool-page tbd-tool">
+      <div className="tool-page tpm-tool">
         <LoginPanel
           onSuccess={() => void fetchMe().then((item) => setMe(item.user))}
         />
@@ -336,7 +336,7 @@ export default function TensorBoardProgressMonitor() {
     );
   const tabTasks = tasks.filter((task) => task.showInTabs);
   return (
-    <div className="tool-page tbd-tool tpm-tool">
+    <div className="tool-page tpm-tool">
       <header className="tool-header">
         <div>
           <h1 className="tool-title">TensorBoard 实验进度监控</h1>

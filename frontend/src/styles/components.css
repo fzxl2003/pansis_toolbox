@@ -101,6 +101,7 @@
 .search-box input {
   width: 100%;
   border: 0;
+  background: transparent;
   outline: 0;
 }
 
@@ -381,16 +382,18 @@
   width: 100%;
   min-height: 300px;
   resize: vertical;
-  border: 1px solid #d9e1ea;
+  border: 1px solid var(--control-border);
+  background: var(--surface-solid);
   border-radius: 8px;
   padding: 12px;
   outline: 0;
 }
 
 .text-area:focus,
+.text-input:focus,
 .select:focus {
-  border-color: #0f766e;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+  border-color: var(--focus-ring);
+  box-shadow: var(--focus-shadow);
 }
 
 .text-area.result {
@@ -399,16 +402,17 @@
 
 .select {
   min-height: 38px;
-  border: 1px solid #d9e1ea;
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   padding: 0 10px;
-  background: #ffffff;
+  background: var(--surface-solid);
 }
 
 .text-input {
   width: 100%;
   min-height: 40px;
-  border: 1px solid #d9e1ea;
+  border: 1px solid var(--control-border);
+  background: var(--surface-solid);
   border-radius: 8px;
   padding: 0 12px;
   outline: 0;
@@ -554,7 +558,7 @@
   z-index: 30;
   display: grid;
   place-items: center;
-  background: rgba(15, 23, 42, 0.42);
+  background: var(--scrim);
   padding: 24px;
 }
 
@@ -564,9 +568,10 @@
   width: min(760px, 100%);
   max-height: min(760px, 92dvh);
   overflow: auto;
-  border: 1px solid #dce3ec;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--glass-dialog);
+  box-shadow: var(--glass-dialog-shadow);
   padding: 18px;
 }
 
@@ -1060,9 +1065,10 @@
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(14px);
-  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.07);
+  background: var(--glass-chrome);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  box-shadow: var(--glass-shadow);
 }
 
 .settings-tab {
@@ -1083,13 +1089,13 @@
 
 .settings-tab:hover {
   color: var(--text);
-  background: rgba(66, 133, 244, 0.06);
+  background: var(--surface-soft);
 }
 
 .settings-tab.active {
-  color: #174ea6;
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px rgba(66, 133, 244, 0.18);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  box-shadow: var(--glass-edge);
 }
 
 .settings-tab-content {
@@ -1097,11 +1103,7 @@
   gap: 22px;
 }
 
-/* ============================================================
-   Settings — management surfaces
-   Mirrors the focused, compact management UI used by the TensorBoard
-   progress monitor while keeping the platform's blue accent.
-   ============================================================ */
+/* ── Settings management surfaces ── */
 
 .settings-page {
   max-width: 1180px;
@@ -1111,20 +1113,19 @@
 
 .settings-page .page-header {
   padding: 22px 24px;
-  border: 1px solid #dbe3ee;
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background:
-    radial-gradient(circle at top right, rgba(79, 70, 229, .14), transparent 36%),
-    linear-gradient(135deg, #fff 0%, #f8fbff 100%);
+  background: var(--glass-chrome);
+  box-shadow: var(--glass-raised-shadow);
 }
 
 .settings-page .page-header .eyebrow {
-  color: #4f46e5;
+  color: var(--accent);
   letter-spacing: .08em;
 }
 
 .settings-page .page-header h1 {
-  color: #172554;
+  color: var(--text);
   font-size: 28px;
 }
 
@@ -1133,9 +1134,7 @@
   flex-wrap: nowrap;
   overflow-x: auto;
   padding: 4px;
-  border: 1px solid #dbe3ee;
   border-radius: 10px;
-  background: #f8fafc;
   scrollbar-width: thin;
 }
 
@@ -1156,14 +1155,14 @@
 }
 
 .settings-page .settings-tab:hover {
-  color: #1d4ed8;
-  background: #eff6ff;
+  color: var(--accent-strong);
+  background: var(--surface-soft);
 }
 
 .settings-page .settings-tab.active {
-  color: #3730a3;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, .13);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  box-shadow: var(--glass-edge), inset 0 0 0 1px var(--accent-border);
   font-weight: 650;
 }
 
@@ -1175,9 +1174,7 @@
   display: grid;
   gap: 16px;
   padding: 20px;
-  border-color: #dbe3ee;
   border-radius: 12px;
-  box-shadow: 0 2px 5px rgba(15, 23, 42, .035);
 }
 
 .settings-page .result-header {
@@ -1214,22 +1211,26 @@
   font-size: 12px;
 }
 
-.settings-page .monitor-form.settings-email-form {
-  max-width: none;
-  gap: 14px;
+.settings-email-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  max-width: 840px;
 }
 
-.settings-page .settings-email-host-port {
-  grid-template-columns: minmax(0, 1fr) minmax(150px, 180px);
-  gap: 12px;
+.settings-email-form .settings-email-port {
+  max-width: 160px;
 }
 
-.settings-page .settings-email-port .text-input { width: 100%; }
-
-.settings-page .settings-email-actions {
-  margin-top: 2px;
+.settings-email-actions {
   padding-top: 14px;
   border-top: 1px solid #e7edf5;
+}
+
+.settings-page .settings-email-actions > button {
+  min-height: 38px;
+  padding-inline: 14px;
+  font-size: 13px;
 }
 
 .settings-page .monitor-form {
@@ -1257,29 +1258,18 @@
 
 .settings-page .text-input,
 .settings-page textarea.text-input {
-  border-color: #cbd5e1;
   border-radius: 7px;
-  background: #fff;
-  box-shadow: inset 0 1px 1px rgba(15, 23, 42, .02);
 }
 
 .settings-page .text-input:focus,
 .settings-page textarea.text-input:focus {
-  border-color: #6366f1;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, .13);
+  border-color: var(--focus-ring);
+  box-shadow: var(--focus-shadow);
 }
 
 .settings-page .primary-button {
   min-height: 38px;
   border-radius: 7px;
-  background: #4f46e5;
-  border-color: #4f46e5;
-  box-shadow: 0 4px 10px rgba(79, 70, 229, .18);
-}
-
-.settings-page .primary-button:hover:not(:disabled) {
-  background: #4338ca;
-  border-color: #4338ca;
 }
 
 .settings-page .chip {
@@ -1287,15 +1277,13 @@
   padding: 0 10px;
   border-radius: 7px;
   color: #475569;
-  background: #fff;
-  border-color: #d5deea;
   font-size: 12px;
 }
 
 .settings-page .chip:hover:not(:disabled) {
-  color: #1d4ed8;
-  border-color: #93c5fd;
-  background: #f8fbff;
+  color: var(--accent-strong);
+  border-color: var(--accent-border);
+  background: var(--glass-selected);
 }
 
 .settings-page .compact-list {
@@ -1303,10 +1291,10 @@
 }
 
 .settings-proxy-form { display: grid; gap: 18px; }
-.settings-proxy-domains { display: grid; gap: 8px; padding: 14px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
+.settings-proxy-domains { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }
 .settings-proxy-domains h3 { margin: 0 0 2px; color: #334155; font-size: 14px; }
 .settings-proxy-domain { display: flex; align-items: center; gap: 9px; min-height: 34px; color: #334155; font-size: 13px; cursor: pointer; }
-.settings-proxy-domain input { accent-color: #4f46e5; }.settings-proxy-domain span { display: grid; gap: 2px; }.settings-proxy-domain small { color: #64748b; font-size: 12px; }.settings-proxy-domain .chip { margin-left: auto; }
+.settings-proxy-domain input { accent-color: var(--accent); }.settings-proxy-domain span { display: grid; gap: 2px; }.settings-proxy-domain small { color: var(--muted); font-size: 12px; }.settings-proxy-domain .chip { margin-left: auto; }
 .settings-proxy-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .settings-key-test-modal-form { display: grid; gap: 14px; padding: 18px 20px 20px; }
 
@@ -1314,16 +1302,16 @@
 .settings-page .storage-row {
   min-height: 58px;
   padding: 11px 13px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--border);
   border-radius: 9px;
-  background: #fff;
+  background: var(--surface);
   transition: border-color .16s ease, box-shadow .16s ease;
 }
 
 .settings-page .user-row:hover,
 .settings-page .storage-row:hover {
-  border-color: #bfdbfe;
-  box-shadow: 0 2px 7px rgba(30, 64, 175, .06);
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-sm);
 }
 
 .settings-page .user-row strong {
@@ -1352,20 +1340,20 @@
 .settings-page .storage-summary-item {
   min-width: 150px;
   padding: 13px 15px;
-  border-color: #dbe3ee;
+  border-color: var(--border);
   border-radius: 9px;
-  background: #f8fafc;
+  background: var(--surface-soft);
 }
 
-.settings-page .storage-summary-item strong { color: #312e81; font-size: 22px; }
+.settings-page .storage-summary-item strong { color: var(--accent-strong); font-size: 22px; }
 
 .settings-page .badge { border-radius: 999px; font-size: 11px; line-height: 1; }
 
 .settings-page .date-range-popover {
-  border: 1px solid #dbe3ee;
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, .16);
+  background: var(--glass-card);
+  box-shadow: var(--glass-raised-shadow);
 }
 
 .settings-page .date-range-field span { color: #64748b; font-size: 11px; font-weight: 600; }
@@ -1382,10 +1370,7 @@
   max-height: min(800px, calc(100dvh - 32px));
   overflow: auto;
   padding: 0;
-  border: 1px solid #dbe3ee;
   border-radius: 13px;
-  background: var(--surface-solid);
-  box-shadow: 0 24px 70px rgba(15, 23, 42, .25);
 }
 
 .settings-modal-head {
@@ -1395,11 +1380,11 @@
   gap: 16px;
   padding: 18px 20px 15px;
   border-bottom: 1px solid #e7edf5;
-  background: linear-gradient(135deg, #f8fbff, #fff);
+  background: var(--glass-card);
 }
 
-.settings-modal-head .eyebrow { margin-bottom: 4px; color: #4f46e5; letter-spacing: .08em; }
-.settings-modal-head h2 { margin: 0; color: #172554; font-size: 19px; }
+.settings-modal-head .eyebrow { margin-bottom: 4px; color: var(--accent); letter-spacing: .08em; }
+.settings-modal-head h2 { margin: 0; color: var(--text); font-size: 19px; }
 .settings-modal-head p { margin: 5px 0 0; color: #64748b; font-size: 12px; }
 .settings-page .settings-modal-close {
   flex: 0 0 34px;
@@ -1468,7 +1453,10 @@
   .settings-page .panel { padding: 15px; }
   .settings-page .monitor-form.user-form { grid-template-columns: 1fr; }
   .settings-page .settings-tab { padding: 0 10px; }
-  .settings-page .settings-email-host-port { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  .settings-email-form .settings-email-port { max-width: none; }
 }
 
 /* ── Storage Summary ── */

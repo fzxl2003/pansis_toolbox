@@ -1,33 +1,91 @@
 /* ============================================================
-   Unified Shell Theme
-   Defines design tokens (CSS custom properties) and applies
-   glassmorphism overrides to framework shell components.
-   Keep this file last in the import order so these rules
-   take precedence over base component styles.
+   Shared appearance for the toolbox shell and tool views.
    ============================================================ */
 
 :root {
-  --page-bg: #f6f8fc;
-  --surface: rgba(255, 255, 255, 0.84);
-  --surface-solid: #ffffff;
-  --surface-soft: #eef3fb;
-  --border: rgba(116, 137, 166, 0.22);
-  --text: #1f2937;
-  --muted: #667085;
-  --accent: #1a73e8;
-  --accent-strong: #1558d6;
-  --accent-soft: #e8f0fe;
-  --danger: #c5221f;
-  --shadow-sm: 0 8px 24px rgba(31, 41, 55, 0.08);
-  --shadow-md: 0 18px 48px rgba(60, 64, 67, 0.14);
+  --page-bg: #eaf0f8;
+  --page-background:
+    radial-gradient(ellipse at 9% 2%, #c8d9f4 0%, transparent 46%),
+    radial-gradient(ellipse at 97% 12%, #dce0f7 0%, transparent 40%),
+    radial-gradient(ellipse at 52% 100%, #dbe9f6 0%, transparent 50%),
+    linear-gradient(150deg, #edf3fa, #f4f7fc 57%, #e9f0f9);
+  --surface: #f8fafe;
+  --surface-solid: #fff;
+  --surface-soft: #eef3fa;
+  --border: #cbd7e7;
+  --control-border: #b9c8dc;
+  --text: #1c2b40;
+  --muted: #54647a;
+  --accent: #295bac;
+  --accent-strong: #204987;
+  --accent-soft: #dfeafb;
+  --accent-border: #98b4dd;
+  --danger: #b42318;
+  --focus-ring: #315fae;
+  --focus-shadow: 0 0 0 3px #315fae29;
+  --scrim: #1d2b465c;
+  --shadow-sm: 0 3px 12px #283f6412;
+  --shadow-md: 0 12px 32px #283f6426, 0 2px 6px #283f6410;
+
+  --glass-edge: inset 1px 1px 0 #ffffffef, inset -1px -1px 0 #6382ae23;
+  --glass-shadow: var(--glass-edge), var(--shadow-sm);
+  --glass-raised-shadow: var(--glass-edge), var(--shadow-md);
+  --glass-dialog-shadow: var(--glass-edge), 0 0 0 1px #a8bad399, 0 24px 60px #162b5142, 0 4px 12px #162b511a;
+  --glass-card: linear-gradient(145deg, #fff 0%, #f2f6fd 100%);
+  --glass-control: linear-gradient(160deg, #fff 0%, #eef4fc 100%);
+  --glass-selected: linear-gradient(160deg, #f5f9ff 0%, #dbe8fa 100%);
+  --glass-action: linear-gradient(168deg, #4775bd 0%, var(--accent) 64%, #26549e 100%);
+  --glass-action-hover: linear-gradient(168deg, #3866af 0%, var(--accent-strong) 100%);
+  --glass-action-shadow: inset 0 1px 0 #ffffff4d, 0 3px 8px #295bac32;
+  --glass-tint: #eff4fb;
+  --glass-dialog-tint: #f4f7fc;
+  --glass-chrome: linear-gradient(150deg, #ffffffb8 0%, #ffffff26 57%, #f1f6ff66 100%) var(--glass-tint);
+  --glass-dialog: linear-gradient(155deg, #ffffffca 0%, #ffffff24 100%) var(--glass-dialog-tint);
+  --glass-filter: none;
+  --glass-scrim-filter: none;
+}
+
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  :root {
+    --glass-tint: #e9f2fc94;
+    --glass-dialog-tint: #f1f6fdf4;
+    --glass-filter: blur(14px) saturate(1.18);
+    --glass-scrim-filter: blur(6px);
+  }
 }
 
 body {
   color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(66, 133, 244, 0.12), transparent 34rem),
-    radial-gradient(circle at 88% 10%, rgba(26, 115, 232, 0.08), transparent 26rem),
-    linear-gradient(135deg, #f8fbff 0%, #f2f5fb 54%, #f9fbff 100%);
+  background: var(--page-background) var(--page-bg);
+}
+
+.app-shell :is(a[href], button, input, select, summary, textarea:not(.xterm-helper-textarea)):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.app-shell :is(a.nav-item, button.settings-tab):focus-visible {
+  outline-offset: -2px;
+}
+
+/* The pseudo-element blurs the view behind a dialog without affecting fixed descendants. */
+:is(
+  .modal-backdrop,
+  .csm-modal-backdrop,
+  .dm-modal-backdrop,
+  .gb-modal-backdrop:not(.gb-nested-backdrop),
+  .sn-modal-backdrop,
+  .sw-modal-backdrop,
+  .tb-modal-backdrop,
+  .web-proxy-modal-backdrop
+)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  -webkit-backdrop-filter: var(--glass-scrim-filter);
+  backdrop-filter: var(--glass-scrim-filter);
 }
 
 /* ── App Shell ── */
@@ -43,12 +101,13 @@ body {
   top: 16px;
   align-self: start;
   min-height: calc(100dvh - 32px);
-  color: #3c4043;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.72);
+  color: var(--text);
+  background: var(--glass-chrome);
+  border: 1px solid var(--border);
   border-radius: 30px;
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(24px);
+  box-shadow: var(--glass-raised-shadow);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
   padding: 18px;
 }
 
@@ -65,10 +124,8 @@ body {
   height: 44px;
   border-radius: 16px;
   color: #ffffff;
-  background:
-    radial-gradient(circle at 30% 20%, #ffffff 0 8%, transparent 9%),
-    linear-gradient(135deg, #4285f4, #1a73e8 58%, #7baaf7);
-  box-shadow: 0 14px 30px rgba(66, 133, 244, 0.25);
+  background: var(--glass-action);
+  box-shadow: var(--glass-action-shadow);
 }
 
 .brand-copy {
@@ -96,10 +153,9 @@ body {
 
 .nav-item.active,
 .nav-item:hover {
-  color: #174ea6;
-  background: #e8f0fe;
-  box-shadow: inset 0 0 0 1px rgba(66, 133, 244, 0.08);
-  transform: translateX(2px);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  box-shadow: var(--glass-edge), inset 0 0 0 1px var(--accent-border), 0 2px 8px #295bac16;
 }
 
 .main-content {
@@ -148,17 +204,18 @@ body {
   align-items: center;
   gap: 8px;
   min-height: 44px;
-  border: 1px solid rgba(116, 137, 166, 0.22);
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 16px;
-  color: #344054;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(14px);
+  color: var(--text);
+  background: var(--glass-chrome);
+  box-shadow: var(--glass-raised-shadow);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
   cursor: pointer;
 }
 
-/* ── Surfaces (glassmorphism) ── */
+/* ── Surfaces ── */
 
 .content-band,
 .tool-card,
@@ -166,11 +223,19 @@ body {
 .panel,
 .empty-state,
 .error-box {
-  background: var(--surface);
-  border: 1px solid rgba(255, 255, 255, 0.72);
+  background: var(--glass-card);
+  border: 1px solid var(--border);
   border-radius: 26px;
-  box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(18px);
+  box-shadow: var(--glass-shadow);
+}
+
+.content-band {
+  background: var(--glass-chrome);
+}
+
+.error-box {
+  background: #fff5f5;
+  border-color: #efb7b5;
 }
 
 /* ── Tool Card (home page) ── */
@@ -182,13 +247,12 @@ body {
   padding: 20px 22px;
   position: relative;
   overflow: hidden;
-  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+  transition: box-shadow 180ms ease, border-color 180ms ease;
 }
 
 .tool-card:hover {
-  transform: translateY(-4px);
-  border-color: rgba(66, 133, 244, 0.2);
-  box-shadow: var(--shadow-md);
+  border-color: var(--accent-border);
+  box-shadow: var(--glass-raised-shadow);
 }
 
 .tool-card h3 {
@@ -235,15 +299,16 @@ body {
   gap: 7px;
   height: 38px;
   padding: 0 12px;
-  border: 1px solid #d7dfeb;
+  border: 1px solid var(--control-border);
   border-radius: 9px;
   color: #344054;
-  background: #fff;
+  background: var(--glass-control);
+  box-shadow: var(--glass-shadow);
   font-size: 13px;
   font-weight: 650;
 }
 
-.home-customize-button:hover { border-color: #7c6df0; color: #5144df; }
+.home-customize-button:hover { border-color: var(--accent-border); color: var(--accent-strong); background: var(--glass-selected); }
 
 .tool-grid-list {
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
@@ -261,8 +326,6 @@ body {
   text-decoration: none;
   cursor: pointer;
 }
-
-.tool-card-link:hover { transform: translateY(-2px); }
 
 .tool-card-disabled {
   opacity: .48;
@@ -293,7 +356,7 @@ body {
 .tool-category {
   max-width: 48%;
   overflow: hidden;
-  color: #7a8598;
+  color: var(--muted);
   font-size: 12px;
   line-height: 22px;
   text-overflow: ellipsis;
@@ -309,7 +372,7 @@ body {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(15, 23, 42, .38);
+  background: var(--scrim);
 }
 
 .home-customizer-modal {
@@ -318,10 +381,12 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--border);
   border-radius: 16px;
-  background: #fff;
-  box-shadow: 0 24px 60px rgba(15, 23, 42, .22);
+  background: var(--glass-dialog);
+  box-shadow: var(--glass-dialog-shadow);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
 }
 
 .home-customizer-header,
@@ -333,9 +398,9 @@ body {
   padding: 16px 18px;
 }
 
-.home-customizer-header { border-bottom: 1px solid #edf1f6; }
+.home-customizer-header { border-bottom: 1px solid var(--border); }
 .home-customizer-header h2 { margin: 0; font-size: 18px; }
-.home-customizer-header p { margin: 3px 0 0; color: #7a8598; font-size: 13px; }
+.home-customizer-header p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
 .home-icon-button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 7px; color: #667085; background: transparent; }
 .home-icon-button:hover { background: #f1f4f8; }
 
@@ -344,20 +409,20 @@ body {
 .home-customizer-row:hover { background: #f7f8fb; }
 .home-customizer-row.unavailable { opacity: .52; }
 .home-visibility-button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 7px; color: #556174; background: #edf1f6; }
-.home-visibility-button:hover { color: #5144df; background: #ebe9ff; }
+.home-visibility-button:hover { color: var(--accent-strong); background: var(--accent-soft); }
 .home-customizer-name { display: grid; flex: 1; min-width: 0; gap: 2px; }
 .home-customizer-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-.home-customizer-name span { color: #8993a4; font-size: 12px; }
+.home-customizer-name span { color: var(--muted); font-size: 12px; }
 .home-sort-actions { display: inline-flex; gap: 2px; }
 .home-sort-actions button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: #556174; background: transparent; }
-.home-sort-actions button:hover:not(:disabled) { color: #5144df; background: #ebe9ff; }
+.home-sort-actions button:hover:not(:disabled) { color: var(--accent-strong); background: var(--accent-soft); }
 .home-sort-actions button:disabled { cursor: default; opacity: .3; }
-.home-customizer-footer { border-top: 1px solid #edf1f6; }
+.home-customizer-footer { border-top: 1px solid var(--border); }
 .home-customizer-footer > div { display: flex; align-items: center; gap: 8px; }
 .home-text-button { padding: 8px 10px; border-radius: 7px; color: #596579; background: transparent; font-size: 13px; }
 .home-text-button:hover { background: #f1f4f8; }
-.home-save-button { padding: 8px 16px; border-radius: 7px; color: #fff; background: #5144df; font-size: 13px; font-weight: 650; }
-.home-save-button:hover { background: #4437ca; }
+.home-save-button { padding: 8px 16px; border-radius: 7px; color: #fff; background: var(--glass-action); box-shadow: var(--glass-action-shadow); font-size: 13px; font-weight: 650; }
+.home-save-button:hover { background: var(--glass-action-hover); }
 
 .card-topline {
   display: flex;
@@ -379,7 +444,7 @@ body {
 
 .card-footer > span:first-child {
   color: #475467;
-  background: rgba(238, 243, 251, 0.9);
+  background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 4px 8px;
@@ -397,8 +462,9 @@ body {
   width: 46px;
   height: 46px;
   border-radius: 18px;
-  color: #174ea6;
-  background: var(--accent-soft);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  box-shadow: var(--glass-edge);
 }
 
 .tool-icon.image-icon {
@@ -437,23 +503,29 @@ body {
 .auth-status,
 .auth-status.button-like {
   color: #344054;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--glass-control);
   border: 1px solid var(--border);
-  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.08);
+  box-shadow: var(--glass-shadow);
 }
 
 .auth-status.button-like:hover {
-  color: #174ea6;
-  background: var(--accent-soft);
-  border-color: rgba(66, 133, 244, 0.22);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  border-color: var(--accent-border);
 }
 
 /* ── Auth Role ── */
 
 .auth-role {
-  color: #174ea6;
+  color: var(--accent-strong);
   background: var(--accent-soft);
-  border: 1px solid rgba(66, 133, 244, 0.16);
+  border: 1px solid var(--accent-border);
+}
+
+.auth-role-superadmin {
+  color: #fff;
+  background: var(--glass-action);
+  border-color: var(--accent);
 }
 
 /* ── Data Badge ── */
@@ -463,45 +535,33 @@ body {
   align-items: center;
   gap: 4px;
   color: #475467;
-  background: rgba(238, 243, 251, 0.9);
+  background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 4px 8px;
 }
 
-/* ── Shared surface override (monitor/gpu/modal/chart cards) ── */
-
-.content-band,
-.tool-card,
-.widget,
-.panel,
-.empty-state,
-.error-box,
-.monitor-section,
-.metric-card,
-.mini-chart,
-.disk-card,
-.directory-result,
-.gpu-card,
-.modal-panel,
-.settings-card,
-.history-view,
-.process-row {
-  background: var(--surface);
-  border-color: rgba(255, 255, 255, 0.72);
-  box-shadow: var(--shadow-sm);
-}
-
 /* ── Search Box & Toolbar ── */
 
 .search-box,
-.toolbar,
-.server-selector,
-.monitor-toolbar,
-.layout-toolbar {
-  background: rgba(255, 255, 255, 0.74);
+.toolbar {
+  background: var(--glass-chrome);
   border-color: var(--border);
-  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.07);
+  box-shadow: var(--glass-shadow);
+}
+
+.search-box:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: var(--glass-edge), var(--focus-shadow);
+}
+
+.app-shell .search-box input:focus-visible {
+  outline: 0;
+}
+
+.toolbar {
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
 }
 
 .page-header {
@@ -535,13 +595,9 @@ body {
 
 .chip {
   color: #344054;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--glass-control);
   border-color: var(--border);
-  box-shadow: 0 4px 12px rgba(60, 64, 67, 0.05);
-}
-
-.content-band {
-  border-color: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--glass-edge);
 }
 
 /* ── Active States (accent colour) ── */
@@ -551,9 +607,9 @@ body {
 .server-tab:hover,
 .mount-chip.active,
 .segmented-control button.active {
-  color: #174ea6;
-  background: var(--accent-soft);
-  border-color: rgba(66, 133, 244, 0.28);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  border-color: var(--accent-border);
 }
 
 /* Home overrides are kept last so the shared responsive card rules do not
@@ -619,13 +675,13 @@ body {
 /* ── Primary Button ── */
 
 .primary-button {
-  background: var(--accent);
+  background: var(--glass-action);
   border-color: var(--accent);
-  box-shadow: 0 12px 24px rgba(26, 115, 232, 0.18);
+  box-shadow: var(--glass-action-shadow);
 }
 
 .primary-button:hover:not(:disabled) {
-  background: var(--accent-strong);
+  background: var(--glass-action-hover);
   border-color: var(--accent-strong);
 }
 
@@ -641,9 +697,26 @@ body {
   border-radius: 999px;
   padding: 0 18px;
   color: #344054;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.08);
+  background: var(--glass-control);
+  box-shadow: var(--glass-shadow);
   cursor: pointer;
+}
+
+.icon-button {
+  background: var(--glass-control);
+  border-color: var(--control-border);
+  box-shadow: var(--glass-edge);
+}
+
+:is(.secondary-button, .icon-button):hover:not(:disabled) {
+  background: var(--glass-selected);
+  border-color: var(--accent-border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-card {
+    transition: none;
+  }
 }
 
 /* ── Progress & Usage Bars ── */
@@ -665,8 +738,8 @@ body {
 .gpu-card:hover,
 .disk-card:hover,
 .directory-result:hover {
-  border-color: rgba(66, 133, 244, 0.3);
-  box-shadow: 0 14px 34px rgba(66, 133, 244, 0.14);
+  border-color: var(--accent-border);
+  box-shadow: var(--glass-raised-shadow);
 }
 
 /* ── Disk / Directory grids ── */
@@ -737,10 +810,6 @@ body {
 }
 
 @media (max-width: 640px) {
-  body {
-    background: #f6f8fc;
-  }
-
   .app-shell {
     gap: 10px;
     padding: 8px;
@@ -778,11 +847,6 @@ body {
     gap: 6px;
     padding: 0 10px;
     border-radius: 14px;
-  }
-
-  .nav-item.active,
-  .nav-item:hover {
-    transform: none;
   }
 
   .auth-status.button-like {

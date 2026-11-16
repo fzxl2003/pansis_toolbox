@@ -22,16 +22,18 @@
 }
 
 .em-task-card {
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-card);
   border: 1px solid var(--border);
   border-radius: 14px;
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
+  border-color: var(--border);
+  box-shadow: var(--glass-shadow);
 }
 
 .em-task-card.selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.1);
+  border-color: var(--accent-border);
+  box-shadow: var(--glass-raised-shadow);
 }
 
 .em-task-card.disabled {
@@ -256,9 +258,11 @@
   flex-direction: column;
   gap: 18px;
   padding: 20px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--glass-card);
   border: 1px solid var(--border);
   border-radius: 14px;
+  border-color: var(--border);
+  box-shadow: var(--glass-shadow);
 }
 
 /* ── Events ── */
@@ -592,9 +596,10 @@ textarea.monospace {
 }
 
 .log-tab.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
+  background: var(--glass-selected);
+  color: var(--accent-strong);
+  border-color: var(--accent-border);
+  box-shadow: var(--glass-edge);
 }
 
 .em-log-timeline {
@@ -879,20 +884,21 @@ textarea.monospace {
 
 .sg-desc {
   font-size: 13px;
-  color: var(--text-muted);
+  color: var(--muted);
   margin: 0;
   line-height: 1.5;
   flex: 1;
 }
 
 .sg-create-form {
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--surface);
   border-radius: 10px;
   padding: 14px;
   border: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 10px;
+  border-color: var(--border);
 }
 
 .sg-create-form-footer {
@@ -976,9 +982,10 @@ textarea.monospace {
 }
 
 .sg-tab.active {
-  color: var(--accent);
+  color: var(--accent-strong);
   border-bottom-color: var(--accent);
-  background: transparent;
+  background: var(--glass-selected);
+  box-shadow: var(--glass-edge);
 }
 
 /* ── Tab Content ── */
@@ -1337,10 +1344,11 @@ textarea.monospace {
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   transition: border-color 0.15s;
+  border-color: var(--border);
 }
 
 .em-server-item:hover {

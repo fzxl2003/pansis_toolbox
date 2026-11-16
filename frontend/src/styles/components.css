@@ -1572,6 +1572,11 @@
   margin-bottom: 12px;
 }
 
+.storage-donuts.has-category-chart {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  align-items: start;
+}
+
 .donut-card {
   display: grid;
   gap: 12px;
@@ -1624,7 +1629,8 @@
   max-width: 280px;
 }
 
-.donut-legend li {
+.donut-legend li,
+.donut-legend button {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1635,7 +1641,23 @@
   transition: background 120ms ease;
 }
 
-.donut-legend li:hover {
+.donut-legend li:has(> button) {
+  padding: 0;
+}
+
+.donut-legend button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.donut-legend button:disabled {
+  cursor: default;
+}
+
+.donut-legend li:has(> button:not(:disabled)):hover {
   background: rgba(0, 0, 0, 0.03);
 }
 

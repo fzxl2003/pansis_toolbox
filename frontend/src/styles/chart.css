@@ -7,7 +7,7 @@
 .scatter-chart {
   display: grid;
   gap: 10px;
-  background: var(--surface, #ffffff);
+  background: var(--surface-solid);
   border: 1px solid var(--border, #dce3ec);
   border-radius: 10px;
   padding: 14px 16px;

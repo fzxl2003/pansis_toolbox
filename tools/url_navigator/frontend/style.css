@@ -10,6 +10,9 @@
   grid-template-columns: minmax(220px, 420px) minmax(0, 1fr);
   align-items: center;
   gap: 12px;
+  background: var(--glass-chrome);
+  border-color: var(--border);
+  box-shadow: var(--glass-shadow);
 }
 
 /* ── Navigator Card Grid ── */
@@ -27,6 +30,9 @@
   display: grid;
   gap: 14px;
   min-height: 230px;
+  background: var(--glass-card);
+  border-color: var(--border);
+  box-shadow: var(--glass-shadow);
 }
 
 .site-card-top {
@@ -85,9 +91,9 @@
   width: 52px;
   height: 52px;
   border-radius: 18px;
-  color: #174ea6;
-  background: #e8f0fe;
-  box-shadow: inset 0 0 0 1px rgba(66, 133, 244, 0.12);
+  color: var(--accent-strong);
+  background: var(--glass-selected);
+  box-shadow: var(--glass-edge);
   object-fit: cover;
 }
 
@@ -107,12 +113,13 @@
   place-items: center;
   width: 36px;
   height: 36px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 999px;
   color: #475467;
-  background: rgba(255, 255, 255, 0.74);
+  background: var(--glass-control);
   cursor: pointer;
   list-style: none;
+  box-shadow: var(--glass-edge);
 }
 
 .site-menu summary::-webkit-details-marker {
@@ -127,12 +134,13 @@
   display: grid;
   min-width: 150px;
   gap: 4px;
-  border: 1px solid rgba(116, 137, 166, 0.22);
+  border: 1px solid var(--border);
   border-radius: 18px;
   padding: 8px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(18px);
+  background: var(--glass-dialog);
+  box-shadow: var(--glass-raised-shadow);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
 }
 
 .site-menu-popover button {
@@ -150,7 +158,7 @@
 }
 
 .site-menu-popover button:hover {
-  background: #e8f0fe;
+  background: var(--glass-selected);
   transform: none;
 }
 
@@ -181,14 +189,16 @@
   border-radius: 18px;
   padding: 10px 12px;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.66);
+  background: var(--glass-control);
   text-decoration: none;
+  border-color: var(--control-border);
+  box-shadow: var(--glass-edge);
 }
 
 .entry-pill:hover {
-  border-color: rgba(66, 133, 244, 0.3);
-  background: #ffffff;
-  box-shadow: 0 8px 22px rgba(60, 64, 67, 0.1);
+  border-color: var(--accent-border);
+  background: var(--glass-selected);
+  box-shadow: var(--glass-shadow);
 }
 
 .entry-pill span {
